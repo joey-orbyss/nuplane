@@ -1,6 +1,6 @@
 # Read-only catalog admission for Maintenance
 
-Status: root and independent source/Runtime/Integration review passed locally, 2026-10-11. Exact-head native qualification of this increment is pending. Full T051, selected-label public inspection, T116/T117 and pruning remain open.
+Status: bounded increment accepted after root and independent local/native review, 2026-10-11. Full T051, selected-label public inspection, T116/T117 and pruning remain open.
 
 ## Existing promise and narrow correction
 
@@ -22,4 +22,10 @@ Restored Release/net10 Runtime passed 933 tests with two existing platform-speci
 
 The native coordinated-runtime manifest retains all previous 52 requirements and adds the five exact actual passing TRX names, requiring 57 cases. Its strict verifier passed against a derived 57-row subset of the actual full Runtime run; this was not a separate test run. Independent reviews checked source, actual TRX results, stable-ID comparisons, causal failures, restored source hash and exact manifest coverage. Initial audit assumptions about xUnit error wording and unique display names were corrected against saved results without test reruns.
 
-The earlier Complete/v1 pending child-process proof is accepted separately at exact `080456f`; it does not qualify this new production change. Native Windows/Linux/macOS qualification remains pending. No selected-label public Admin operation, ordinary standalone SaveAsync routing, schema-2 activation, enrollment/migration or package deletion is added. The owner's first support-policy card remains unanswered; this fix is independent of that choice.
+The earlier Complete/v1 pending child-process proof is accepted separately at exact `080456f`; it does not qualify this new production change. No selected-label public Admin operation, ordinary standalone SaveAsync routing, schema-2 activation, enrollment/migration or package deletion is added. The owner's first support-policy card remains unanswered; this fix is independent of that choice.
+
+## Native acceptance
+
+[Validate 38148031094](https://github.com/valence-works/nuplane/actions/runs/38148031094) passed all seven jobs and five native lanes at exact `ea261fbb0d307b0ccb1c5581d955f05e3da5e258`. Root and independent raw-log/source audits reconciled all 75 source pins. Each native lane passed all 57 required runtime cases, including the five Maintenance cases, without skips. The unchanged 36-case process, 25-case retained-loading, 26-case graph-use recovery and 11-case same-handle recovery gates also passed. Full six-suite CI reported 2,386 passes, zero failures and 68 explicit platform skips.
+
+Together with the compiled condition-omission control, this accepts the bounded no-mutation correction. The [bounded claim is released](https://github.com/valence-works/nuplane/issues/108#issuecomment-6110359014). Complete T051/T116/T117 and pruning remain open; the accepted checklist remains 45/128.
