@@ -2,6 +2,10 @@
 
 Names below are the selected public contract shapes; implementation must supply XML documentation and preserve existing interfaces/positional records. Optional companions do not add required members to current consumer implementations.
 
+## Support boundary
+
+Ordinary Nuplane retains its existing compatibility. Coordinated enrollment and pruning require verified native filesystem capabilities and participation by every client sharing the store, including clients that do not enable maintenance locally. The operator establishes that participation during the quiescent cutover; runtime cannot discover arbitrary legacy or external users. Unsupported native observation never proves that a root or state slot is unenrolled, and a participating client cannot silently fall back to an unguarded write. See the [maintainer's compatibility decision](../evidence/pruning-support-policy.md) for implementation and acceptance limits.
+
 ## Core capability surface
 
 | Contract | Operation / ownership |
