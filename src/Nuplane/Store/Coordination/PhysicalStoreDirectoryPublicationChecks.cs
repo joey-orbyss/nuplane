@@ -52,9 +52,9 @@ internal static class PhysicalStoreDirectoryPublicationChecks
         return entry;
     }
 
-    private static PhysicalStoreCanonicalName ObserveExactDirectory(
+    internal static PhysicalStoreCanonicalName ObserveExactDirectory(
         IPhysicalStoreFileSystem files,
-        IPhysicalStoreDirectoryPublicationFileSystem directories,
+        IPhysicalStoreDirectoryNameFileSystem directories,
         PhysicalStoreDirectoryHandle parent,
         string singleName,
         PhysicalFileIdentity expectedIdentity)
