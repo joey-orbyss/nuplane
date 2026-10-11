@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Options;
 using Nuplane.Abstractions;
-using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Capabilities;
 using Nuplane.Reconciliation.Configuration;
 using Nuplane.Runtime.Tests.TestSupport;
@@ -37,22 +36,19 @@ public sealed class CapabilityDesiredStateContributorTests : IDisposable
     public void Dispose() => _packages.Dispose();
 
     [Fact]
-    public async Task ContributeAsync_WhenMetadataAdmissionIsRefused_ThrowsWithoutMemoizingAbsence()
+    public async Task ContributeAsync_WithoutBorrowRetainsOrdinaryCompatibilityWithIncidentalControlData()
     {
         Select("PostgreSql");
         var module = DeclaringModule();
         var control = Directory.CreateDirectory(Path.Combine(module.InstallPath, ".nuplane-store"));
-
-        var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() => ContributeAsync([module]));
-
-        Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
-        Assert.Empty(_logger.Selected);
-        control.Delete();
+        File.WriteAllText(Path.Combine(control.FullName, "membership.json"), "{");
 
         var contribution = await ContributeAsync([module]);
 
         Assert.Equal(EnginePackageId, Assert.Single(contribution.Requests).Request.Id);
-        Assert.Equal(2, _reader.CountFor(module.Id));
+        Assert.Empty(contribution.Refusals);
+        Assert.Equal(1, _reader.CountFor(module.Id));
+        Assert.Single(_logger.Selected);
     }
 
     [Fact]

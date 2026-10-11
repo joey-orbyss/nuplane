@@ -12,18 +12,21 @@ public sealed class PackageMetadataLoadModeReaderTests : IDisposable
         File.WriteAllText(Path.Combine(installPath, PackageMetadataLoadModeReader.MetadataFileName), json);
 
     [Fact]
-    public void Read_WhenMetadataAdmissionIsRefused_ThrowsInsteadOfReturningMissing()
+    public void Read_WithoutGraphUseLeaseRetainsOrdinaryCompatibilityWithIncidentalControlData()
     {
         var installPath = PackageMetadataTestSupport.CreateInstallDir(_tempDir, "pkg-refused");
         PackageMetadataTestSupport.WriteMetadata(installPath, PackageLoadMode.HostIntegrated,
             LoadModeScopes.DependencyClosure, "Requires host integration.");
         var control = Directory.CreateDirectory(Path.Combine(installPath, ".nuplane-store"));
+        File.WriteAllText(Path.Combine(control.FullName, "membership.json"), "{");
         var sut = new PackageMetadataLoadModeReader();
 
-        var refusal = Assert.Throws<PackageStoreAdmissionException>(() => sut.Read("pkg-refused", "1.0.0", installPath));
+        var result = sut.Read("pkg-refused", "1.0.0", installPath);
 
-        Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
-        control.Delete();
+        Assert.True(result.MetadataFound);
+        Assert.True(result.IsValid);
+        Assert.Equal(PackageLoadMode.HostIntegrated, result.Metadata!.Loading!.LoadMode);
+        control.Delete(recursive: true);
         Assert.True(sut.Read("pkg-refused", "1.0.0", installPath).IsValid);
     }
 

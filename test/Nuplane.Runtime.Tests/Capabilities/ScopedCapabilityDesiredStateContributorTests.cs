@@ -12,7 +12,7 @@ namespace Nuplane.Runtime.Tests.Capabilities;
 public sealed class ScopedCapabilityDesiredStateContributorTests
 {
     [Fact]
-    public async Task ContributeAsync_NativeMetadataMemo_RequiresTheSameLiveOwnerAndNeverServesLegacyReads()
+    public async Task ContributeAsync_NativeMetadataMemoUsesLiveOwnerAndFreshOrdinaryReadWithoutBorrow()
     {
         using var fixture = await EnrolledEmptyPackageStoreFixture.CreateAsync();
         var context = PrepareContext(fixture);
@@ -31,10 +31,41 @@ public sealed class ScopedCapabilityDesiredStateContributorTests
         var expired = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
             contributor.ContributeAsync(context, borrow, CancellationToken.None));
         Assert.Equal(PackageStoreAdmissionReason.ExpiredScope, expired.Reason);
-        await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
-            contributor.ContributeAsync(context, CancellationToken.None));
+
+        File.WriteAllText(Path.Combine(context.ResolvedPackages[0].InstallPath, NuplanePackageMetadataReader.MetadataFileName),
+            InstalledPackageStore.CapabilityMetadata("engine", ("chosen", "Acme.Replacement", "[1.0.0]")));
+        var ordinary = await contributor.ContributeAsync(context, CancellationToken.None);
+
+        Assert.Equal("Acme.Replacement", Assert.Single(ordinary.Requests).Request.Id);
         Assert.Equal(1, reader.ScopedReads);
         Assert.Equal(1, reader.LegacyReads);
+    }
+
+    [Fact]
+    public async Task ContributeAsync_WhenScopedMetadataAdmissionIsRefused_ThrowsWithoutMemoizingAbsence()
+    {
+        using var fixture = await EnrolledEmptyPackageStoreFixture.CreateAsync();
+        var context = PrepareContext(fixture);
+        var module = Assert.Single(context.ResolvedPackages);
+        var control = Directory.CreateDirectory(Path.Combine(module.InstallPath, ".nuplane-store"));
+        var reader = new CountingScopedReader();
+        var contributor = CreateContributor(reader);
+        await using var operation = await fixture.Admission.AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Reconciliation);
+        using var borrow = operation.Owner!.Borrow();
+
+        var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
+            contributor.ContributeAsync(context, borrow, CancellationToken.None));
+
+        Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
+        Assert.Equal(1, reader.ScopedReads);
+        Assert.Equal(0, reader.LegacyReads);
+
+        control.Delete(recursive: true);
+        var recovered = await contributor.ContributeAsync(context, borrow, CancellationToken.None);
+
+        Assert.Equal("Acme.Engine", Assert.Single(recovered.Requests).Request.Id);
+        Assert.Equal(2, reader.ScopedReads);
+        Assert.Equal(0, reader.LegacyReads);
     }
 
     [Fact]

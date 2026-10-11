@@ -187,12 +187,12 @@ public sealed class NuplanePackageMetadataReaderAdmissionTests
     }
 
     [SupportedPhysicalStoreFact]
-    public async Task UnscopedRead_RefusesAnEnrolledInstallBeforeParsingItsMetadata()
+    public async Task GuardedUnscopedRead_RefusesAnEnrolledInstallBeforeParsingItsMetadata()
     {
         using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
         WriteMetadata(context.SharedInstallPath, ValidMetadata);
 
-        var result = new NuplanePackageMetadataReader().Read(
+        var result = new NuplanePackageMetadataReader().ReadGuardedUnscoped(
             "Shared.Dependency", "2.1.0", context.SharedInstallPath);
 
         Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, result.AdmissionRefusalReason);
@@ -201,12 +201,12 @@ public sealed class NuplanePackageMetadataReaderAdmissionTests
     }
 
     [SupportedPhysicalStoreFact]
-    public async Task UnscopedRead_RefusesAnIncompleteInstallBeforeParsingItsMetadata()
+    public async Task GuardedUnscopedRead_RefusesAnIncompleteInstallBeforeParsingItsMetadata()
     {
         using var context = await RootMembershipProtectionVerificationTests.Context.CreateAsync();
         WriteMetadata(context.SharedInstallPath, ValidMetadata);
 
-        var result = new NuplanePackageMetadataReader().Read(
+        var result = new NuplanePackageMetadataReader().ReadGuardedUnscoped(
             "Shared.Dependency", "2.1.0", context.SharedInstallPath);
 
         Assert.Equal(PackageStoreAdmissionReason.IncompleteEnrollment, result.AdmissionRefusalReason);
@@ -215,12 +215,12 @@ public sealed class NuplanePackageMetadataReaderAdmissionTests
     }
 
     [SupportedPhysicalStoreFact]
-    public async Task UnscopedRead_RefusesAMissingInstallSuffixBelowCompleteAuthority()
+    public async Task GuardedUnscopedRead_RefusesAMissingInstallSuffixBelowCompleteAuthority()
     {
         using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
         var missingInstallPath = Path.Combine(context.SharedInstallPath, "missing-package");
 
-        var result = new NuplanePackageMetadataReader().Read(
+        var result = new NuplanePackageMetadataReader().ReadGuardedUnscoped(
             "Missing.Package", "1.0.0", missingInstallPath);
 
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, result.AdmissionRefusalReason);
@@ -228,12 +228,12 @@ public sealed class NuplanePackageMetadataReaderAdmissionTests
     }
 
     [SupportedPhysicalStoreFact]
-    public async Task UnscopedRead_RefusesAMissingInstallSuffixBelowIncompleteAuthority()
+    public async Task GuardedUnscopedRead_RefusesAMissingInstallSuffixBelowIncompleteAuthority()
     {
         using var context = await RootMembershipProtectionVerificationTests.Context.CreateAsync();
         var missingInstallPath = Path.Combine(context.SharedInstallPath, "missing-package");
 
-        var result = new NuplanePackageMetadataReader().Read(
+        var result = new NuplanePackageMetadataReader().ReadGuardedUnscoped(
             "Missing.Package", "1.0.0", missingInstallPath);
 
         Assert.Equal(PackageStoreAdmissionReason.IncompleteEnrollment, result.AdmissionRefusalReason);
@@ -241,7 +241,7 @@ public sealed class NuplanePackageMetadataReaderAdmissionTests
     }
 
     [SupportedPhysicalStoreFact]
-    public async Task UnscopedRead_RefusesAnEnrolledRootAliasBeforeParsingItsMetadata()
+    public async Task GuardedUnscopedRead_RefusesAnEnrolledRootAliasBeforeParsingItsMetadata()
     {
         using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
         WriteMetadata(context.SharedInstallPath, ValidMetadata);
@@ -250,12 +250,70 @@ public sealed class NuplanePackageMetadataReaderAdmissionTests
         var relativeInstallPath = Path.GetRelativePath(context.Fixture.PackageInstallRoot, context.SharedInstallPath);
         var aliasedInstallPath = Path.Combine(aliasRoot, relativeInstallPath);
 
-        var result = new NuplanePackageMetadataReader().Read(
+        var result = new NuplanePackageMetadataReader().ReadGuardedUnscoped(
             "Shared.Dependency", "2.1.0", aliasedInstallPath);
 
         Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, result.AdmissionRefusalReason);
         Assert.False(result.MetadataFound);
         Assert.False(result.IsValid);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task DefaultRead_WhenInstallIsUnderCompleteAuthority_UsesReleasedMetadataBehavior()
+    {
+        using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        WriteMetadata(context.SharedInstallPath, ValidMetadata);
+
+        AssertOrdinaryReadValid(context.SharedInstallPath);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task DefaultRead_WhenInstallIsUnderIncompleteAuthority_UsesReleasedMetadataBehavior()
+    {
+        using var context = await RootMembershipProtectionVerificationTests.Context.CreateAsync();
+        WriteMetadata(context.SharedInstallPath, ValidMetadata);
+
+        AssertOrdinaryReadValid(context.SharedInstallPath);
+    }
+
+    [Fact]
+    public void DefaultRead_WhenAncestorContainsMalformedMembershipLedger_UsesReleasedMetadataBehavior()
+    {
+        using var fixture = new PackageStoreFixture();
+        var installPath = fixture.CreateDirectory("packages/Shared.Dependency/2.1.0");
+        var control = Directory.CreateDirectory(Path.Combine(fixture.PackageInstallRoot,
+            RootMembershipRegistry.ControlDirectoryName));
+        File.WriteAllText(Path.Combine(control.FullName, RootMembershipRegistry.LedgerName), "{");
+        WriteMetadata(installPath, ValidMetadata);
+
+        AssertOrdinaryReadValid(installPath);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public void DefaultRead_FollowsPackageInstallAndRootAliases()
+    {
+        using var fixture = new PackageStoreFixture();
+        var installPath = fixture.CreateDirectory("packages/Shared.Dependency/2.1.0");
+        WriteMetadata(installPath, ValidMetadata);
+        var installAlias = installPath + "-alias";
+        Directory.CreateSymbolicLink(installAlias, installPath);
+        var rootAlias = fixture.PackageInstallRoot + "-alias";
+        Directory.CreateSymbolicLink(rootAlias, fixture.PackageInstallRoot);
+        var relativeInstallPath = Path.GetRelativePath(fixture.PackageInstallRoot, installPath);
+
+        AssertOrdinaryReadValid(installAlias);
+        AssertOrdinaryReadValid(Path.Combine(rootAlias, relativeInstallPath));
+    }
+
+    [Fact]
+    public void DefaultRead_WhenMetadataIsMissingInsideExistingInstall_ReturnsMissing()
+    {
+        using var fixture = new PackageStoreFixture();
+        var installPath = fixture.CreateDirectory("packages/Shared.Dependency/2.1.0");
+
+        var result = new NuplanePackageMetadataReader().Read("Shared.Dependency", "2.1.0", installPath);
+
+        Assert.Equal(NuplanePackageMetadataReadResult.Missing, result);
     }
 
     [SupportedPhysicalStoreFact]
@@ -315,6 +373,15 @@ public sealed class NuplanePackageMetadataReaderAdmissionTests
         var path = Path.Combine(installPath, NuplanePackageMetadataReader.MetadataFileName);
         File.WriteAllText(path, metadata);
         return path;
+    }
+
+    private static void AssertOrdinaryReadValid(string installPath)
+    {
+        var result = new NuplanePackageMetadataReader().Read("Shared.Dependency", "2.1.0", installPath);
+        Assert.Null(result.AdmissionRefusalReason);
+        Assert.True(result.MetadataFound);
+        Assert.True(result.IsValid, result.Diagnostic);
+        Assert.Equal("HostIntegrated", result.Metadata!.Loading!.LoadMode);
     }
 
     private static PhysicalFileIdentity GetMetadataIdentity(IPhysicalStoreFileSystem files, string installPath)

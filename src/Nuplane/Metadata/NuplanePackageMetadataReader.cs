@@ -69,9 +69,26 @@ public sealed class NuplanePackageMetadataReader : IPackageMetadataReader, IScop
     /// <returns>A <see cref="NuplanePackageMetadataReadResult"/> describing whether metadata was found and, if so, whether it is valid.</returns>
     public NuplanePackageMetadataReadResult Read(string packageId, string version, string installPath)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
-        ArgumentException.ThrowIfNullOrWhiteSpace(version);
-        ArgumentException.ThrowIfNullOrWhiteSpace(installPath);
+        ValidateReadArguments(packageId, version, installPath);
+
+        var metadataPath = Path.Combine(installPath, MetadataFileName);
+        if (!File.Exists(metadataPath))
+            return NuplanePackageMetadataReadResult.Missing;
+
+        return ExecuteRead(packageId, version, () =>
+        {
+            using var stream = File.OpenRead(metadataPath);
+            return ParseMetadata(packageId, version, stream);
+        });
+    }
+
+    /// <summary>
+    /// Retains the native refusal behavior for internal tests of the unscoped guard. Public ordinary
+    /// reads keep the released BCL path and do not claim coordinated-store authority.
+    /// </summary>
+    internal NuplanePackageMetadataReadResult ReadGuardedUnscoped(string packageId, string version, string installPath)
+    {
+        ValidateReadArguments(packageId, version, installPath);
 
         return ExecuteRead(packageId, version, () =>
             PackageStoreRuntimeAdmission.WithUnenrolledPackageDirectory(
@@ -196,6 +213,13 @@ public sealed class NuplanePackageMetadataReader : IPackageMetadataReader, IScop
             return NuplanePackageMetadataReadResult.Invalid(
                 $"Package metadata for '{packageId}@{version}' could not be accessed: {exception.Message}");
         }
+    }
+
+    private static void ValidateReadArguments(string packageId, string version, string installPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(version);
+        ArgumentException.ThrowIfNullOrWhiteSpace(installPath);
     }
 
     private static NuplanePackageMetadataReadResult ReadNativeDirectory(

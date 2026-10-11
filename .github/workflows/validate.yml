@@ -644,11 +644,16 @@ jobs:
               "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.ScopedRead_UsesHeldNativeFileAndRetainsEveryLockThroughByteRead",
               "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.ScopedRead_WhenMetadataIsAbsent_ReturnsMissingWithoutOpeningAPayloadFile",
               "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.UnscopedRead_PreservesRelativeInstallPathResolution",
-              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.UnscopedRead_RefusesAMissingInstallSuffixBelowCompleteAuthority",
-              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.UnscopedRead_RefusesAMissingInstallSuffixBelowIncompleteAuthority",
-              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.UnscopedRead_RefusesAnEnrolledInstallBeforeParsingItsMetadata",
-              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.UnscopedRead_RefusesAnEnrolledRootAliasBeforeParsingItsMetadata",
-              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.UnscopedRead_RefusesAnIncompleteInstallBeforeParsingItsMetadata",
+              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.GuardedUnscopedRead_RefusesAMissingInstallSuffixBelowCompleteAuthority",
+              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.GuardedUnscopedRead_RefusesAMissingInstallSuffixBelowIncompleteAuthority",
+              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.GuardedUnscopedRead_RefusesAnEnrolledInstallBeforeParsingItsMetadata",
+              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.GuardedUnscopedRead_RefusesAnEnrolledRootAliasBeforeParsingItsMetadata",
+              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.GuardedUnscopedRead_RefusesAnIncompleteInstallBeforeParsingItsMetadata",
+              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.DefaultRead_WhenInstallIsUnderCompleteAuthority_UsesReleasedMetadataBehavior",
+              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.DefaultRead_WhenInstallIsUnderIncompleteAuthority_UsesReleasedMetadataBehavior",
+              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.DefaultRead_WhenAncestorContainsMalformedMembershipLedger_UsesReleasedMetadataBehavior",
+              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.DefaultRead_FollowsPackageInstallAndRootAliases",
+              "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.DefaultRead_WhenMetadataIsMissingInsideExistingInstall_ReturnsMissing",
               "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.UnscopedRead_WhenAuthorityAppearsAndCallbackThrows_ReturnsTheTypedReplayRefusal",
               "Nuplane.Store.Tests.Coordination.NuplanePackageMetadataReaderAdmissionTests.UnscopedRead_WhenTheWholeInstallDirectoryIsMissingBelowUnenrolledAncestry_ReturnsMissing",
               "Nuplane.Store.Tests.Coordination.PackageDirectoryAllowMissingSuffixTests.Resolve_WhenAnObservedMissingEdgeAppearsBeforeReplay_RefusesTheStaleObservation",
@@ -666,7 +671,7 @@ jobs:
               raise SystemExit('native-metadata: required scenario names or multiplicity differ.')
           if any(row.attrib.get('outcome') != 'Passed' for row in rows):
               raise SystemExit('native-metadata: every required scenario must pass without skips.')
-          print('Qualified all 26 native-metadata cases with no skips.')
+          print(f'Qualified all {len(required)} native-metadata cases with no skips.')
           PYCODE
 
       - name: Qualify graph-use lease pins and passive weak lifetime
@@ -1106,34 +1111,34 @@ jobs:
           print(f'Qualified all {len(required)} native held-directory enumeration cases with no skips.')
           PYCODE
 
-      - name: Qualify metadata refusal propagation through capability and loading consumers
+      - name: Qualify no-borrow metadata compatibility in capability and loading consumers
         shell: bash
         run: |
           set -euo pipefail
           dotnet test test/Nuplane.Runtime.Tests/Nuplane.Runtime.Tests.csproj \
             --configuration Release --framework net10.0 \
-            --filter "FullyQualifiedName~ContributeAsync_WhenMetadataAdmissionIsRefused_ThrowsWithoutMemoizingAbsence" \
-            --logger "trx;LogFileName=capability-refusal.trx" \
-            --results-directory "$RUNNER_TEMP/metadata-consumer-refusals"
+            --filter "FullyQualifiedName~ContributeAsync_WithoutBorrowRetainsOrdinaryCompatibilityWithIncidentalControlData" \
+            --logger "trx;LogFileName=capability-compatibility.trx" \
+            --results-directory "$RUNNER_TEMP/metadata-consumers"
           dotnet test test/Nuplane.Loading.Tests/Nuplane.Loading.Tests.csproj \
             --configuration Release --framework net10.0 \
-            --filter "FullyQualifiedName~Read_WhenMetadataAdmissionIsRefused_ThrowsInsteadOfReturningMissing" \
-            --logger "trx;LogFileName=loading-refusal.trx" \
-            --results-directory "$RUNNER_TEMP/metadata-consumer-refusals"
-          python3 - "$RUNNER_TEMP/metadata-consumer-refusals/capability-refusal.trx" "$RUNNER_TEMP/metadata-consumer-refusals/loading-refusal.trx" <<'PYCODE'
+            --filter "FullyQualifiedName~Read_WithoutGraphUseLeaseRetainsOrdinaryCompatibilityWithIncidentalControlData" \
+            --logger "trx;LogFileName=loading-compatibility.trx" \
+            --results-directory "$RUNNER_TEMP/metadata-consumers"
+          python3 - "$RUNNER_TEMP/metadata-consumers/capability-compatibility.trx" "$RUNNER_TEMP/metadata-consumers/loading-compatibility.trx" <<'PYCODE'
           import collections
           import sys
           import xml.etree.ElementTree as ET
           required = [
-              'Nuplane.Runtime.Tests.Capabilities.CapabilityDesiredStateContributorTests.ContributeAsync_WhenMetadataAdmissionIsRefused_ThrowsWithoutMemoizingAbsence',
-              'Nuplane.Loading.Tests.PackageMetadataLoadModeReaderTests.Read_WhenMetadataAdmissionIsRefused_ThrowsInsteadOfReturningMissing',
+              'Nuplane.Runtime.Tests.Capabilities.CapabilityDesiredStateContributorTests.ContributeAsync_WithoutBorrowRetainsOrdinaryCompatibilityWithIncidentalControlData',
+              'Nuplane.Loading.Tests.PackageMetadataLoadModeReaderTests.Read_WithoutGraphUseLeaseRetainsOrdinaryCompatibilityWithIncidentalControlData',
           ]
           rows = [row for path in sys.argv[1:] for row in ET.parse(path).findall('.//{*}UnitTestResult')]
           if collections.Counter(row.attrib['testName'] for row in rows) != collections.Counter(required):
-              raise SystemExit('Both actual metadata-consumer refusal scenarios must execute exactly once.')
+              raise SystemExit('Both no-borrow metadata compatibility scenarios must execute exactly once.')
           if any(row.attrib.get('outcome') != 'Passed' for row in rows):
-              raise SystemExit('Both metadata-consumer refusal scenarios must pass without skips.')
-          print('Qualified both metadata-consumer refusal scenarios with no skips.')
+              raise SystemExit('Both no-borrow metadata compatibility scenarios must pass without skips.')
+          print('Qualified no-borrow capability and loading metadata compatibility with no skips.')
           PYCODE
 
       - name: Run native Unix store adapter and identity tests
