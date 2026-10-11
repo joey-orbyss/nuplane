@@ -16,14 +16,45 @@ public static class PackageContent
     private const int MaximumPackageRootEntries = 16_384;
 
     /// <summary>
-    /// Reads the bytes of a package-relative file from an Unenrolled package directory or archive. Enrolled or
-    /// uncertain package paths return <see langword="null"/> before any content bytes are read.
+    /// Reads the bytes of a package-relative file from a directory or archive using ordinary filesystem access.
     /// </summary>
+    /// <remarks>
+    /// This compatibility entry point does not participate in package-store coordination. Clients of a
+    /// pruning-enabled shared store must use an overload with their live operation borrow or graph-use lease.
+    /// </remarks>
     /// <param name="installPath">The package install path — either an extracted directory or a <c>.nupkg</c> file.</param>
     /// <param name="relativePath">A forward-slash or backslash separated path within the package.</param>
-    /// <returns>The file bytes, or <see langword="null"/> when content is missing or cannot safely be read.</returns>
+    /// <returns>The file bytes, or <see langword="null"/> when content is missing or cannot be read.</returns>
     public static byte[]? TryReadFile(string installPath, string relativePath)
-        => TryReadFileUnscoped(installPath, relativePath, PackageStoreRuntimeAdmission.CreatePhysicalFileSystem());
+    {
+        if (string.IsNullOrWhiteSpace(installPath) || string.IsNullOrWhiteSpace(relativePath) ||
+            OrdinaryPathEscapesRoot(relativePath))
+            return null;
+
+        try
+        {
+            if (Directory.Exists(installPath))
+            {
+                var root = Path.GetFullPath(installPath);
+                var path = Path.GetFullPath(Path.Combine(root,
+                    NormalizeOrdinaryPath(relativePath).Replace('/', Path.DirectorySeparatorChar)));
+                if (!path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+                    return null;
+                return File.Exists(path) ? File.ReadAllBytes(path) : null;
+            }
+
+            return ReadOrdinaryArchive(installPath, archive =>
+            {
+                var entry = archive.Entries.FirstOrDefault(entry => string.Equals(
+                    NormalizeOrdinaryPath(entry.FullName), NormalizeOrdinaryPath(relativePath), StringComparison.OrdinalIgnoreCase));
+                return entry is null ? null : ReadEntry(entry);
+            });
+        }
+        catch (Exception exception) when (IsContentReadFailure(exception))
+        {
+            return null;
+        }
+    }
 
     /// <summary>Reads package content while a live operation borrow admits and protects the exact target path.</summary>
     /// <remarks>The caller retains ownership of <paramref name="borrow"/> and must keep it alive for this call.</remarks>
@@ -78,11 +109,57 @@ public static class PackageContent
     }
 
     /// <summary>
-    /// Finds the first package-root file whose name ends with <paramref name="extension"/> (case-insensitive)
-    /// in an Unenrolled package directory or archive. Enrolled or uncertain paths return null before content reads.
+    /// Finds the first matching package-root file in a directory or archive using ordinary filesystem access.
+    /// Directory matching uses the platform's search-pattern semantics; archive suffix matching is case-insensitive.
     /// </summary>
+    /// <remarks>
+    /// This compatibility entry point does not participate in package-store coordination. Clients of a
+    /// pruning-enabled shared store must use an overload with their live operation borrow or graph-use lease.
+    /// </remarks>
     public static PackageContentFile? TryFindByExtension(string installPath, string extension)
-        => TryFindByExtensionUnscoped(installPath, extension, PackageStoreRuntimeAdmission.CreatePhysicalFileSystem());
+    {
+        if (string.IsNullOrWhiteSpace(installPath) || string.IsNullOrWhiteSpace(extension))
+            return null;
+
+        try
+        {
+            if (Directory.Exists(installPath))
+            {
+                var path = Directory.EnumerateFiles(installPath, "*" + extension, SearchOption.TopDirectoryOnly)
+                    .FirstOrDefault();
+                return path is null ? null : new PackageContentFile(Path.GetFileName(path), File.ReadAllBytes(path));
+            }
+
+            return ReadOrdinaryArchive(installPath, archive =>
+            {
+                var entry = archive.Entries.FirstOrDefault(entry => !NormalizeOrdinaryPath(entry.FullName).Contains('/') &&
+                    entry.FullName.EndsWith(extension, StringComparison.OrdinalIgnoreCase));
+                return entry is null ? null : new PackageContentFile(entry.Name, ReadEntry(entry));
+            });
+        }
+        catch (Exception exception) when (IsContentReadFailure(exception))
+        {
+            return null;
+        }
+    }
+
+    private static TResult? ReadOrdinaryArchive<TResult>(string installPath, Func<ZipArchive, TResult?> read)
+        where TResult : class
+    {
+        if (!IsNupkg(installPath) || !File.Exists(installPath))
+            return null;
+        using var stream = File.OpenRead(installPath);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Read);
+        return read(archive);
+    }
+
+    private static bool OrdinaryPathEscapesRoot(string relativePath)
+    {
+        var normalized = relativePath.Replace('\\', '/');
+        return Path.IsPathRooted(normalized) || normalized.Split('/').Any(component => component == "..");
+    }
+
+    private static string NormalizeOrdinaryPath(string path) => path.Replace('\\', '/').TrimStart('/');
 
     /// <summary>Finds a package-root file while a live operation borrow admits and protects the exact target path.</summary>
     public static PackageContentFile? TryFindByExtension(

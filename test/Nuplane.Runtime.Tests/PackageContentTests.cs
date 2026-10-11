@@ -28,6 +28,8 @@ public sealed class PackageContentTests : IDisposable
 
         Assert.Equal("nested", AsText(PackageContent.TryReadFile(_root, "build/manifest.json")));
         Assert.Equal("nested", AsText(PackageContent.TryReadFile(_root, "build\\manifest.json")));
+        Assert.Equal("nested", AsText(PackageContent.TryReadFile(_root, "build/./manifest.json")));
+        Assert.Equal("nested", AsText(PackageContent.TryReadFile(_root, "build//manifest.json")));
     }
 
     [Fact]
@@ -49,22 +51,23 @@ public sealed class PackageContentTests : IDisposable
     }
 
     [Fact]
-    public void TryReadFile_RefusesDuplicateCaseInsensitiveArchiveMembers()
+    public void TryReadFile_PreservesFirstCaseInsensitiveArchiveMatch()
     {
         var nupkg = CreateNupkg(("manifest.json", "first"), ("MANIFEST.JSON", "second"));
 
-        Assert.Null(PackageContent.TryReadFile(nupkg, "manifest.json"));
-        Assert.Null(PackageContent.TryReadFile(nupkg, "Manifest.Json"));
+        Assert.Equal("first", AsText(PackageContent.TryReadFile(nupkg, "manifest.json")));
+        Assert.Equal("first", AsText(PackageContent.TryReadFile(nupkg, "Manifest.Json")));
     }
 
     [Fact]
-    public void TryReadFile_IgnoresUnsafeArchiveMemberNamesAndRejectsUnsafeRequests()
+    public void TryReadFile_PreservesReleasedArchiveNormalizationAndRequestValidation()
     {
         var nupkg = CreateNupkg(("../manifest.json", "traversal"), ("/manifest.json", "rooted"), ("C:/manifest.json", "drive"));
 
-        Assert.Null(PackageContent.TryReadFile(nupkg, "manifest.json"));
+        Assert.Equal("rooted", AsText(PackageContent.TryReadFile(nupkg, "manifest.json")));
         Assert.Null(PackageContent.TryReadFile(nupkg, "../manifest.json"));
-        Assert.Null(PackageContent.TryReadFile(nupkg, "C:/manifest.json"));
+        Assert.Equal(Path.IsPathRooted("C:/manifest.json") ? null : "drive",
+            AsText(PackageContent.TryReadFile(nupkg, "C:/manifest.json")));
     }
 
     [Fact]
@@ -110,11 +113,34 @@ public sealed class PackageContentTests : IDisposable
     }
 
     [Fact]
-    public void TryFindByExtension_RefusesDuplicateRootArchiveMatches()
+    public void TryFindByExtension_PreservesFirstRootArchiveMatch()
     {
         var nupkg = CreateNupkg(("Acme.Package.nuspec", "first"), ("ACME.PACKAGE.NUSPEC", "second"));
 
-        Assert.Null(PackageContent.TryFindByExtension(nupkg, ".nuspec"));
+        var found = Assert.IsType<PackageContentFile>(PackageContent.TryFindByExtension(nupkg, ".nuspec"));
+        Assert.Equal("Acme.Package.nuspec", found.Name);
+        Assert.Equal("first", AsText(found.Content));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OrdinaryReadersRemainAvailableBesideUnverifiableCoordinationMetadata(bool archive)
+    {
+        // Ordinary callers neither join the protocol nor claim that this is an unenrolled store.
+        var control = Directory.CreateDirectory(Path.Combine(_root, ".nuplane-store"));
+        File.WriteAllText(Path.Combine(control.FullName, "membership.json"), "unverifiable metadata");
+        var installPath = archive ? CreateNupkg(("manifest.json", "ordinary"), ("Package.nuspec", "nuspec")) : _root;
+        if (!archive)
+        {
+            File.WriteAllText(Path.Combine(_root, "manifest.json"), "ordinary");
+            File.WriteAllText(Path.Combine(_root, "Package.nuspec"), "nuspec");
+        }
+
+        Assert.Equal("ordinary", AsText(PackageContent.TryReadFile(installPath, "manifest.json")));
+        var found = Assert.IsType<PackageContentFile>(PackageContent.TryFindByExtension(installPath, ".nuspec"));
+        Assert.Equal("Package.nuspec", found.Name);
+        Assert.Equal("nuspec", AsText(found.Content));
     }
 
     private string CreateNupkg(params (string Path, string Content)[] entries)

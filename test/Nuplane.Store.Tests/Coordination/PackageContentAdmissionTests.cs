@@ -41,7 +41,7 @@ public sealed class PackageContentAdmissionTests
     }
 
     [SupportedPhysicalStoreFact]
-    public async Task LegacyReadRefusesCompleteRootBeforePayloadRead_AndBorrowKeepsLocksThroughDetachedBytes()
+    public async Task GuardedReadRefusesCompleteRootBeforePayloadRead_AndBorrowKeepsLocksThroughDetachedBytes()
     {
         using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
         var payloadName = "Shared.Dependency.nuspec";
@@ -50,7 +50,6 @@ public sealed class PackageContentAdmissionTests
         var registry = new RootMembershipRegistry(files, new StoreStateSerializer());
         var admission = new PackageStoreAdmission(files, registry, context.Fixture.PackageInstallRoot);
 
-        Assert.Null(PackageContent.TryReadFile(context.SharedInstallPath, payloadName));
         Assert.Null(PackageContent.TryReadFileUnscoped(context.SharedInstallPath, payloadName, files));
         Assert.Equal(0, files.PayloadReadCount);
 
@@ -80,6 +79,18 @@ public sealed class PackageContentAdmissionTests
         Assert.NotNull(closing);
         await closing!;
         Assert.True(closing.IsCompletedSuccessfully);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task OrdinaryCompatibilityReadersDoNotClaimParticipationInCompleteEnrollment()
+    {
+        using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+
+        var bytes = Assert.IsType<byte[]>(PackageContent.TryReadFile(context.SharedInstallPath, "Shared.Dependency.nuspec"));
+        Assert.Contains("Shared.Dependency", System.Text.Encoding.UTF8.GetString(bytes));
+        var found = Assert.IsType<PackageContentFile>(PackageContent.TryFindByExtension(context.SharedInstallPath, ".nuspec"));
+        Assert.Equal("Shared.Dependency.nuspec", found.Name);
+        Assert.Equal(bytes, found.Content);
     }
 
     [SupportedPhysicalStoreFact]
@@ -384,8 +395,9 @@ public sealed class PackageContentAdmissionTests
         var registry = new RootMembershipRegistry(files, new StoreStateSerializer());
         var admission = new PackageStoreAdmission(files, registry, context.Fixture.PackageInstallRoot);
 
-        Assert.Null(PackageContent.TryReadFile(archivePath, "manifest.json"));
-        Assert.Null(PackageContent.TryFindByExtension(archivePath, ".json"));
+        Assert.Equal("held-archive", System.Text.Encoding.UTF8.GetString(
+            Assert.IsType<byte[]>(PackageContent.TryReadFile(archivePath, "manifest.json"))));
+        Assert.Equal("manifest.json", PackageContent.TryFindByExtension(archivePath, ".json")?.Name);
         Assert.Null(PackageContent.TryReadFileUnscoped(archivePath, "manifest.json", files));
         Assert.Null(PackageContent.TryFindByExtensionUnscoped(archivePath, ".json", files));
         Assert.Equal(0, files.ArchiveStreamOpenCount);
@@ -423,6 +435,26 @@ public sealed class PackageContentAdmissionTests
             PackageContent.TryReadFile(archivePath, "manifest.json", borrow));
         Assert.Equal(PackageStoreAdmissionReason.ExpiredScope, expired.Reason);
         Assert.Equal(3, files.ArchiveStreamOpenCount);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task ProtectedArchiveReadersRefuseDuplicateMatchesAndUnsafeMemberNames()
+    {
+        using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        var archivePath = CreateArchive(context.Fixture.PackageInstallRoot,
+            ("manifest.json", "first"), ("MANIFEST.JSON", "second"),
+            ("Package.nuspec", "first"), ("PACKAGE.NUSPEC", "second"),
+            ("/unsafe.json", "rooted"), ("../unsafe.json", "traversal"), ("C:/unsafe.json", "drive"));
+        var admission = new PackageStoreAdmission(context.Files,
+            new RootMembershipRegistry(context.Files, new StoreStateSerializer()), context.Fixture.PackageInstallRoot);
+        await using var paths = await admission.AcquireForInstallPathsAsync([archivePath], PackageStoreAdmissionKind.Loading);
+        using var borrow = paths.BorrowFor(archivePath);
+
+        Assert.Null(PackageContent.TryReadFile(archivePath, "manifest.json", borrow));
+        Assert.Null(PackageContent.TryFindByExtension(archivePath, ".nuspec", borrow));
+        Assert.Null(PackageContent.TryReadFile(archivePath, "unsafe.json", borrow));
+        Assert.Null(PackageContent.TryReadFile(archivePath, "../unsafe.json", borrow));
+        Assert.Null(PackageContent.TryReadFile(archivePath, "C:/unsafe.json", borrow));
     }
 
     [SupportedPhysicalStoreFact]
