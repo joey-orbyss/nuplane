@@ -7,7 +7,7 @@ using Nuplane.Store.Coordination.ProtectionRecords;
 
 namespace Nuplane.Integration.Tests;
 
-public sealed class RootMembershipRegistryProcessTests
+public sealed partial class RootMembershipRegistryProcessTests
 {
     [Theory]
     [MemberData(nameof(PublicationCheckpointCases))]
