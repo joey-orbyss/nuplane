@@ -130,9 +130,12 @@ internal sealed partial class RootMembershipRegistry
                         (bundle.RootRow.StateBodyDigest, bundle.RootRow.ProtectionDigest),
                     _ => throw RefuseCatalog("A catalog member lost its acknowledged binding during verification.", member.Root.RootIdentity)
                 };
+                var bundleDigest = member.Member.Binding is RootMemberRecord.BundleAcknowledgedBinding bundleBinding
+                    ? bundleBinding.BundleDigest
+                    : null;
                 return new NativeCatalogMemberVerification(member.Root.RootIdentity, member.Root.EnrollmentEpoch,
                     member.Member.MemberId, member.Location.Slot, member.Location.ExistingFileIdentity!, revision,
-                    stateBodyDigest, protectionDigest,
+                    stateBodyDigest, protectionDigest, bundleDigest,
                     verified.V1Graphs, verified.V2Graphs);
             }).ToArray();
             return new ReadOnlyCollection<NativeCatalogMemberVerification>(result);
@@ -384,5 +387,25 @@ internal sealed record NativeCatalogMemberVerification(
     long Revision,
     string StateBodyDigest,
     string ProtectionDigest,
+    string? BundleDigest,
     PersistedStoreStateGraphVerifier.VerifiedStoreStateGraphs? V1Graphs,
     PersistedStoreStateBundleGraphVerifier.VerifiedStoreStateBundleGraphs? V2Graphs);
+
+internal static class NativeCatalogMemberVerificationComparer
+{
+    internal static bool Same(
+        IReadOnlyList<NativeCatalogMemberVerification> first,
+        IReadOnlyList<NativeCatalogMemberVerification> second)
+    {
+        static (PhysicalRootIdentity Root, long Epoch, string Member, StateSlotIdentity Slot,
+            PhysicalFileIdentity StateFile, long Revision, string StateDigest, string ProtectionDigest,
+            string? BundleDigest)[] Fingerprint(IReadOnlyList<NativeCatalogMemberVerification> members)
+            => members.OrderBy(static member => member.RootIdentity, PhysicalRootIdentityComparer.Instance)
+                .ThenBy(static member => member.MemberId, StringComparer.Ordinal)
+                .Select(static member => (member.RootIdentity, member.EnrollmentEpoch, member.MemberId,
+                    member.StateSlot, member.StateFileIdentity, member.Revision, member.StateBodyDigest,
+                    member.ProtectionDigest, member.BundleDigest)).ToArray();
+
+        return Fingerprint(first).SequenceEqual(Fingerprint(second));
+    }
+}

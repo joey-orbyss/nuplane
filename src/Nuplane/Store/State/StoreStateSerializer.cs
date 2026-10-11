@@ -10,7 +10,7 @@ namespace Nuplane.Store.State;
 /// <summary>
 /// Serializes and deserializes <see cref="StoreStateRecord"/> to/from JSON files.
 /// </summary>
-public sealed class StoreStateSerializer : IPackageProtectionBundleStatePayloadSerializer
+public sealed class StoreStateSerializer : IPackageProtectionBundleStatePayloadSerializer, IStoreStatePayloadObservationSerializer
 {
     private readonly AtomicFileWriter _fileWriter;
 
@@ -64,9 +64,26 @@ public sealed class StoreStateSerializer : IPackageProtectionBundleStatePayloadS
     /// </summary>
     internal static async Task<StoreStateRecord> DeserializeAsync(Stream stream, CancellationToken cancellationToken)
     {
+        var observation = await DeserializeForObservationAsync(stream, cancellationToken).ConfigureAwait(false);
+        return observation.State ?? StoreStateRecord.Empty();
+    }
+
+    async Task<StoreStatePayloadObservation> IStoreStatePayloadObservationSerializer.ReadPayloadForObservationAsync(
+        Stream payload,
+        CancellationToken cancellationToken)
+        => await DeserializeForObservationAsync(payload, cancellationToken).ConfigureAwait(false);
+
+    private static async Task<StoreStatePayloadObservation> DeserializeForObservationAsync(
+        Stream stream,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(stream);
-        var stateFile = await JsonSerializer.DeserializeAsync<StoreStateFileDto>(stream, JsonOptions, cancellationToken);
-        return Normalize(stateFile?.ToStoreStateRecord() ?? StoreStateRecord.Empty());
+        var stateFile = await JsonSerializer.DeserializeAsync<StoreStateFileDto>(stream, JsonOptions, cancellationToken)
+            .ConfigureAwait(false);
+        return stateFile is null
+            ? new StoreStatePayloadObservation(IsNullPayload: true, State: null)
+            : new StoreStatePayloadObservation(IsNullPayload: false,
+                State: Normalize(stateFile.ToStoreStateRecord()));
     }
 
     /// <inheritdoc />

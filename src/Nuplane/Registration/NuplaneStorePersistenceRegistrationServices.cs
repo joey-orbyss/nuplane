@@ -37,6 +37,7 @@ internal static class NuplaneStorePersistenceRegistrationServices
 
         services.TryAddSingleton<PackageStoreRootResolver>();
         services.TryAddSingleton<IPackageStoreRootResolver>(sp => sp.GetRequiredService<PackageStoreRootResolver>());
+        TrustedPackageStoreMemberDeclarationRegistration.RegisterDefault(services);
         services.AddSingleton<StoreStateSerializer>();
         services.AddSingleton<IStoreStateSerializer>(sp => sp.GetRequiredService<StoreStateSerializer>());
         services.AddSingleton<EffectiveStorePersistenceSettings>(sp => EffectiveStorePersistenceSettings.Resolve(sp.GetRequiredService<IOptions<StoreRegistryOptions>>().Value));
@@ -57,6 +58,20 @@ internal static class NuplaneStorePersistenceRegistrationServices
                 feedOptions.PackageInstallRoot,
                 sp.GetRequiredService<ITrustedPackageStoreRootCatalog>());
         });
+        services.TryAddSingleton<PackageStoreEnrollmentPreviewService>(sp =>
+        {
+            var admission = sp.GetRequiredService<IPackageStoreAdmission>();
+            var registry = admission is PackageStoreAdmission builtIn ? builtIn.Registry : null;
+            return new PackageStoreEnrollmentPreviewService(
+                sp.GetRequiredService<IPhysicalStoreFileSystem>(),
+                registry,
+                sp.GetRequiredService<ITrustedPackageStoreRootCatalog>(),
+                sp.GetRequiredService<IPackageStoreRootResolver>(),
+                sp.GetRequiredService<TrustedPackageStoreMemberDeclarationCatalog>(),
+                sp.GetRequiredService<IStoreStateSerializer>());
+        });
+        services.TryAddSingleton<IPackageStoreEnrollmentPreviewService>(sp =>
+            sp.GetRequiredService<PackageStoreEnrollmentPreviewService>());
         services.AddSingleton<PackageGraphUseLifetimeObserver>(sp =>
             new PackageGraphUseLifetimeObserver(sp.GetService<TimeProvider>()));
         services.AddSingleton<IPackageGraphUseLifetimeObserver>(sp =>

@@ -135,7 +135,7 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
             {
                 var peerReplay = await _catalogRegistry.VerifyCatalogMemberProtectionAsync(borrow, cancellationToken)
                     .ConfigureAwait(false);
-                if (!SameCatalogVerification(verification, peerReplay))
+                if (!NativeCatalogMemberVerificationComparer.Same(verification, peerReplay))
                     throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
                         "Catalog protection evidence changed during selected-root inspection.");
             }
@@ -206,7 +206,7 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
         owner.RevalidateRetainedEvidence();
         var replay = await _catalogRegistry.VerifyCatalogMemberProtectionAsync(borrow, cancellationToken)
             .ConfigureAwait(false);
-        if (!SameCatalogVerification(verification, replay))
+        if (!NativeCatalogMemberVerificationComparer.Same(verification, replay))
             throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
                 "Catalog protection evidence changed during selected-root inspection.", root);
         cancellationToken.ThrowIfCancellationRequested();
@@ -325,22 +325,6 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
         foreach (var install in graphs.SelectMany(static graph => graph.Nodes).Select(static node => node.Install)
                      .Where(install => install.Root == root))
             destination.Add(new PackageStoreRetentionProtectedInstall(install, reason));
-    }
-
-    private static bool SameCatalogVerification(
-        IReadOnlyList<NativeCatalogMemberVerification> first,
-        IReadOnlyList<NativeCatalogMemberVerification> second)
-    {
-        static (PhysicalRootIdentity Root, long Epoch, string Member, StateSlotIdentity Slot,
-            PhysicalFileIdentity State, long Revision, string StateDigest, string ProtectionDigest)[] Fingerprint(
-            IReadOnlyList<NativeCatalogMemberVerification> members)
-            => members.OrderBy(static member => member.RootIdentity, PhysicalRootIdentityComparer.Instance)
-                .ThenBy(static member => member.MemberId, StringComparer.Ordinal)
-                .Select(static member => (member.RootIdentity, member.EnrollmentEpoch, member.MemberId,
-                    member.StateSlot, member.StateFileIdentity, member.Revision, member.StateBodyDigest,
-                    member.ProtectionDigest)).ToArray();
-
-        return Fingerprint(first).SequenceEqual(Fingerprint(second));
     }
 
     private static PackageStoreAdmissionException Refuse(
