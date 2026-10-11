@@ -27,8 +27,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         using var provider = CreateProvider(selected.PackageInstallRoot, selected.StatePaths["first"], source,
             additionalPackageStoreRoot: peer.PackageInstallRoot);
         var admission = provider.GetRequiredService<IPackageStoreAdmission>();
-        var before = CaptureFixtureEvidence(selected).Concat(CaptureFixtureEvidence(peer))
-            .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.Ordinal);
+        var before = CaptureFixtureEvidence(selected, peer);
 
         var error = await Record.ExceptionAsync(async () =>
         {
@@ -46,8 +45,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
 
         var refusal = Assert.IsType<PackageStoreAdmissionException>(error);
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
-        AssertFixtureEvidenceEqual(before, CaptureFixtureEvidence(selected).Concat(CaptureFixtureEvidence(peer))
-            .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.Ordinal));
+        AssertFixtureEvidenceEqual(before, CaptureFixtureEvidence(selected, peer));
         var stillPending = ReadPendingStateCommit(pending);
         Assert.Equal(pendingCommit.PublicationId, stillPending.PublicationId);
         Assert.Equal(pendingCommit.Resolution, stillPending.Resolution);
@@ -101,8 +99,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         using var provider = CreateProvider(selected.PackageInstallRoot, selected.StatePaths["first"],
             new ScopedFileSource(selected.SharedInstallPath, null, null, failAfterRead: false),
             additionalPackageStoreRoot: peer.PackageInstallRoot);
-        var before = CaptureFixtureEvidence(selected).Concat(CaptureFixtureEvidence(peer))
-            .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.Ordinal);
+        var before = CaptureFixtureEvidence(selected, peer);
 
         await using (var admitted = await provider.GetRequiredService<IPackageStoreAdmission>()
                          .AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Maintenance))
@@ -110,8 +107,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
             Assert.Equal(PackageStoreAdmissionStatus.Enrolled, admitted.Status);
         }
 
-        AssertFixtureEvidenceEqual(before, CaptureFixtureEvidence(selected).Concat(CaptureFixtureEvidence(peer))
-            .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.Ordinal));
+        AssertFixtureEvidenceEqual(before, CaptureFixtureEvidence(selected, peer));
     }
 
     private static PendingStateCommit ReadPendingStateCommit(CompletedMembershipFixture fixture)
@@ -122,6 +118,11 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
     }
 
     private static IReadOnlyDictionary<string, NativeArtifactEvidence?> CaptureFixtureEvidence(
+        params CompletedMembershipFixture[] fixtures)
+        => fixtures.SelectMany(CaptureSingleFixtureEvidence)
+            .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.Ordinal);
+
+    private static IReadOnlyDictionary<string, NativeArtifactEvidence?> CaptureSingleFixtureEvidence(
         CompletedMembershipFixture fixture)
     {
         var evidence = new SortedDictionary<string, NativeArtifactEvidence?>(StringComparer.Ordinal);
