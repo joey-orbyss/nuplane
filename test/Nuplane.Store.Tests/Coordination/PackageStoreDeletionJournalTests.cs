@@ -182,7 +182,7 @@ public sealed class PackageStoreDeletionJournalTests
     }
 
     [Fact]
-    public void Digest_BindsEveryVariableJournalField()
+    public void Digest_BindsValidJournalAndManifestMutations()
     {
         var baseline = DeletionTestData.CreateJournal();
         var changedPayloadIdentity = DeletionTestData.Identity("payload-file-updated");

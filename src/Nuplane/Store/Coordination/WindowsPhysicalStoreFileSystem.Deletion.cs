@@ -34,12 +34,14 @@ internal sealed partial class WindowsPhysicalStoreFileSystem : IPhysicalStoreDel
         var parentRaw = parentLease.DangerousHandle;
         try
         {
-            using (var directory = OpenPublicationDirectory(parentRaw, singleName, requestDelete: true))
+            // Normal canonical observers protect the target without sharing DELETE. Close them
+            // before the DELETE-capable open, then pin that exact name until disposition.
+            PhysicalStoreDeletionChecks.RevalidateDirectoryRemoval(this, this, parent, singleName, prepared);
+            using (var directory = OpenPublicationDirectory(parentRaw, singleName, requestDelete: true, shareDelete: false))
             {
                 PhysicalStoreDirectoryPublicationChecks.RequireExpectedDirectory(
                     QueryEntry(directory.DangerousGetHandle(), "inspect the empty-directory removal handle"),
                     expectedIdentity);
-                PhysicalStoreDeletionChecks.RevalidateDirectoryRemoval(this, this, parent, singleName, prepared);
                 RequirePublicationParent(parent, parentRaw, prepared);
                 WindowsNative.RemoveEmptyDirectory(directory.DangerousGetHandle());
             }

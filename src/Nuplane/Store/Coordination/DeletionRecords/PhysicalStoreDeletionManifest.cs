@@ -39,7 +39,7 @@ internal sealed class PhysicalStoreDeletionManifest
     internal ImmutableArray<PhysicalStoreDeletionManifestEntry> Entries { get; }
 
     /// <summary>Requires every observed row to be an exact surviving row from this baseline.</summary>
-    /// <returns>The number of baseline rows that are positively absent from the observed subset.</returns>
+    /// <returns>The number of baseline rows missing from the supplied observation; this does not establish native absence.</returns>
     /// <exception cref="PackageStoreAdmissionException">The root/profile or any surviving row differs from the baseline.</exception>
     internal int RequireExactSubset(PhysicalStoreDeletionManifest observed)
     {

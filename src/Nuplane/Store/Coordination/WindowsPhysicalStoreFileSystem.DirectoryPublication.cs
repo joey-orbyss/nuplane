@@ -55,7 +55,7 @@ internal sealed partial class WindowsPhysicalStoreFileSystem : IPhysicalStoreDir
             this, this, parent, stagedName, destinationName, prepared);
     }
 
-    private static SafeFileHandle OpenPublicationDirectory(IntPtr parent, string name, bool requestDelete)
+    private static SafeFileHandle OpenPublicationDirectory(IntPtr parent, string name, bool requestDelete, bool shareDelete = true)
         => WindowsNative.OpenRelative(
             parent,
             name,
@@ -63,7 +63,7 @@ internal sealed partial class WindowsPhysicalStoreFileSystem : IPhysicalStoreDir
             (requestDelete ? WindowsNative.DeleteAccess : 0),
             WindowsNative.FileOpen,
             WindowsNative.FileDirectoryFile,
-            shareAccess: WindowsNative.ShareRead | WindowsNative.ShareWrite | WindowsNative.ShareDelete);
+            shareAccess: WindowsNative.ShareRead | WindowsNative.ShareWrite | (shareDelete ? WindowsNative.ShareDelete : 0));
 
     private static void RecheckPublicationDirectory(
         IntPtr parent,
