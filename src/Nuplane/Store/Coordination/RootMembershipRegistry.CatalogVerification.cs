@@ -122,8 +122,17 @@ internal sealed partial class RootMembershipRegistry
                     RootMemberRecord.BundleAcknowledgedBinding bundle => bundle.RootRow.Revision,
                     _ => throw RefuseCatalog("A catalog member lost its acknowledged binding during verification.", member.Root.RootIdentity)
                 };
+                var (stateBodyDigest, protectionDigest) = member.Member.Binding switch
+                {
+                    RootMemberRecord.AcknowledgedBinding acknowledged =>
+                        (acknowledged.ProtectionRecord.StateBodyDigest, acknowledged.ProtectionRecord.ProtectionDigest),
+                    RootMemberRecord.BundleAcknowledgedBinding bundle =>
+                        (bundle.RootRow.StateBodyDigest, bundle.RootRow.ProtectionDigest),
+                    _ => throw RefuseCatalog("A catalog member lost its acknowledged binding during verification.", member.Root.RootIdentity)
+                };
                 return new NativeCatalogMemberVerification(member.Root.RootIdentity, member.Root.EnrollmentEpoch,
                     member.Member.MemberId, member.Location.Slot, member.Location.ExistingFileIdentity!, revision,
+                    stateBodyDigest, protectionDigest,
                     verified.V1Graphs, verified.V2Graphs);
             }).ToArray();
             return new ReadOnlyCollection<NativeCatalogMemberVerification>(result);
@@ -373,5 +382,7 @@ internal sealed record NativeCatalogMemberVerification(
     StateSlotIdentity StateSlot,
     PhysicalFileIdentity StateFileIdentity,
     long Revision,
+    string StateBodyDigest,
+    string ProtectionDigest,
     PersistedStoreStateGraphVerifier.VerifiedStoreStateGraphs? V1Graphs,
     PersistedStoreStateBundleGraphVerifier.VerifiedStoreStateBundleGraphs? V2Graphs);

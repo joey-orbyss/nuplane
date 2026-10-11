@@ -5,6 +5,8 @@ namespace Nuplane.Store.Maintenance;
 
 internal interface IPackageStoreRootResolver
 {
+    string? ConfiguredDefaultLabel { get; }
+
     bool TryResolve(string? label, out TrustedPackageStoreRoot? root);
 }
 
@@ -12,6 +14,8 @@ internal interface IPackageStoreRootResolver
 internal sealed class PackageStoreRootResolver : IPackageStoreRootResolver
 {
     private readonly Dictionary<string, TrustedPackageStoreRoot> _rootsByLabel;
+
+    public string? ConfiguredDefaultLabel { get; }
 
     public PackageStoreRootResolver(
         ITrustedPackageStoreRootCatalog catalog,
@@ -21,6 +25,7 @@ internal sealed class PackageStoreRootResolver : IPackageStoreRootResolver
         ArgumentNullException.ThrowIfNull(options);
 
         var configuredRootLabel = options.Value.RootLabel;
+        ConfiguredDefaultLabel = configuredRootLabel;
         _rootsByLabel = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (var root in catalog.Roots)

@@ -8,6 +8,7 @@ using Nuplane.Store.Maintenance;
 using Nuplane.Store.State;
 using Nuplane.Store.Tests.Coordination;
 using Nuplane.Tests.Shared;
+using Microsoft.Extensions.Options;
 
 namespace Nuplane.Store.Tests;
 
@@ -212,10 +213,12 @@ public sealed class PackageStoreInspectionServiceTests
         using var fixture = new PackageStoreFixture();
         var files = CreateFileSystem();
         using var root = PhysicalStoreTestDirectory.Open(files, fixture.PackageInstallRoot);
-        var admission = new PackageStoreAdmission(files, new RootMembershipRegistry(files, new StoreStateSerializer()),
-            fixture.PackageInstallRoot);
+        var catalog = new TestCatalog([new TrustedPackageStoreRoot("default", fixture.PackageInstallRoot)]);
+        var resolver = new PackageStoreRootResolver(catalog, Options.Create(new PackageStoreMaintenanceOptions()));
+        var registry = new RootMembershipRegistry(files, new StoreStateSerializer());
         var inventory = new CountingInventory();
-        var service = new PackageStoreInspectionService(files, admission, inventory, new PackageStoreRetentionPlanner());
+        var service = new PackageStoreInspectionService(files, registry, catalog, resolver,
+            inventory, new PackageStoreRetentionPlanner());
 
         var snapshot = await service.InspectAsync(keepNewestInactiveVersionsPerPackage: 0);
 
@@ -229,6 +232,142 @@ public sealed class PackageStoreInspectionServiceTests
         Assert.Empty(snapshot.Members);
         Assert.Empty(snapshot.Uses);
         Assert.Equal(0, inventory.ReadCount);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task InspectRootAsync_AdditionalConfiguredLabelInspectsOnlySelectedRoot()
+    {
+        using var defaultRoot = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        using var additionalRoot = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        var roots = new TestCatalog([
+            new TrustedPackageStoreRoot("default", defaultRoot.Fixture.PackageInstallRoot),
+            new TrustedPackageStoreRoot("additional", additionalRoot.Fixture.PackageInstallRoot)
+        ]);
+        var resolver = new PackageStoreRootResolver(roots, Options.Create(new PackageStoreMaintenanceOptions()));
+        var service = new PackageStoreInspectionService(defaultRoot.Files, defaultRoot.Registry, roots, resolver,
+            new PackageStoreInventory(defaultRoot.Files), new PackageStoreRetentionPlanner());
+
+        var snapshot = await service.InspectRootAsync("additional", keepNewestInactiveVersionsPerPackage: 0);
+
+        Assert.Equal(PackageStoreAdmissionStatus.Enrolled, snapshot.AdmissionStatus);
+        Assert.Equal(additionalRoot.RootIdentity, snapshot.Root);
+        Assert.Equal(new[] { "first", "second" }, snapshot.Members.Select(static member => member.MemberId));
+        Assert.NotEmpty(Assert.IsType<PackageStoreRetentionPlan>(snapshot.RetentionPlan).Entries
+            .Where(static entry => entry.Reasons.Contains(PackageStoreRetentionReason.ProtectedActive)));
+        Assert.All(snapshot.RetentionPlan!.Entries.Where(static entry =>
+            entry.Reasons.Contains(PackageStoreRetentionReason.ProtectedActive) ||
+            entry.Reasons.Contains(PackageStoreRetentionReason.ProtectedRecoverableLastKnownGood)),
+            entry => Assert.Equal(additionalRoot.RootIdentity, entry.Install.Root));
+    }
+
+    [Fact]
+    public async Task InspectRootAsync_UnknownLabelRefusesBeforeNativeAccess()
+    {
+        var files = CreateFileSystem();
+        var registry = new RootMembershipRegistry(files, new StoreStateSerializer());
+        var catalog = new TestCatalog([new TrustedPackageStoreRoot("configured", "\0invalid-native-path")]);
+        var resolver = new PackageStoreRootResolver(catalog, Options.Create(new PackageStoreMaintenanceOptions()));
+        var service = new PackageStoreInspectionService(files, registry, catalog, resolver,
+            new CountingInventory(), new PackageStoreRetentionPlanner());
+
+        var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() => service.InspectRootAsync("missing"));
+
+        Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task InspectRootAsync_RefusesMismatchedNativeProviderBeforeCatalogAccess()
+    {
+        using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        var catalog = new TestCatalog([new TrustedPackageStoreRoot("default", context.Fixture.PackageInstallRoot)]);
+        var resolver = new PackageStoreRootResolver(catalog, Options.Create(new PackageStoreMaintenanceOptions()));
+        var inventory = new CountingInventory();
+        var service = new PackageStoreInspectionService(CreateFileSystem(), context.Registry,
+            catalog, resolver, inventory, new PackageStoreRetentionPlanner());
+
+        var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() => service.InspectAsync());
+
+        Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, refusal.Reason);
+        Assert.Equal(0, inventory.ReadCount);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task InspectRootAsync_UnenrolledSelectedRootStillVerifiesEnrolledPeer()
+    {
+        using var peer = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        using var fixture = new PackageStoreFixture();
+        var catalog = new TestCatalog([
+            new TrustedPackageStoreRoot("default", fixture.PackageInstallRoot),
+            new TrustedPackageStoreRoot("peer", peer.Fixture.PackageInstallRoot)
+        ]);
+        var resolver = new PackageStoreRootResolver(catalog, Options.Create(new PackageStoreMaintenanceOptions()));
+        var inventory = new CountingInventory();
+        var service = new PackageStoreInspectionService(peer.Files, peer.Registry, catalog, resolver,
+            inventory, new PackageStoreRetentionPlanner());
+
+        var snapshot = await service.InspectRootAsync("default");
+
+        Assert.Equal(PackageStoreAdmissionStatus.Unenrolled, snapshot.AdmissionStatus);
+        Assert.Null(snapshot.Root);
+        Assert.Equal(PackageStoreRetentionProtectionKnowledge.Unknown, snapshot.ProtectionKnowledge);
+        Assert.Null(snapshot.Inventory);
+        Assert.Null(snapshot.RetentionPlan);
+        Assert.Equal(0, inventory.ReadCount);
+    }
+
+    [SupportedPhysicalStoreTheory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task InspectRootAsync_PendingMemberStateOnSelectedOrPeerRefusesWithoutRecovery(bool pendingSelected)
+    {
+        using var selected = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        using var peer = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        var pendingContext = pendingSelected ? selected : peer;
+        var parents = pendingContext.StatePaths.ToDictionary(
+            static pair => pair.Key,
+            pair => PhysicalStoreTestDirectory.Open(pendingContext.Files, Path.GetDirectoryName(pair.Value)!),
+            StringComparer.Ordinal);
+        try
+        {
+            await Assert.ThrowsAsync<InspectionInterruptedException>(() => pendingContext.Registry.PublishStateAsync(
+                pendingContext.Root,
+                parents,
+                "first",
+                pendingContext.Reprotect(pendingContext.States["first"], legacyUnknown: false, revision: 2),
+                CancellationToken.None,
+                point =>
+                {
+                    if (point == RootMembershipPublicationPoint.PendingPublished)
+                        throw new InspectionInterruptedException();
+                }));
+        }
+        finally
+        {
+            foreach (var parent in parents.Values.Reverse())
+                parent.Dispose();
+        }
+
+        var pending = pendingContext.Registry.ReadCandidate(pendingContext.Root).PendingStateCommit;
+        Assert.NotNull(pending);
+        var before = CaptureMembershipEvidence(selected) + CaptureMembershipEvidence(peer);
+        var roots = new TestCatalog([
+            new TrustedPackageStoreRoot("default", selected.Fixture.PackageInstallRoot),
+            new TrustedPackageStoreRoot("peer", peer.Fixture.PackageInstallRoot)
+        ]);
+        var resolver = new PackageStoreRootResolver(roots, Options.Create(new PackageStoreMaintenanceOptions()));
+        var service = new PackageStoreInspectionService(selected.Files, selected.Registry, roots, resolver,
+            new PackageStoreInventory(selected.Files), new PackageStoreRetentionPlanner());
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
+            service.InspectRootAsync("default", cancellationToken: deadline.Token));
+
+        Assert.Contains(refusal.Reason, new[] { PackageStoreAdmissionReason.IncompleteEnrollment,
+            PackageStoreAdmissionReason.UnknownAuthority, PackageStoreAdmissionReason.StateMismatch });
+        Assert.NotNull(pendingContext.Registry.ReadCandidate(pendingContext.Root).PendingStateCommit);
+        await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
+            service.InspectRootAsync("default", cancellationToken: deadline.Token));
+        Assert.Equal(before, CaptureMembershipEvidence(selected) + CaptureMembershipEvidence(peer));
     }
 
     [SupportedPhysicalStoreFact]
@@ -247,16 +386,17 @@ public sealed class PackageStoreInspectionServiceTests
     [Fact]
     public async Task InspectAsync_NegativeBudgetAndPreCancelledCall_RefuseBeforeAdmission()
     {
-        var admission = new CountingAdmission();
-        var service = new PackageStoreInspectionService(
-            CreateFileSystem(), admission,
+        var files = CreateFileSystem();
+        var resolver = new CountingRootResolver();
+        var service = new PackageStoreInspectionService(files,
+            new RootMembershipRegistry(files, new StoreStateSerializer()), new TestCatalog([]), resolver,
             new CountingInventory(), new PackageStoreRetentionPlanner());
 
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => service.InspectAsync(-1));
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => service.InspectAsync(cancellationToken: cancelled.Token));
-        Assert.Equal(0, admission.AcquireCount);
+        Assert.Equal(0, resolver.ResolveCount);
     }
 
     [SupportedPhysicalStoreFact]
@@ -294,9 +434,14 @@ public sealed class PackageStoreInspectionServiceTests
 
     private static PackageStoreInspectionService CreateService(
         RootMembershipProtectionVerificationTests.Context context,
-        IPackageStoreInventory? inventory = null)
-        => new(context.Files, CreateAdmission(context), inventory ?? new PackageStoreInventory(context.Files),
-            new PackageStoreRetentionPlanner());
+        IPackageStoreInventory? inventory = null,
+        IReadOnlyList<TrustedPackageStoreRoot>? configuredRoots = null)
+    {
+        var catalog = new TestCatalog(configuredRoots ?? [new TrustedPackageStoreRoot("default", context.Fixture.PackageInstallRoot)]);
+        var resolver = new PackageStoreRootResolver(catalog, Options.Create(new PackageStoreMaintenanceOptions()));
+        return new(context.Files, context.Registry, catalog, resolver,
+            inventory ?? new PackageStoreInventory(context.Files), new PackageStoreRetentionPlanner());
+    }
 
     private static PackageStoreAdmission CreateAdmission(RootMembershipProtectionVerificationTests.Context context)
         => new(context.Files, context.Registry, context.Fixture.PackageInstallRoot);
@@ -329,7 +474,7 @@ public sealed class PackageStoreInspectionServiceTests
     private static string ToRootRelative(string root, string path)
         => Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
 
-    private sealed class CountingInventory : IPackageStoreInventory
+    private sealed class CountingInventory : IPackageStoreInventory, IPackageStoreCatalogInventory
     {
         internal int ReadCount { get; private set; }
 
@@ -340,9 +485,20 @@ public sealed class PackageStoreInspectionServiceTests
             ReadCount++;
             throw new InvalidOperationException("This test inventory should not be read.");
         }
+
+        public Task<PackageStoreInventorySnapshot> ReadUnderCatalogOwnershipAsync(
+            PhysicalStoreDirectoryHandle heldRoot,
+            PhysicalRootIdentity expectedRoot,
+            long epoch,
+            CancellationToken cancellationToken)
+        {
+            ReadCount++;
+            throw new InvalidOperationException("This test inventory should not be read.");
+        }
     }
 
-    private sealed class FixedInventory(PackageStoreInventorySnapshot snapshot) : IPackageStoreInventory
+    private sealed class FixedInventory(PackageStoreInventorySnapshot snapshot)
+        : IPackageStoreInventory, IPackageStoreCatalogInventory
     {
         public Task<PackageStoreInventorySnapshot> ReadAsync(
             PackageStoreOperationBorrow borrow,
@@ -353,26 +509,58 @@ public sealed class PackageStoreInspectionServiceTests
                 throw new InvalidOperationException("The fixed test inventory must match the current borrow.");
             return Task.FromResult(snapshot);
         }
-    }
 
-    private sealed class CountingAdmission : IPackageStoreAdmission
-    {
-        internal int AcquireCount { get; private set; }
-
-        public ValueTask<PackageStoreRootOperationAdmission> AcquireConfiguredRootOperationAsync(
-            PackageStoreAdmissionKind kind,
-            CancellationToken cancellationToken = default)
+        public Task<PackageStoreInventorySnapshot> ReadUnderCatalogOwnershipAsync(
+            PhysicalStoreDirectoryHandle heldRoot,
+            PhysicalRootIdentity expectedRoot,
+            long epoch,
+            CancellationToken cancellationToken)
         {
-            AcquireCount++;
-            return ValueTask.FromException<PackageStoreRootOperationAdmission>(
-                new InvalidOperationException("This test admission should not be acquired."));
+            cancellationToken.ThrowIfCancellationRequested();
+            if (snapshot.Root != expectedRoot || snapshot.Epoch != epoch)
+                throw new InvalidOperationException("The fixed inventory must match the current catalog selection.");
+            return Task.FromResult(snapshot);
         }
-
-        public ValueTask<PackageStorePathAdmission> AcquireForInstallPathsAsync(
-            IReadOnlyCollection<string> installPaths,
-            PackageStoreAdmissionKind kind,
-            CancellationToken cancellationToken = default)
-            => ValueTask.FromException<PackageStorePathAdmission>(
-                new NotSupportedException("This test admission does not support path admission."));
     }
+
+    private sealed class CountingRootResolver : IPackageStoreRootResolver
+    {
+        internal int ResolveCount { get; private set; }
+        public string? ConfiguredDefaultLabel => "default";
+
+        public bool TryResolve(string? label, out TrustedPackageStoreRoot? root)
+        {
+            ResolveCount++;
+            root = null;
+            return false;
+        }
+    }
+
+    private sealed class TestCatalog(IReadOnlyList<TrustedPackageStoreRoot> roots) : ITrustedPackageStoreRootCatalog
+    {
+        public IReadOnlyList<TrustedPackageStoreRoot> Roots { get; } = Array.AsReadOnly(roots.ToArray());
+    }
+
+    private static string CaptureMembershipEvidence(RootMembershipProtectionVerificationTests.Context context)
+    {
+        var ledger = context.Registry.ReadCandidate(context.Root);
+        var pending = ledger.PendingStateCommit;
+        var pendingMember = pending is null ? null : ledger.Members.Single(member => member.MemberId == pending.MemberId);
+        var artifactDirectory = pendingMember is null ? null : Path.GetDirectoryName(pendingMember.ConfiguredLocator);
+        var artifacts = pending is null
+            ? Array.Empty<string>()
+            : new[]
+            {
+                Path.Combine(artifactDirectory!, RootMembershipRegistry.StageName(pending)),
+                Path.Combine(artifactDirectory!, RootMembershipRegistry.BackupName(pending))
+            };
+        var paths = ledger.Members.Select(static member => member.ConfiguredLocator)
+            .Append(Path.Combine(context.Fixture.PackageInstallRoot, RootMembershipRegistry.ControlDirectoryName,
+                RootMembershipRegistry.LedgerName))
+            .Concat(artifacts);
+        return PackageStoreInspectionEvidenceCapture.Capture(context.Files,
+            [context.Fixture.PackageInstallRoot], paths);
+    }
+
+    private sealed class InspectionInterruptedException : Exception { }
 }

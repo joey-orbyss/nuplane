@@ -7,6 +7,9 @@ namespace Nuplane.Store.Coordination;
 
 internal sealed partial class RootMembershipRegistry
 {
+    internal bool UsesFileSystem(IPhysicalStoreFileSystem files)
+        => ReferenceEquals(_files, files);
+
     private readonly object _catalogOwnerMint = new();
 
     internal Task<NativeCatalogRuntimeProjection> CreateCatalogRuntimeProjectionAsync(
@@ -416,6 +419,34 @@ internal sealed partial class RootMembershipRegistry
             if (!_roots.TryGetValue(rootIdentity, out var root))
                 throw Refused("The requested participant is absent from the positively enrolled native catalog.", rootIdentity);
             return root;
+        }
+
+        internal NativeCatalogLockedRoot? ResolveConfiguredRoot(
+            NativeCatalogOwnerBorrow borrow,
+            TrustedPackageStoreRoot configuredRoot)
+        {
+            ArgumentNullException.ThrowIfNull(borrow);
+            ArgumentNullException.ThrowIfNull(configuredRoot);
+            borrow.RequireRegistry(_registry);
+            if (!ReferenceEquals(borrow.Owner, this))
+                throw Refused("A configured root selection must belong to this retained catalog borrow.");
+
+            RevalidateRetainedEvidence();
+            var selected = _configuredRoots.SingleOrDefault(root => ReferenceEquals(root, configuredRoot));
+            if (selected is null)
+                throw Refused("The selected package-store root is not an exact descriptor in the retained trusted catalog.");
+
+            var observation = _observations.Single(item => ReferenceEquals(item.Configured, selected));
+            var resolved = observation.Resolution;
+            if (resolved.MembershipCandidate is null)
+            {
+                if (resolved.AuthorityRoot is not null || resolved.RootIdentity is not null)
+                    throw Refused("A configured root has incomplete authority evidence instead of positive absence.");
+                return null;
+            }
+
+            return RequireRoot(resolved.RootIdentity
+                ?? throw Refused("An enrolled configured root has no retained physical identity."), _registry._catalogOwnerMint);
         }
 
         internal NativeCatalogLockedRoot[] SnapshotRetainedRoots() => _roots.Values.ToArray();

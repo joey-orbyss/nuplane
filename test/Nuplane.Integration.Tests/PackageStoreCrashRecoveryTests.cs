@@ -143,8 +143,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
 
                 Assert.Empty((await InspectGraphUseRecordsAsync(admission, fixture)).Entries);
 
-                var inspection = await new PackageStoreInspectionService(fixture.Files, admission,
-                    new PackageStoreInventory(fixture.Files), new PackageStoreRetentionPlanner())
+                var inspection = await CreateInspectionService(provider, fixture.Files)
                     .InspectAsync(0, deadline.Token);
                 Assert.Equal(PackageStoreAdmissionStatus.Enrolled, inspection.AdmissionStatus);
                 Assert.Equal(PackageStoreRetentionProtectionKnowledge.Known, inspection.ProtectionKnowledge);

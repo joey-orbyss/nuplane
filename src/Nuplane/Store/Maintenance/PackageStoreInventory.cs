@@ -9,7 +9,7 @@ using Nuplane.Store.Coordination.PhysicalFiles;
 namespace Nuplane.Store.Maintenance;
 
 /// <summary>Builds a bounded, no-follow description of completed installs beneath an admitted root.</summary>
-internal sealed class PackageStoreInventory : IPackageStoreInventory
+internal sealed class PackageStoreInventory : IPackageStoreInventory, IPackageStoreCatalogInventory
 {
     private const int MaximumDirectoryEntries = 1024;
     private const int MaximumTotalEntries = 16384;
@@ -60,6 +60,21 @@ internal sealed class PackageStoreInventory : IPackageStoreInventory
                 return Task.FromResult(ReadCore(root, borrow.Root, borrow.Epoch, token));
             },
             cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public Task<PackageStoreInventorySnapshot> ReadUnderCatalogOwnershipAsync(
+        PhysicalStoreDirectoryHandle heldRoot,
+        PhysicalRootIdentity expectedRoot,
+        long epoch,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(heldRoot);
+        ArgumentNullException.ThrowIfNull(expectedRoot);
+        if (epoch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(epoch));
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(ReadCore(heldRoot, expectedRoot, epoch, cancellationToken));
     }
 
     private PackageStoreInventorySnapshot ReadCore(

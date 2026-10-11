@@ -1,4 +1,5 @@
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Store.Coordination.PhysicalFiles;
 
 namespace Nuplane.Store.Maintenance;
 
@@ -10,4 +11,14 @@ internal interface IPackageStoreInventory
     Task<PackageStoreInventorySnapshot> ReadAsync(
         PackageStoreOperationBorrow borrow,
         CancellationToken cancellationToken = default);
+}
+
+/// <summary>Reads inventory under an already-retained native catalog root/member lock union.</summary>
+internal interface IPackageStoreCatalogInventory
+{
+    Task<PackageStoreInventorySnapshot> ReadUnderCatalogOwnershipAsync(
+        PhysicalStoreDirectoryHandle heldRoot,
+        PhysicalRootIdentity expectedRoot,
+        long epoch,
+        CancellationToken cancellationToken);
 }

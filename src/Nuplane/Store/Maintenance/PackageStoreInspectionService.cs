@@ -3,6 +3,7 @@ using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.MembershipRecords;
 using Nuplane.Store.Coordination.PhysicalFiles;
 using Nuplane.Store.Coordination.ProtectionRecords;
+using System.Runtime.ExceptionServices;
 
 namespace Nuplane.Store.Maintenance;
 
@@ -10,24 +11,32 @@ namespace Nuplane.Store.Maintenance;
 internal sealed class PackageStoreInspectionService : IPackageStoreInspectionService
 {
     private readonly IPhysicalStoreFileSystem _files;
-    private readonly IPackageStoreAdmission _admission;
     private readonly IPackageStoreInventory _inventory;
     private readonly IPackageStoreRetentionPlanner _planner;
+    private readonly RootMembershipRegistry _catalogRegistry;
+    private readonly ITrustedPackageStoreRootCatalog _rootCatalog;
+    private readonly IPackageStoreRootResolver _rootResolver;
 
     internal PackageStoreInspectionService(
         IPhysicalStoreFileSystem files,
-        IPackageStoreAdmission admission,
+        RootMembershipRegistry catalogRegistry,
+        ITrustedPackageStoreRootCatalog rootCatalog,
+        IPackageStoreRootResolver rootResolver,
         IPackageStoreInventory inventory,
         IPackageStoreRetentionPlanner planner)
     {
         ArgumentNullException.ThrowIfNull(files);
-        ArgumentNullException.ThrowIfNull(admission);
+        ArgumentNullException.ThrowIfNull(catalogRegistry);
+        ArgumentNullException.ThrowIfNull(rootCatalog);
+        ArgumentNullException.ThrowIfNull(rootResolver);
         ArgumentNullException.ThrowIfNull(inventory);
         ArgumentNullException.ThrowIfNull(planner);
         _files = files;
-        _admission = admission;
         _inventory = inventory;
         _planner = planner;
+        _catalogRegistry = catalogRegistry;
+        _rootCatalog = rootCatalog;
+        _rootResolver = rootResolver;
     }
 
     /// <inheritdoc />
@@ -35,17 +44,83 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
         int? keepNewestInactiveVersionsPerPackage = null,
         CancellationToken cancellationToken = default)
     {
+        return await InspectRootAsync(_rootResolver.ConfiguredDefaultLabel,
+            keepNewestInactiveVersionsPerPackage, cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<PackageStoreInspectionSnapshot> InspectRootAsync(
+        string? rootLabel,
+        int? keepNewestInactiveVersionsPerPackage = null,
+        CancellationToken cancellationToken = default)
+    {
         if (keepNewestInactiveVersionsPerPackage < 0)
             throw new ArgumentOutOfRangeException(nameof(keepNewestInactiveVersionsPerPackage));
         cancellationToken.ThrowIfCancellationRequested();
 
-        await using var admission = await _admission.AcquireConfiguredRootOperationAsync(
-            PackageStoreAdmissionKind.Maintenance, cancellationToken).ConfigureAwait(false);
-        if (admission.Status == PackageStoreAdmissionStatus.Unenrolled)
+        if (!_rootResolver.TryResolve(rootLabel, out var configuredRoot) || configuredRoot is null)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The requested package-store root label is not configured.");
+        if (!_catalogRegistry.UsesFileSystem(_files))
+            throw Refuse(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "The inspection service and catalog registry do not share the same native filesystem provider.");
+
+        var owner = await _catalogRegistry.AcquireNativeCatalogOwnerAsync(_rootCatalog, cancellationToken)
+            .ConfigureAwait(false);
+        RootMembershipRegistry.NativeCatalogOwnerBorrow? borrow = null;
+        PackageStoreInspectionSnapshot? snapshot = null;
+        Exception? operationFailure = null;
+        try
         {
-            return new PackageStoreInspectionSnapshot(
-                admission.Status,
-                admission.Root,
+            borrow = await owner.BorrowAsync(cancellationToken).ConfigureAwait(false);
+            snapshot = await InspectUnderCatalogOwnershipAsync(owner, borrow, configuredRoot,
+                keepNewestInactiveVersionsPerPackage, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            operationFailure = exception;
+        }
+
+        var cleanupFailures = new List<Exception>();
+        if (borrow is not null)
+        {
+            try { await borrow.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception exception) { cleanupFailures.Add(exception); }
+        }
+        try { await owner.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception exception) { cleanupFailures.Add(exception); }
+
+        if (operationFailure is not null && cleanupFailures.Count > 0)
+            throw new AggregateException("Selected-root inspection failed and catalog ownership cleanup also failed.",
+                [operationFailure, .. cleanupFailures]);
+        if (operationFailure is not null)
+            ExceptionDispatchInfo.Capture(operationFailure).Throw();
+        if (cleanupFailures.Count == 1)
+            ExceptionDispatchInfo.Capture(cleanupFailures[0]).Throw();
+        if (cleanupFailures.Count > 1)
+            throw new AggregateException("Catalog ownership cleanup failed after selected-root inspection.", cleanupFailures);
+
+        return snapshot ?? throw new InvalidOperationException("Catalog inspection completed without a snapshot.");
+    }
+
+    private async Task<PackageStoreInspectionSnapshot> InspectUnderCatalogOwnershipAsync(
+        RootMembershipRegistry.NativeCatalogOwner owner,
+        RootMembershipRegistry.NativeCatalogOwnerBorrow borrow,
+        TrustedPackageStoreRoot configuredRoot,
+        int? keepNewestInactiveVersionsPerPackage,
+        CancellationToken cancellationToken)
+    {
+        var selectedRoot = owner.ResolveConfiguredRoot(borrow, configuredRoot);
+        var retainedRoots = owner.SnapshotRetainedRoots();
+        var verification = retainedRoots.Length == 0
+            ? Array.Empty<NativeCatalogMemberVerification>()
+            : await _catalogRegistry.VerifyCatalogMemberProtectionAsync(borrow, cancellationToken)
+                .ConfigureAwait(false);
+
+        if (selectedRoot is null)
+        {
+            var snapshot = new PackageStoreInspectionSnapshot(
+                PackageStoreAdmissionStatus.Unenrolled,
+                root: null,
                 enrollmentEpoch: null,
                 ledgerDigest: null,
                 PackageStoreRetentionProtectionKnowledge.Unknown,
@@ -54,71 +129,42 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
                 retentionPlan: null,
                 uses: [],
                 diagnostics: [PackageStoreInspectionDiagnostic.EnrollmentRequired]);
-        }
-
-        if (admission.Status != PackageStoreAdmissionStatus.Enrolled)
-            throw new ArgumentOutOfRangeException(nameof(admission), "The configured-root admission status is unsupported.");
-
-        var root = admission.Root
-            ?? throw Refuse(PackageStoreAdmissionReason.UnknownAuthority, "Enrolled admission did not identify its physical root.");
-        var owner = admission.Owner
-            ?? throw Refuse(PackageStoreAdmissionReason.UnsupportedParticipant, "Enrolled admission did not retain a root operation owner.", root);
-        if (owner.Root != root)
-            throw Refuse(PackageStoreAdmissionReason.RootMismatch, "The configured-root admission and owner identify different roots.", root);
-
-        using var borrow = owner.Borrow();
-        if (borrow.Root != root || borrow.Epoch != owner.Epoch)
-            throw Refuse(PackageStoreAdmissionReason.RootMismatch, "The root borrow changed its admitted identity or epoch.", root);
-
-        var lockedMembers = PackageStoreOperationAccess.GetLockedMemberLocations(borrow);
-        lockedMembers.Revalidate();
-        var ledger = lockedMembers.Ledger;
-        ValidateCompleteBoundary(ledger, root, borrow.Epoch);
-        var ledgerDigest = ledger.LedgerDigest;
-
-        var memberSnapshots = new List<PackageStoreInspectionMember>(ledger.Members.Count);
-        var protectedInstalls = new List<PackageStoreRetentionProtectedInstall>();
-        foreach (var member in ledger.Members.OrderBy(static member => member.MemberId, StringComparer.Ordinal))
-        {
             cancellationToken.ThrowIfCancellationRequested();
-            var state = await lockedMembers.ReadMemberStateAsync(member.MemberId, cancellationToken).ConfigureAwait(false)
-                ?? throw Refuse(PackageStoreAdmissionReason.StateMismatch,
-                    "A Complete membership member did not return its acknowledged state.", root);
-
-            var graphs = PersistedStoreStateGraphVerifier.VerifyAcknowledgedMember(
-                state, ledger, member, root, borrow.Epoch, RootMembershipStatus.Complete);
-            var protection = state.ProtectionRecord
-                ?? throw Refuse(PackageStoreAdmissionReason.StateMismatch,
-                    "An acknowledged member state has no protection record.", root);
-            memberSnapshots.Add(new PackageStoreInspectionMember(
-                member.MemberId,
-                protection.Revision,
-                protection.StateBodyDigest,
-                protection.ProtectionDigest));
-
-            AddProtectedInstalls(graphs.ActiveGraphs, PackageStoreRetentionProtectionReason.Active, protectedInstalls);
-            AddProtectedInstalls(graphs.RecoverableGraphs,
-                PackageStoreRetentionProtectionReason.RecoverableLastKnownGood, protectedInstalls);
+            owner.RevalidateRetainedEvidence();
+            if (verification.Count > 0)
+            {
+                var peerReplay = await _catalogRegistry.VerifyCatalogMemberProtectionAsync(borrow, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!SameCatalogVerification(verification, peerReplay))
+                    throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                        "Catalog protection evidence changed during selected-root inspection.");
+            }
+            cancellationToken.ThrowIfCancellationRequested();
+            owner.RevalidateRetainedEvidence();
+            return snapshot;
         }
 
-        lockedMembers.Revalidate();
-        RequireSameLedger(lockedMembers, ledgerDigest, root, borrow.Epoch);
+        var root = selectedRoot.RootIdentity;
+        var epoch = selectedRoot.EnrollmentEpoch;
+        var ledger = selectedRoot.Ledger;
+        ValidateCompleteBoundary(ledger, root, epoch);
+        var selectedVerification = verification.Where(member => member.RootIdentity == root)
+            .OrderBy(static member => member.MemberId, StringComparer.Ordinal).ToArray();
+        if (selectedVerification.Length != ledger.Members.Count)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "Full catalog verification omitted a selected-root member.", root);
 
-        // This callback performs native graph-use inspection only. Member reads and inventory are deliberately outside it;
-        // LockedMemberLocations serializes validated-root callbacks and state reads on the same non-reentrant gate.
-        var useResult = await PackageStoreOperationAccess.WithValidatedRootAsync(
-            borrow,
-            (files, heldRoot, token) =>
-            {
-                if (!ReferenceEquals(files, _files))
-                    throw Refuse(PackageStoreAdmissionReason.UnsupportedParticipant,
-                        "The inspection service does not share the admitted root's native filesystem provider.", root);
-                return new PackageGraphUseRecordStore(files).InspectAsync(heldRoot, root, ledger, token);
-            },
-            cancellationToken).ConfigureAwait(false);
-        if (useResult.RootIdentity != root || useResult.EnrollmentEpoch != borrow.Epoch)
+        var members = BuildMemberSnapshots(ledger, selectedVerification, root);
+        var protectedInstalls = BuildPersistentProtection(selectedVerification, root);
+        var rootHandle = selectedRoot.PrimaryResolution.AuthorityRoot
+            ?? throw Refuse(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "The selected enrolled catalog root has no retained native handle.", root);
+
+        var useResult = await new PackageGraphUseRecordStore(_files)
+            .InspectAsync(rootHandle, root, ledger, cancellationToken).ConfigureAwait(false);
+        if (useResult.RootIdentity != root || useResult.EnrollmentEpoch != epoch)
             throw Refuse(PackageStoreAdmissionReason.RootMismatch,
-                "Graph-use inventory does not match the admitted root and epoch.", root);
+                "Graph-use inventory does not match the selected root and epoch.", root);
 
         var uses = useResult.Entries.Select(static entry => new PackageStoreInspectionUse(
             entry.Record.UseId,
@@ -126,16 +172,16 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
             entry.Record.SnapshotState,
             entry.Record.GraphSnapshot)).ToArray();
         foreach (var use in uses.Where(static use => use.OwnershipState == GraphUseRecordOwnershipState.Live))
-            AddProtectedInstalls([use.Graph], PackageStoreRetentionProtectionReason.LiveUse, protectedInstalls);
+            AddProtectedInstalls([use.Graph], PackageStoreRetentionProtectionReason.LiveUse, protectedInstalls, root);
 
-        cancellationToken.ThrowIfCancellationRequested();
-        var inventory = await _inventory.ReadAsync(borrow, cancellationToken).ConfigureAwait(false);
-        if (inventory.Root != root || inventory.Epoch != borrow.Epoch)
+        var catalogInventory = _inventory as IPackageStoreCatalogInventory
+            ?? throw Refuse(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "The inventory provider cannot read under retained native catalog ownership.", root);
+        var inventory = await catalogInventory.ReadUnderCatalogOwnershipAsync(
+            rootHandle, root, epoch, cancellationToken).ConfigureAwait(false);
+        if (inventory.Root != root || inventory.Epoch != epoch)
             throw Refuse(PackageStoreAdmissionReason.RootMismatch,
-                "Native package inventory does not match the admitted root and epoch.", root);
-
-        lockedMembers.Revalidate();
-        RequireSameLedger(lockedMembers, ledgerDigest, root, borrow.Epoch);
+                "Native package inventory does not match the selected root and epoch.", root);
 
         var staleUses = uses.Any(static use => use.OwnershipState == GraphUseRecordOwnershipState.Stale);
         var protectionKnowledge = staleUses
@@ -148,7 +194,7 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
             .ToArray();
         var retentionSnapshot = new PackageStoreRetentionSnapshot(
             root,
-            borrow.Epoch,
+            epoch,
             inventory.IsComplete ? PackageStoreRetentionInventoryStatus.Complete : PackageStoreRetentionInventoryStatus.Incomplete,
             completedInstalls,
             protectionKnowledge,
@@ -157,16 +203,22 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
         var retentionPlan = _planner.Plan(retentionSnapshot);
 
         cancellationToken.ThrowIfCancellationRequested();
-        lockedMembers.Revalidate();
-        RequireSameLedger(lockedMembers, ledgerDigest, root, borrow.Epoch);
+        owner.RevalidateRetainedEvidence();
+        var replay = await _catalogRegistry.VerifyCatalogMemberProtectionAsync(borrow, cancellationToken)
+            .ConfigureAwait(false);
+        if (!SameCatalogVerification(verification, replay))
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "Catalog protection evidence changed during selected-root inspection.", root);
+        cancellationToken.ThrowIfCancellationRequested();
+        owner.RevalidateRetainedEvidence();
 
         return new PackageStoreInspectionSnapshot(
-            admission.Status,
+            PackageStoreAdmissionStatus.Enrolled,
             root,
-            borrow.Epoch,
-            ledgerDigest,
+            epoch,
+            ledger.LedgerDigest,
             protectionKnowledge,
-            memberSnapshots,
+            members,
             inventory,
             retentionPlan,
             uses,
@@ -179,6 +231,7 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
         long epoch)
     {
         if (ledger.Status != RootMembershipStatus.Complete || ledger.PendingStateCommit is not null ||
+            ledger.PendingGroupPublicationV2 is not null ||
             ledger.RootIdentity != root || ledger.EnrollmentEpoch != epoch || epoch <= 0)
         {
             throw Refuse(PackageStoreAdmissionReason.IncompleteEnrollment,
@@ -193,29 +246,101 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
         }
     }
 
-    private static void RequireSameLedger(
-        RootMembershipRegistry.LockedMemberLocations lockedMembers,
-        string expectedDigest,
-        PhysicalRootIdentity root,
-        long epoch)
+    private static PackageStoreInspectionMember[] BuildMemberSnapshots(
+        RootMembershipRecord ledger,
+        IReadOnlyList<NativeCatalogMemberVerification> verifiedMembers,
+        PhysicalRootIdentity root)
     {
-        var current = lockedMembers.Ledger;
-        if (current.RootIdentity != root || current.EnrollmentEpoch != epoch ||
-            current.Status != RootMembershipStatus.Complete || current.PendingStateCommit is not null ||
-            !string.Equals(current.LedgerDigest, expectedDigest, StringComparison.Ordinal))
+        var members = new List<PackageStoreInspectionMember>(verifiedMembers.Count);
+        foreach (var verified in verifiedMembers)
         {
-            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
-                "Membership changed during the read-only inspection pass.", root);
+            var member = ledger.Members.SingleOrDefault(candidate => candidate.MemberId == verified.MemberId)
+                ?? throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Full catalog verification returned a member absent from the selected ledger.", root);
+            var (revision, stateBodyDigest, protectionDigest) = member.Binding switch
+            {
+                RootMemberRecord.AcknowledgedBinding acknowledged =>
+                    (acknowledged.ProtectionRecord.Revision, acknowledged.ProtectionRecord.StateBodyDigest,
+                        acknowledged.ProtectionRecord.ProtectionDigest),
+                RootMemberRecord.BundleAcknowledgedBinding bundle =>
+                    (bundle.RootRow.Revision, bundle.RootRow.StateBodyDigest, bundle.RootRow.ProtectionDigest),
+                _ => throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Full catalog verification returned an unsupported selected-root binding.", root)
+            };
+            var expectedStateIdentity = member.Binding switch
+            {
+                RootMemberRecord.AcknowledgedBinding acknowledged => acknowledged.ObservedStateFileIdentity,
+                RootMemberRecord.BundleAcknowledgedBinding bundle => bundle.ObservedStateFileIdentity,
+                _ => throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Full catalog verification returned an unsupported selected-root binding.", root)
+            };
+            if (revision != verified.Revision || verified.StateFileIdentity != expectedStateIdentity)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Selected-root acknowledgement metadata changed during verification.", root);
+            members.Add(new PackageStoreInspectionMember(member.MemberId, revision, stateBodyDigest, protectionDigest));
         }
+        return members.ToArray();
+    }
+
+    private static List<PackageStoreRetentionProtectedInstall> BuildPersistentProtection(
+        IEnumerable<NativeCatalogMemberVerification> verifiedMembers,
+        PhysicalRootIdentity root)
+    {
+        var protectedInstalls = new List<PackageStoreRetentionProtectedInstall>();
+        foreach (var member in verifiedMembers)
+        {
+            if (member.V1Graphs is { } v1)
+            {
+                AddProtectedInstalls(v1.ActiveGraphs, PackageStoreRetentionProtectionReason.Active, protectedInstalls, root);
+                AddProtectedInstalls(v1.RecoverableGraphs,
+                    PackageStoreRetentionProtectionReason.RecoverableLastKnownGood, protectedInstalls, root);
+            }
+            if (member.V2Graphs is { } v2)
+            {
+                AddProtectedInstalls(v2.ActiveGraphs, PackageStoreRetentionProtectionReason.Active, protectedInstalls, root);
+                AddProtectedInstalls(v2.RecoverableGraphs,
+                    PackageStoreRetentionProtectionReason.RecoverableLastKnownGood, protectedInstalls, root);
+            }
+        }
+        return protectedInstalls;
+    }
+
+    private static void AddProtectedInstalls(
+        IEnumerable<ProtectedGraphSnapshotV2> graphs,
+        PackageStoreRetentionProtectionReason reason,
+        ICollection<PackageStoreRetentionProtectedInstall> destination,
+        PhysicalRootIdentity root)
+    {
+        foreach (var install in graphs.SelectMany(static graph => graph.Nodes).Select(static node => node.Install)
+                     .Where(install => install.Root == root))
+            destination.Add(new PackageStoreRetentionProtectedInstall(install, reason));
     }
 
     private static void AddProtectedInstalls(
         IEnumerable<ProtectedGraphSnapshot> graphs,
         PackageStoreRetentionProtectionReason reason,
-        ICollection<PackageStoreRetentionProtectedInstall> destination)
+        ICollection<PackageStoreRetentionProtectedInstall> destination,
+        PhysicalRootIdentity root)
     {
-        foreach (var install in graphs.SelectMany(static graph => graph.Nodes).Select(static node => node.Install))
+        foreach (var install in graphs.SelectMany(static graph => graph.Nodes).Select(static node => node.Install)
+                     .Where(install => install.Root == root))
             destination.Add(new PackageStoreRetentionProtectedInstall(install, reason));
+    }
+
+    private static bool SameCatalogVerification(
+        IReadOnlyList<NativeCatalogMemberVerification> first,
+        IReadOnlyList<NativeCatalogMemberVerification> second)
+    {
+        static (PhysicalRootIdentity Root, long Epoch, string Member, StateSlotIdentity Slot,
+            PhysicalFileIdentity State, long Revision, string StateDigest, string ProtectionDigest)[] Fingerprint(
+            IReadOnlyList<NativeCatalogMemberVerification> members)
+            => members.OrderBy(static member => member.RootIdentity, PhysicalRootIdentityComparer.Instance)
+                .ThenBy(static member => member.MemberId, StringComparer.Ordinal)
+                .Select(static member => (member.RootIdentity, member.EnrollmentEpoch, member.MemberId,
+                    member.StateSlot, member.StateFileIdentity, member.Revision, member.StateBodyDigest,
+                    member.ProtectionDigest)).ToArray();
+
+        return Fingerprint(first).SequenceEqual(Fingerprint(second));
     }
 
     private static PackageStoreAdmissionException Refuse(

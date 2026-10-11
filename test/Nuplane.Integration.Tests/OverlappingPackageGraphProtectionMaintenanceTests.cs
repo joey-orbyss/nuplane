@@ -10,6 +10,7 @@ using Nuplane.Reconciliation;
 using Nuplane.Reconciliation.Models;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.GraphUseRecords;
+using Nuplane.Store.Coordination.PhysicalFiles;
 using Nuplane.Store.Coordination.ProtectionRecords;
 using Nuplane.Store.Maintenance;
 using Nuplane.Store.State;
@@ -28,11 +29,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         await using var providerB = fixture.CreateProvider("member-b");
 
         var inventory = new CountingPackageStoreInventory(new PackageStoreInventory(fixture.Files));
-        var inspection = new PackageStoreInspectionService(
-            fixture.Files,
-            providerB.GetRequiredService<IPackageStoreAdmission>(),
-            inventory,
-            new PackageStoreRetentionPlanner());
+        var inspection = CreateInspectionService(providerB, fixture.Files, inventory);
         var nativeBefore = CaptureFixtureNativeEvidence(fixture);
         PackageFileOpenBarrier? packageOpenBarrier = null;
         Task<ReconciliationRunResult>? cycleA = null;
@@ -199,11 +196,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                                StringComparison.Ordinal));
 
             var nativeBefore = CaptureFixtureNativeEvidence(fixture);
-            var inspectionService = new PackageStoreInspectionService(
-                fixture.Files,
-                providerB.GetRequiredService<IPackageStoreAdmission>(),
-                new PackageStoreInventory(fixture.Files),
-                new PackageStoreRetentionPlanner());
+            var inspectionService = CreateInspectionService(providerB, fixture.Files);
             var inspection = await inspectionService.InspectAsync(0, deadline.Token)
                 .WaitAsync(TimeSpan.FromSeconds(30));
             var nativeAfter = CaptureFixtureNativeEvidence(fixture);
@@ -425,7 +418,19 @@ public sealed partial class OverlappingPackageGraphProtectionTests
 
     private sealed record NativeInstallEvidence(PackageInstallIdentity Identity, string PayloadDigest);
 
-    private sealed class CountingPackageStoreInventory(IPackageStoreInventory inner) : IPackageStoreInventory
+    private static PackageStoreInspectionService CreateInspectionService(
+        IServiceProvider provider,
+        IPhysicalStoreFileSystem files,
+        IPackageStoreInventory? inventory = null)
+        => new(files,
+            Assert.IsType<PackageStoreAdmission>(provider.GetRequiredService<IPackageStoreAdmission>()).Registry,
+            provider.GetRequiredService<ITrustedPackageStoreRootCatalog>(),
+            provider.GetRequiredService<IPackageStoreRootResolver>(),
+            inventory ?? new PackageStoreInventory(files),
+            new PackageStoreRetentionPlanner());
+
+    private sealed class CountingPackageStoreInventory(IPackageStoreInventory inner)
+        : IPackageStoreInventory, IPackageStoreCatalogInventory
     {
         private int _readCount;
 
@@ -437,6 +442,17 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         {
             Interlocked.Increment(ref _readCount);
             return inner.ReadAsync(borrow, cancellationToken);
+        }
+
+        public Task<PackageStoreInventorySnapshot> ReadUnderCatalogOwnershipAsync(
+            PhysicalStoreDirectoryHandle heldRoot,
+            PhysicalRootIdentity expectedRoot,
+            long epoch,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _readCount);
+            return Assert.IsAssignableFrom<IPackageStoreCatalogInventory>(inner)
+                .ReadUnderCatalogOwnershipAsync(heldRoot, expectedRoot, epoch, cancellationToken);
         }
     }
 }
