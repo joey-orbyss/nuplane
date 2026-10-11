@@ -167,7 +167,7 @@ public sealed class UnixPhysicalStorePublicationTests
         }
     }
 
-    private static void CreateHardLink(string existingPath, string newPath)
+    internal static void CreateHardLink(string existingPath, string newPath)
     {
         var result = OperatingSystem.IsMacOS()
             ? DarwinLink(existingPath, newPath)

@@ -118,6 +118,22 @@ jobs:
             build/test-cases/windows-state-destination-entry.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Qualify Unix state payload reads, lexical replacement and retained referent resolution
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 build/qualify-state-files.py Unix "$RUNNER_TEMP/state-files-results"
+
+      - name: Qualify Windows state payload reads, lexical replacement and retained referent resolution
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "${{ steps.windows-destination-python.outputs.python-path }}" build/qualify-state-files.py Windows `
+            (Join-Path $env:RUNNER_TEMP 'state-files-results')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify protection serialization and canonical digests on every supported framework
         shell: bash
         run: |
