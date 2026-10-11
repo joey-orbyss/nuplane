@@ -17,8 +17,8 @@ public sealed class WindowsStateDestinationEntryObservationTests
         var result = WindowsNative.ParseStateDestinationDirectoryEntry(
             CreateRecord("Stored-State.json", "STORE~1.JSN", fileIdLow: 0x1122334455667788, fileIdHigh: 0x99AABBCCDDEEFF00));
 
-        Assert.Equal(0x1122334455667788, result.FileIdLow);
-        Assert.Equal(0x99AABBCCDDEEFF00, result.FileIdHigh);
+        Assert.Equal(0x1122334455667788UL, result.FileIdLow);
+        Assert.Equal(0x99AABBCCDDEEFF00UL, result.FileIdHigh);
         Assert.Equal("Stored-State.json", result.FileName);
         Assert.Equal("STORE~1.JSN", result.ShortName);
         Assert.Equal(WindowsNative.FileAttributeNormal, result.FileAttributes);
@@ -124,7 +124,7 @@ public sealed class WindowsStateDestinationEntryObservationTests
 
         Assert.Equal(shortName, observation.RequestedName);
         Assert.Equal(longName, observation.StoredName);
-        Assert.True(string.Equals(shortName, observation.ShortName, StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(shortName, observation.ShortName, ignoreCase: true);
         Assert.Equal(context.FileSystem.InspectChildNoFollow(context.Parent, longName)!.Identity, observation.Entry.Identity);
     }
 
