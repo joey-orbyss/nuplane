@@ -50,5 +50,9 @@
   "Nuplane.Store.Tests.Coordination.RootMembershipNativeGroupPublicationTests.InspectRootAsync_V2CatalogProjectsProtectionForSelectedRootOnly",
   "Nuplane.Store.Tests.Coordination.RootMembershipNativeGroupPublicationTests.InspectRootAsync_PendingGroupOnSelectedOrPeerRefusesWithoutMutation(selectedLabel: \"root-1\")",
   "Nuplane.Store.Tests.Coordination.RootMembershipNativeGroupPublicationTests.InspectRootAsync_CorruptConfiguredPeerAcknowledgementRefusesValidSelectedRootWithoutMutation",
-  "Nuplane.Store.Tests.Coordination.RootMembershipNativeGroupPublicationTests.InspectRootAsync_PendingGroupOnSelectedOrPeerRefusesWithoutMutation(selectedLabel: \"root-0\")"
+  "Nuplane.Store.Tests.Coordination.RootMembershipNativeGroupPublicationTests.InspectRootAsync_PendingGroupOnSelectedOrPeerRefusesWithoutMutation(selectedLabel: \"root-0\")",
+  "Nuplane.Store.Tests.Coordination.RootMembershipNativeGroupPublicationTests.AddNuplane_RegistersEnrollmentPreviewConcreteAndInternalInterfacesAsOneInstance",
+  "Nuplane.Store.Tests.Coordination.RootMembershipNativeGroupPublicationTests.PreviewRootAsync_CompleteV2CatalogVerifiesExactSelectedRootAndHistory",
+  "Nuplane.Store.Tests.Coordination.RootMembershipNativeGroupPublicationTests.PreviewRootAsync_CompleteV2ExplicitKnownEmptyIsDistinctFromLegacyUnknown",
+  "Nuplane.Store.Tests.Coordination.RootMembershipNativeGroupPublicationTests.PreviewRootAsync_PendingGroupReportsRecoveryWithoutMutation"
 ]

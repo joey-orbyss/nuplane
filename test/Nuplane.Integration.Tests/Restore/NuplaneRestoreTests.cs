@@ -8,6 +8,7 @@ using Nuplane.Builder;
 using Nuplane.Feeds;
 using Nuplane.Feeds.Configuration;
 using Nuplane.Feeds.Versioning;
+using Nuplane.Integration.Tests.Support;
 using Nuplane.Loading;
 using Nuplane.Reconciliation.LockFile;
 using Nuplane.Restore;
@@ -21,6 +22,7 @@ namespace Nuplane.Integration.Tests.Restore;
 /// End-to-end tests for the host-free restore entry point. Every one of them runs against a local
 /// directory feed and temporary directories: nothing here touches a network.
 /// </summary>
+[Collection(nameof(ProcessWorkingDirectoryCollection))]
 public sealed class NuplaneRestoreTests : IDisposable
 {
     private const string FeedName = "local-drop";

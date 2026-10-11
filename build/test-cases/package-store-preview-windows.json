@@ -44,5 +44,21 @@
   "Nuplane.Store.Tests.PackageStoreInspectionServiceTests.InspectRootAsync_PendingMemberStateOnSelectedOrPeerRefusesWithoutRecovery(pendingSelected: True)",
   "Nuplane.Store.Tests.PackageStoreInspectionServiceTests.InspectRootAsync_UnenrolledSelectedRootStillVerifiesEnrolledPeer",
   "Nuplane.Store.Tests.PackageStoreInspectionServiceTests.InspectRootAsync_UnknownLabelRefusesBeforeNativeAccess",
-  "Nuplane.Store.Tests.PackageStoreInspectionServiceTests.InspectRootAsync_RefusesMismatchedNativeProviderBeforeCatalogAccess"
+  "Nuplane.Store.Tests.PackageStoreInspectionServiceTests.InspectRootAsync_RefusesMismatchedNativeProviderBeforeCatalogAccess",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.DeclarationCatalog_FreezesMutableInterfaceDefinitionOnConstruction",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_AcknowledgedBindingRejectsSameBodyDifferentProtectionPayload",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_CancellationDuringCompleteDecodeReleasesCatalogOwnership",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_CancellationIsPropagatedBeforeObservation",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_CompleteV1UsesFullCatalogVerificationAndReturnsKnownClosures",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_InPlacePayloadRewriteDuringAsyncDecodeReturnsChangedWithStableIdentity",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_IncompleteBoundUnprotectedMembersReportMigrationAndActualState",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_LeafReplacementDuringAsyncDecodeReturnsChangedButPreservesDecodedMaps",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_LedgerDeclarationMismatchStopsBeforePayloadReads",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_MissingDeclarationsReturnsExplicitDiagnosticWithoutReading",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_NullMalformedAndMissingRemainDistinct(payload: \"<missing>\", expected: \"Missing\")",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_NullMalformedAndMissingRemainDistinct(payload: \"null\", expected: \"NullPayload\")",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_NullMalformedAndMissingRemainDistinct(payload: \"{broken\", expected: \"Malformed\")",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_PendingLocalPublicationReportsRecoveryWithoutMutation",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_UnenrolledRootReturnsActualLegacyStateWithoutMutation",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentPreviewTests.PreviewRootAsync_UnprotectedBindingDoesNotTrustUnacknowledgedProtectionMetadata"
 ]
