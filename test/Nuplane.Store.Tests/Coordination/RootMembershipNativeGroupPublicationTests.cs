@@ -864,7 +864,7 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
         internal PhysicalFileIdentity? ArtifactIdentity(string path)
             => _files.InspectChildNoFollow(_sharedParent, Path.GetFileName(path))?.Identity;
 
-        internal GroupPublicationPlan PrepareNextGraphPublication()
+        internal GroupPublicationPlan PrepareNextGraphPublication(PackageInstallIdentity? newlyActiveRootInstall = null)
         {
             var priorState = ReadSharedState();
             var priorBundle = priorState.ProtectionBundle
@@ -879,11 +879,89 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
                 ProtectionRecord = null,
                 ProtectionBundle = null
             };
-            var nextBodyDigest = ProtectionDigest.StateBody(nextBase);
+            var activeClosure = priorBundle.Rows[0].ActiveClosure;
+            var recoverableClosure = priorBundle.Rows[0].RecoverableClosure;
             var nextGeneration = checked(priorBundle.StateGeneration + 1);
+            if (newlyActiveRootInstall is not null)
+            {
+                if (newlyActiveRootInstall.Root != RootAIdentity)
+                    throw new ArgumentException("The test replacement install must belong to root A.", nameof(newlyActiveRootInstall));
+
+                var currentGraph = activeClosure.Graphs!.Single();
+                var currentRootSelection = currentGraph.RequestedRoots.Single();
+                var currentRootNode = currentGraph.Nodes.Single(node => node.NodeId == currentRootSelection.SelectedNodeId);
+                if (!string.Equals(newlyActiveRootInstall.PackageId, currentRootNode.Install.PackageId,
+                        StringComparison.OrdinalIgnoreCase))
+                    throw new ArgumentException("The test replacement must retain the current graph root package id.", nameof(newlyActiveRootInstall));
+
+                var graphGeneration = $"generation-{nextGeneration}";
+                var nodes = currentGraph.Nodes.Select(node => node.NodeId == currentRootNode.NodeId
+                    ? CreateInternal<PackageGraphNodeIdentity>(node.NodeId, newlyActiveRootInstall)
+                    : node).ToArray();
+                var request = new PackageRequest(newlyActiveRootInstall.PackageId,
+                    $"[{newlyActiveRootInstall.Version}]", currentRootSelection.Request.FeedName,
+                    PackageUpdatePolicy.Range, currentRootSelection.Request.SourceName);
+                var selection = CreateInternal<PackageGraphRootSelection>(request, currentRootNode.NodeId);
+                var recoveryEvidence = CreateInternal<ProtectedGraphRecoverySelectionEvidenceV2>(
+                    RecoverableGraphSnapshotFactory.RecoveryPolicyId, nextGeneration, new[] { currentRootNode.NodeId });
+                var graph = CreateInternal<ProtectedGraphSnapshotV2>(Guid.NewGuid(), currentGraph.GraphId,
+                    graphGeneration, currentGraph.Disposition, currentGraph.Roots, new[] { selection }, nodes,
+                    currentGraph.Edges, recoveryEvidence);
+                activeClosure = CreateInternal<PackageProtectionClosureV2>(PackageProtectionClosureKnowledge.Known,
+                    null!, new[] { graph });
+                recoverableClosure = activeClosure;
+
+                var activeVersions = new Dictionary<string, string>(nextBase.ActiveVersionById,
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    [newlyActiveRootInstall.PackageId] = newlyActiveRootInstall.Version
+                };
+                var lkgVersions = new Dictionary<string, string>(nextBase.LastKnownGoodById,
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    [newlyActiveRootInstall.PackageId] = newlyActiveRootInstall.Version
+                };
+                var installPath = Path.Combine(_rootAPath,
+                    newlyActiveRootInstall.RootRelativeInstallPath.Replace('/', Path.DirectorySeparatorChar));
+                var descriptors = new Dictionary<string, ActivePackageDescriptor>(
+                    nextBase.ActivePackageDescriptorsByIdNormalized, StringComparer.OrdinalIgnoreCase);
+                descriptors[newlyActiveRootInstall.PackageId] = descriptors[newlyActiveRootInstall.PackageId] with
+                {
+                    Version = newlyActiveRootInstall.Version,
+                    InstallPath = installPath,
+                    GraphGenerationId = graphGeneration
+                };
+                foreach (var node in nodes.Where(node => node.NodeId != currentRootNode.NodeId))
+                    descriptors[node.Install.PackageId] = descriptors[node.Install.PackageId] with
+                    {
+                        GraphGenerationId = graphGeneration,
+                        RootPackageIds = [newlyActiveRootInstall.PackageId],
+                        DependencyOfPackageIds = [newlyActiveRootInstall.PackageId]
+                    };
+
+                var currentActivation = nextBase.ActiveGraphsByIdNormalized[currentGraph.GraphId];
+                var activation = currentActivation with
+                {
+                    GenerationId = graphGeneration,
+                    RootPackageIds = [newlyActiveRootInstall.PackageId],
+                    NodePackageIds = nodes.Select(node => node.Install.PackageId).ToArray(),
+                    NodeVersionsByPackageId = nodes.ToDictionary(node => node.Install.PackageId,
+                        node => node.Install.Version, StringComparer.OrdinalIgnoreCase)
+                };
+                nextBase = nextBase with
+                {
+                    ActiveVersionById = activeVersions,
+                    LastKnownGoodById = lkgVersions,
+                    ActivePackageDescriptorsById = descriptors,
+                    ActiveGraphsById = new Dictionary<string, GraphActivationRecord>(
+                        nextBase.ActiveGraphsByIdNormalized, StringComparer.OrdinalIgnoreCase)
+                        { [currentGraph.GraphId] = activation }
+                };
+            }
+            var nextBodyDigest = ProtectionDigest.StateBody(nextBase);
             var rows = priorBundle.Rows.Select(row => new PackageProtectionBundleRootRow(
                 row.RootIdentity, row.EnrollmentEpoch, row.MemberId, checked(row.Revision + 1),
-                nextGeneration, nextBodyDigest, row.ActiveClosure, row.RecoverableClosure,
+                nextGeneration, nextBodyDigest, activeClosure, recoverableClosure,
                 row.RetiredGraphs, row.LegacyUnknownRecovery)).ToArray();
             var bundle = new PackageProtectionBundle(PackageProtectionBundle.CurrentSchemaVersion,
                 priorBundle.LogicalMemberId, transactionId, nextGeneration, nextBodyDigest, rows);

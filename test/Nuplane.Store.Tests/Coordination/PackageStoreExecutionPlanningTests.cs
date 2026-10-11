@@ -257,9 +257,12 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
         internal PackageStoreExecutionService Service { get; }
 
         internal static async Task<ExecutionFixture> CreateAsync(Func<Context, Task<string[]>>? configure = null,
-            Func<PackageStoreInventorySnapshot, PackageStoreInventorySnapshot>? transform = null)
+            Func<PackageStoreInventorySnapshot, PackageStoreInventorySnapshot>? transform = null,
+            bool withCrossRootGraph = true)
         {
-            var context = await Context.CreateWithGraphAsync();
+            var context = withCrossRootGraph
+                ? await Context.CreateWithGraphAsync()
+                : await Context.CreateAsync();
             try
             {
                 await context.Registry().PublishNativeGroupAsync(context.Descriptor, context.Requests,

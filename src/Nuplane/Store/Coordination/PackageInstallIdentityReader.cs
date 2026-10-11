@@ -365,6 +365,7 @@ internal sealed class PackageInstallIdentityReader
         private readonly IReadOnlyList<PhysicalStoreHandle> _ownedHandles;
         private readonly object _gate = new();
         private bool _disposed;
+        private bool _preparedForMove;
 
         internal PackageInstallIdentityObservation(
             IPhysicalStoreFileSystem files,
@@ -410,66 +411,51 @@ internal sealed class PackageInstallIdentityReader
         {
             lock (_gate)
             {
+                RequireFullObservationLocked();
+                RevalidateLocked();
+            }
+        }
+
+        /// <summary>Joins every retained install-path edge to its exact canonical native name.</summary>
+        /// <remarks>This deletion-only check leaves ordinary <see cref="Observe"/> behavior noncanonical.</remarks>
+        internal PackageInstallDeletionLocation ObserveCanonicalDeletionLocation()
+        {
+            lock (_gate)
+            {
+                RequireFullObservationLocked();
+                RevalidateLocked();
+                return ObserveCanonicalDeletionLocationLocked();
+            }
+        }
+
+        /// <summary>Closes leaf and marker handles while preserving exact root/feed/package ancestry.</summary>
+        /// <remarks>This is a native-handle lifecycle transition only; it does not publish or move anything.</remarks>
+        internal PackageInstallDeletionLocation PrepareForMove(PackageInstallDeletionLocation expectedLocation)
+        {
+            ArgumentNullException.ThrowIfNull(expectedLocation);
+            lock (_gate)
+            {
+                RequireFullObservationLocked();
+                RevalidateLocked();
+                var observed = ObserveCanonicalDeletionLocationLocked();
+                RequireSameDeletionLocation(expectedLocation, observed);
+                RevalidateLocked();
+                _completionMarker.Dispose();
+                _installDirectory.Dispose();
+                _preparedForMove = true;
+                return observed;
+            }
+        }
+
+        /// <summary>Revalidates retained root/feed/package ancestry after leaf handles have closed.</summary>
+        internal void RevalidateDeletionParent()
+        {
+            lock (_gate)
+            {
                 ObjectDisposedException.ThrowIf(_disposed, this);
-
-                var root = _files.InspectHandle(_root);
-                if (root.Kind != PhysicalStoreEntryKind.Directory || root.Identity != _rootIdentity ||
-                    root.Identity != _expectedRoot.HandleIdentity)
-                {
-                    throw Unknown("The retained package-install root identity changed.", _expectedRoot);
-                }
-                RequireSameSemantics(_root, _rootSemantics);
-
-                if (_edges.Count != 0 && IsReservedRootDirectory(
-                        _files,
-                        _root,
-                        _edges[0].RequestedName,
-                        _edges[0].ChildIdentity,
-                        _rootSemantics))
-                {
-                    throw Unknown("The retained install path now resolves to a reserved control or staging directory.", _expectedRoot);
-                }
-
-                foreach (var edge in _edges)
-                    RevalidateEdge(edge);
-
-                var installDirectory = _files.InspectHandle(_installDirectory);
-                if (installDirectory.Kind != PhysicalStoreEntryKind.Directory ||
-                    installDirectory.Identity != _installDirectoryIdentity)
-                {
-                    throw Unknown("The retained package install directory changed.", _expectedRoot);
-                }
-                PackageInstallIdentityReader.RequireSameVolume(installDirectory.Identity, _rootIdentity, _expectedRoot);
-                RequireSameSemantics(_installDirectory, _installDirectorySemantics);
-
-                var marker = PackageInstallIdentityReader.RequireCompletionMarker(
-                    _files.InspectHandle(_completionMarker), _expectedRoot, _completionMarkerIdentity);
-                var namedMarker = PackageInstallIdentityReader.RequireCompletionMarker(
-                    _files.InspectChildNoFollow(_installDirectory, PackageInstallStore.CompletionMarkerFileName),
-                    _expectedRoot,
-                    _completionMarkerIdentity);
-                using var reopenedMarker = _files.OpenFileChildNoFollow(
-                    _installDirectory,
-                    PackageInstallStore.CompletionMarkerFileName,
-                    FileAccess.Read);
-                var reopened = PackageInstallIdentityReader.RequireCompletionMarker(
-                    _files.InspectHandle(reopenedMarker), _expectedRoot, _completionMarkerIdentity);
-                var markerAfter = PackageInstallIdentityReader.RequireCompletionMarker(
-                    _files.InspectChildNoFollow(_installDirectory, PackageInstallStore.CompletionMarkerFileName),
-                    _expectedRoot,
-                    _completionMarkerIdentity);
-                var leafAfter = _files.InspectHandle(_installDirectory);
-                RequireSameSemantics(_installDirectory, _installDirectorySemantics);
-                if (marker.Identity != namedMarker.Identity || reopened.Identity != marker.Identity ||
-                    markerAfter.Identity != marker.Identity || leafAfter.Kind != PhysicalStoreEntryKind.Directory ||
-                    leafAfter.Identity != _installDirectoryIdentity)
-                {
-                    throw Unknown("The completion marker changed during revalidation.", _expectedRoot);
-                }
-
-                var completionIdentity = ProtectionDigest.PackageInstallCompletionIdentity(marker.Identity);
-                if (!string.Equals(completionIdentity, InstallIdentity.CompletionIdentity, StringComparison.Ordinal))
-                    throw Unknown("The canonical completion identity changed.", _expectedRoot);
+                if (!_preparedForMove)
+                    throw new InvalidOperationException("The install leaf must be closed before using its deletion parent binding.");
+                RevalidateRootAndPackageParentLocked(canonical: true);
             }
         }
 
@@ -529,6 +515,149 @@ internal sealed class PackageInstallIdentityReader
                 throw Unknown("A retained install-path name no longer resolves to its opened child.", _expectedRoot);
         }
 
+        private void RevalidateLocked()
+        {
+            RevalidateRootAndPackageParentLocked(canonical: false);
+            var edge = _edges[^1];
+            RevalidateEdge(edge);
+
+            var installDirectory = _files.InspectHandle(_installDirectory);
+            if (installDirectory.Kind != PhysicalStoreEntryKind.Directory ||
+                installDirectory.Identity != _installDirectoryIdentity)
+            {
+                throw Unknown("The retained package install directory changed.", _expectedRoot);
+            }
+            PackageInstallIdentityReader.RequireSameVolume(installDirectory.Identity, _rootIdentity, _expectedRoot);
+            RequireSameSemantics(_installDirectory, _installDirectorySemantics);
+
+            var marker = PackageInstallIdentityReader.RequireCompletionMarker(
+                _files.InspectHandle(_completionMarker), _expectedRoot, _completionMarkerIdentity);
+            var namedMarker = PackageInstallIdentityReader.RequireCompletionMarker(
+                _files.InspectChildNoFollow(_installDirectory, PackageInstallStore.CompletionMarkerFileName),
+                _expectedRoot,
+                _completionMarkerIdentity);
+            using var reopenedMarker = _files.OpenFileChildNoFollow(
+                _installDirectory,
+                PackageInstallStore.CompletionMarkerFileName,
+                FileAccess.Read);
+            var reopened = PackageInstallIdentityReader.RequireCompletionMarker(
+                _files.InspectHandle(reopenedMarker), _expectedRoot, _completionMarkerIdentity);
+            var markerAfter = PackageInstallIdentityReader.RequireCompletionMarker(
+                _files.InspectChildNoFollow(_installDirectory, PackageInstallStore.CompletionMarkerFileName),
+                _expectedRoot,
+                _completionMarkerIdentity);
+            var leafAfter = _files.InspectHandle(_installDirectory);
+            RequireSameSemantics(_installDirectory, _installDirectorySemantics);
+            if (marker.Identity != namedMarker.Identity || reopened.Identity != marker.Identity ||
+                markerAfter.Identity != marker.Identity || leafAfter.Kind != PhysicalStoreEntryKind.Directory ||
+                leafAfter.Identity != _installDirectoryIdentity)
+            {
+                throw Unknown("The completion marker changed during revalidation.", _expectedRoot);
+            }
+
+            var completionIdentity = ProtectionDigest.PackageInstallCompletionIdentity(marker.Identity);
+            if (!string.Equals(completionIdentity, InstallIdentity.CompletionIdentity, StringComparison.Ordinal))
+                throw Unknown("The canonical completion identity changed.", _expectedRoot);
+        }
+
+        private void RevalidateRootAndPackageParentLocked(bool canonical)
+        {
+            var root = _files.InspectHandle(_root);
+            if (root.Kind != PhysicalStoreEntryKind.Directory || root.Identity != _rootIdentity ||
+                root.Identity != _expectedRoot.HandleIdentity)
+            {
+                throw Unknown("The retained package-install root identity changed.", _expectedRoot);
+            }
+            RequireSameSemantics(_root, _rootSemantics);
+
+            if (_edges.Count != 0 && IsReservedRootDirectory(
+                    _files,
+                    _root,
+                    _edges[0].RequestedName,
+                    _edges[0].ChildIdentity,
+                    _rootSemantics))
+            {
+                throw Unknown("The retained install path now resolves to a reserved control or staging directory.", _expectedRoot);
+            }
+
+            // The last edge names the install leaf. Once it closes, only root -> feed -> package
+            // remains part of the held deletion parent binding.
+            var retainedEdgeCount = _edges.Count - 1;
+            for (var index = 0; index < retainedEdgeCount; index++)
+            {
+                var edge = _edges[index];
+                RevalidateEdge(edge);
+                if (canonical)
+                    RequireCanonicalDirectoryEdge(edge);
+            }
+        }
+
+        private PackageInstallDeletionLocation ObserveCanonicalDeletionLocationLocked()
+        {
+            for (var index = 0; index < _edges.Count; index++)
+                RequireCanonicalDirectoryEdge(_edges[index]);
+
+            var parent = _edges[^1].Parent;
+            var parentInfo = _files.InspectHandle(parent);
+            if (parentInfo.Kind != PhysicalStoreEntryKind.Directory || parentInfo.Identity != _edges[^1].ParentIdentity)
+                throw Unknown("The exact package parent changed during canonical name observation.", _expectedRoot);
+            RequireSameSemantics(parent, _edges[^1].ParentSemantics);
+            return new PackageInstallDeletionLocation(
+                _root,
+                _rootIdentity,
+                _rootSemantics,
+                parent,
+                _edges[^1].ParentIdentity,
+                _edges[^1].ParentSemantics,
+                _edges[^1].RequestedName,
+                _installDirectoryIdentity,
+                _installDirectorySemantics,
+                _completionMarkerIdentity,
+                InstallIdentity);
+        }
+
+        private void RequireCanonicalDirectoryEdge(DirectoryEdgeObservation edge)
+        {
+            var directories = _files as IPhysicalStoreDirectoryNameFileSystem
+                ?? throw Unsupported("Deletion candidate binding requires exact native directory-name observations.");
+            var canonical = directories.ObserveCanonicalDirectoryNameNoFollow(
+                edge.Parent, edge.RequestedName, edge.ChildIdentity);
+            if (canonical.Basename != edge.RequestedName || canonical.ParentIdentity != edge.ParentIdentity ||
+                canonical.Semantics != edge.ParentSemantics || canonical.FileIdentity != edge.ChildIdentity)
+            {
+                throw Unknown("An install path component is not the exact canonical native directory entry.", _expectedRoot);
+            }
+        }
+
+        private void RequireFullObservationLocked()
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_preparedForMove)
+                throw new PackageStoreAdmissionException(
+                    PackageStoreAdmissionReason.ExpiredScope,
+                    "The install leaf has already been closed for its deletion parent binding.",
+                    _expectedRoot);
+        }
+
+        private static void RequireSameDeletionLocation(
+            PackageInstallDeletionLocation expected,
+            PackageInstallDeletionLocation observed)
+        {
+            if (!ReferenceEquals(expected.RootHandle, observed.RootHandle) ||
+                expected.RootIdentity != observed.RootIdentity || expected.RootSemantics != observed.RootSemantics ||
+                !ReferenceEquals(expected.PackageParentHandle, observed.PackageParentHandle) ||
+                expected.PackageParentIdentity != observed.PackageParentIdentity ||
+                expected.PackageParentSemantics != observed.PackageParentSemantics ||
+                !string.Equals(expected.OriginalBasename, observed.OriginalBasename, StringComparison.Ordinal) ||
+                expected.InstallDirectoryIdentity != observed.InstallDirectoryIdentity ||
+                expected.InstallDirectorySemantics != observed.InstallDirectorySemantics ||
+                expected.CompletionMarkerIdentity != observed.CompletionMarkerIdentity ||
+                expected.InstallIdentity != observed.InstallIdentity)
+            {
+                throw Unknown("The canonical install location changed after candidate binding.", expected.InstallIdentity.Root);
+            }
+        }
+
         private void RequireSameSemantics(PhysicalStoreDirectoryHandle directory, PhysicalStoreNameSemantics expected)
         {
             var actual = _names.ObserveDirectoryNameSemantics(directory);
@@ -539,4 +668,17 @@ internal sealed class PackageInstallIdentityReader
         private static PackageStoreAdmissionException Unknown(string message, PhysicalRootIdentity root)
             => new(PackageStoreAdmissionReason.UnknownAuthority, message, root);
     }
+
+    internal sealed record PackageInstallDeletionLocation(
+        PhysicalStoreDirectoryHandle RootHandle,
+        PhysicalFileIdentity RootIdentity,
+        PhysicalStoreNameSemantics RootSemantics,
+        PhysicalStoreDirectoryHandle PackageParentHandle,
+        PhysicalFileIdentity PackageParentIdentity,
+        PhysicalStoreNameSemantics PackageParentSemantics,
+        string OriginalBasename,
+        PhysicalFileIdentity InstallDirectoryIdentity,
+        PhysicalStoreNameSemantics InstallDirectorySemantics,
+        PhysicalFileIdentity CompletionMarkerIdentity,
+        PackageInstallIdentity InstallIdentity);
 }

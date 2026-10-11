@@ -37,6 +37,13 @@ internal sealed class PhysicalStoreDeletionManifestReader
         PhysicalStoreDirectoryHandle installDirectory,
         PackageInstallIdentity expectedInstall,
         CancellationToken cancellationToken)
+        => CaptureCore(installDirectory, expectedInstall, boundLocation: null, cancellationToken);
+
+    private PhysicalStoreDeletionManifest CaptureCore(
+        PhysicalStoreDirectoryHandle installDirectory,
+        PackageInstallIdentity expectedInstall,
+        BoundPackageParent? boundLocation,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(installDirectory);
         ArgumentNullException.ThrowIfNull(expectedInstall);
@@ -54,6 +61,8 @@ internal sealed class PhysicalStoreDeletionManifestReader
 
         var parentSemantics = Profile(parent, expectedInstall.Root);
         var semantics = Profile(installDirectory, expectedInstall.Root);
+        if (boundLocation is not null)
+            VerifyBoundLocation(parent, parentInfo.Identity, parentSemantics);
         var entries = new List<PhysicalStoreDeletionManifestEntry>();
         var identities = new HashSet<PhysicalFileIdentity>
             { installInfo.Identity, parentInfo.Identity, expectedInstall.Root.HandleIdentity };
@@ -68,6 +77,8 @@ internal sealed class PhysicalStoreDeletionManifestReader
         RequireHeldDirectory(parent, parentInfo.Identity, parentSemantics);
         using var currentParent = _files.OpenParentDirectory(installDirectory);
         RequireHeldDirectory(currentParent, parentInfo.Identity, parentSemantics);
+        if (boundLocation is not null)
+            VerifyBoundLocation(currentParent, parentInfo.Identity, parentSemantics);
         return new PhysicalStoreDeletionManifest(installInfo.Identity, semantics, entries);
 
         void Walk(PhysicalStoreDirectoryHandle directory, string[] path,
@@ -150,7 +161,79 @@ internal sealed class PhysicalStoreDeletionManifestReader
             }
             RequireHeldDirectory(directory, identity, profile);
         }
+
+        void VerifyBoundLocation(
+            PhysicalStoreDirectoryHandle capturedParent,
+            PhysicalFileIdentity capturedParentIdentity,
+            PhysicalStoreNameSemantics capturedParentSemantics)
+        {
+            var expected = boundLocation!;
+            if (capturedParentIdentity != expected.ParentIdentity ||
+                capturedParentSemantics != expected.ParentSemantics ||
+                semantics != expected.InstallDirectorySemantics)
+            {
+                throw Unknown("The manifest reader opened a different package parent than candidate binding observed.");
+            }
+            RequireHeldDirectory(expected.ParentHandle, expected.ParentIdentity, expected.ParentSemantics);
+
+            var named = RequireDirectory(
+                _files.InspectChildNoFollow(capturedParent, expected.OriginalBasename),
+                expectedInstall.DirectoryIdentity);
+            using var reopened = _files.OpenDirectoryChildNoFollow(capturedParent, expected.OriginalBasename);
+            RequireDirectory(_files.InspectHandle(reopened), expectedInstall.DirectoryIdentity);
+            if (Profile(reopened, expectedInstall.Root) != expected.InstallDirectorySemantics)
+                throw Unknown("The bound install directory's name profile changed during manifest capture.");
+            RequireCanonical(_directories.ObserveCanonicalDirectoryNameNoFollow(
+                capturedParent, expected.OriginalBasename, expectedInstall.DirectoryIdentity),
+                expected.OriginalBasename,
+                expected.ParentIdentity,
+                expected.ParentSemantics,
+                expectedInstall.DirectoryIdentity);
+            if (_files.InspectHandle(installDirectory).Identity != named.Identity ||
+                _files.InspectChildNoFollow(capturedParent, expected.OriginalBasename) != named)
+            {
+                throw Unknown("The bound install basename changed during manifest capture.");
+            }
+            RequireHeldDirectory(expected.ParentHandle, expected.ParentIdentity, expected.ParentSemantics);
+        }
     }
+
+    /// <summary>Captures a baseline only when the traversal's opened parent and exact name match retained ancestry.</summary>
+    /// <remarks>
+    /// This overload joins the reader's fresh <c>..</c> handle to the same held package parent used by
+    /// deletion candidate binding. It remains descriptive and grants no mutation authority.
+    /// </remarks>
+    internal PhysicalStoreDeletionManifest Capture(
+        PhysicalStoreDirectoryHandle installDirectory,
+        PackageInstallIdentity expectedInstall,
+        PhysicalStoreDirectoryHandle expectedPackageParent,
+        PhysicalFileIdentity expectedPackageParentIdentity,
+        PhysicalStoreNameSemantics expectedPackageParentSemantics,
+        string expectedInstallBasename,
+        PhysicalStoreNameSemantics expectedInstallDirectorySemantics,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(installDirectory);
+        ArgumentNullException.ThrowIfNull(expectedInstall);
+        ArgumentNullException.ThrowIfNull(expectedPackageParent);
+        ArgumentNullException.ThrowIfNull(expectedPackageParentIdentity);
+        ArgumentNullException.ThrowIfNull(expectedPackageParentSemantics);
+        ArgumentNullException.ThrowIfNull(expectedInstallDirectorySemantics);
+        PhysicalStoreNames.ValidateSingleComponent(expectedInstallBasename);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        return CaptureCore(installDirectory, expectedInstall,
+            new BoundPackageParent(expectedPackageParent, expectedPackageParentIdentity,
+                expectedPackageParentSemantics, expectedInstallBasename, expectedInstallDirectorySemantics),
+            cancellationToken);
+    }
+
+    private sealed record BoundPackageParent(
+        PhysicalStoreDirectoryHandle ParentHandle,
+        PhysicalFileIdentity ParentIdentity,
+        PhysicalStoreNameSemantics ParentSemantics,
+        string OriginalBasename,
+        PhysicalStoreNameSemantics InstallDirectorySemantics);
 
     private string[] ReadNames(PhysicalStoreDirectoryHandle directory)
     {

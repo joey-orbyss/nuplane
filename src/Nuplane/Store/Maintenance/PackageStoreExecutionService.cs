@@ -14,6 +14,8 @@ internal sealed class PackageStoreExecutionService(
     RootMembershipRegistry registry,
     PackageStoreInspectionService inspection)
 {
+    private readonly PackageStoreDeletionCandidateBinder _candidateBinder = new(registry.Files);
+
     internal async Task<TResult> PlanAndRunAsync<TResult>(
         string? rootLabel,
         long expectedEnrollmentEpoch,
@@ -49,13 +51,33 @@ internal sealed class PackageStoreExecutionService(
                     "Execution requires a fresh complete retention plan with known protection and exact confirmation.",
                     selectedRoot.RootIdentity);
 
-            var context = new Context(registry, borrow, operation, configuredRoot, snapshot);
-            context.Revalidate(cancellationToken);
-            var result = await candidateWork(context, cancellationToken).ConfigureAwait(false);
-            context.Revalidate(cancellationToken);
-            await registry.VerifyCatalogMemberProtectionUnderOperationAsync(borrow, operation, cancellationToken)
-                .ConfigureAwait(false);
-            context.Revalidate(cancellationToken);
+            var context = new Context(registry, borrow, operation, configuredRoot, snapshot, _candidateBinder);
+            TResult result;
+            try
+            {
+                context.Revalidate(cancellationToken);
+                result = await candidateWork(context, cancellationToken).ConfigureAwait(false);
+                context.Revalidate(cancellationToken);
+                await registry.VerifyCatalogMemberProtectionUnderOperationAsync(borrow, operation, cancellationToken)
+                    .ConfigureAwait(false);
+                context.Revalidate(cancellationToken);
+            }
+            catch (Exception candidateFailure)
+            {
+                try
+                {
+                    context.Dispose();
+                }
+                catch (Exception cleanupFailure)
+                {
+                    throw new AggregateException(
+                        "Execution candidate work failed and native candidate cleanup also failed.",
+                        candidateFailure,
+                        cleanupFailure);
+                }
+                throw;
+            }
+            context.Dispose();
             return result;
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -66,8 +88,15 @@ internal sealed class PackageStoreExecutionService(
         RootMembershipRegistry.NativeCatalogOwnerBorrow borrow,
         RootMembershipRegistry.NativeCatalogOwnerBorrow.Operation operation,
         TrustedPackageStoreRoot configuredRoot,
-        PackageStoreInspectionSnapshot snapshot)
+        PackageStoreInspectionSnapshot snapshot,
+        PackageStoreDeletionCandidateBinder candidateBinder) : IDisposable
     {
+        private readonly PackageStoreDeletionCandidateBinder _candidateBinder = candidateBinder;
+        private readonly object _gate = new();
+        private readonly List<PackageStoreDeletionCandidate> _candidates = [];
+        private readonly HashSet<PackageStoreRetentionPlanEntry> _boundRows = new(ReferenceEqualityComparer.Instance);
+        private bool _disposed;
+
         internal PackageStoreInspectionSnapshot Snapshot { get; } = snapshot;
 
         internal PhysicalStoreDirectoryHandle RootHandle
@@ -83,9 +112,103 @@ internal sealed class PackageStoreExecutionService(
 
         internal void Revalidate(CancellationToken cancellationToken)
         {
+            lock (_gate)
+            {
+                if (_disposed)
+                    throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.ExpiredScope,
+                        "The execution context has ended.", Snapshot.Root);
+            }
             cancellationToken.ThrowIfCancellationRequested();
             borrow.RequireOperation(operation, registry);
             borrow.Owner.RevalidateRetainedEvidence();
         }
+
+        /// <summary>Binds only the exact Eligible row in this execution's fresh plan to native install evidence.</summary>
+        /// <remarks>The returned observation is owned by this context and expires when the operation ends.</remarks>
+        internal PackageStoreDeletionCandidate BindEligibleCandidate(
+            PackageStoreRetentionPlanEntry exactRow,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(exactRow);
+            Revalidate(cancellationToken);
+
+            var plan = Snapshot.RetentionPlan
+                ?? throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Candidate binding requires the current execution retention plan.");
+            if (Snapshot.Root is null || plan.Root != Snapshot.Root ||
+                Snapshot.EnrollmentEpoch != plan.EnrollmentEpoch ||
+                Snapshot.AdmissionStatus != PackageStoreAdmissionStatus.Enrolled ||
+                plan.InventoryStatus != PackageStoreRetentionInventoryStatus.Complete ||
+                plan.ProtectionKnowledge != PackageStoreRetentionProtectionKnowledge.Known ||
+                plan.HasUnresolvedEvidence)
+            {
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Candidate binding requires a complete, known, unresolved-free plan for the enrolled root.");
+            }
+
+            if (plan.Entries.Count(entry => ReferenceEquals(entry, exactRow)) != 1)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Candidate binding requires the exact row object from this execution's current plan.");
+            if (exactRow.Classification != PackageStoreRetentionClassification.Eligible)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Only a currently Eligible plan row can be bound to native install evidence.");
+
+            lock (_gate)
+            {
+                if (_disposed)
+                    throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.ExpiredScope,
+                        "The execution context has ended.", Snapshot.Root);
+                if (!_boundRows.Add(exactRow))
+                    throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                        "One execution context can bind an exact retention row only once.");
+            }
+
+            var candidate = _candidateBinder.Bind(exactRow, Snapshot.Root, RootHandle, Revalidate, cancellationToken);
+            lock (_gate)
+            {
+                if (_disposed)
+                {
+                    candidate.Dispose();
+                    throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.ExpiredScope,
+                        "The execution context ended during native candidate binding.", Snapshot.Root);
+                }
+                _candidates.Add(candidate);
+            }
+            return candidate;
+        }
+
+        public void Dispose()
+        {
+            PackageStoreDeletionCandidate[] candidates;
+            lock (_gate)
+            {
+                if (_disposed)
+                    return;
+                _disposed = true;
+                candidates = _candidates.ToArray();
+                _candidates.Clear();
+            }
+
+            List<Exception>? failures = null;
+            for (var index = candidates.Length - 1; index >= 0; index--)
+            {
+                try
+                {
+                    candidates[index].Dispose();
+                }
+                catch (Exception exception)
+                {
+                    (failures ??= []).Add(exception);
+                }
+            }
+
+            if (failures is { Count: 1 })
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0]).Throw();
+            if (failures is { Count: > 1 })
+                throw new AggregateException("Multiple native deletion candidate observations failed to close.", failures);
+        }
+
+        private static PackageStoreAdmissionException Refuse(PackageStoreAdmissionReason reason, string message)
+            => new(reason, message);
     }
 }
