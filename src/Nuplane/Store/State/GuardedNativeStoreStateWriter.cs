@@ -23,10 +23,19 @@ internal sealed class GuardedNativeStoreStateWriter
     private readonly IPhysicalStorePublicationFileSystem _publication;
     private readonly IPackageProtectionBundleStatePayloadSerializer _payloadSerializer;
     private readonly PhysicalStoreStateSlotWriteGuard _guard;
+    private readonly IGuardedStatePayloadWriteScope? _writeScope;
 
     internal GuardedNativeStoreStateWriter(
         IPhysicalStoreFileSystem files,
         IPackageProtectionBundleStatePayloadSerializer payloadSerializer)
+        : this(files, payloadSerializer, writeScope: null)
+    {
+    }
+
+    private GuardedNativeStoreStateWriter(
+        IPhysicalStoreFileSystem files,
+        IPackageProtectionBundleStatePayloadSerializer payloadSerializer,
+        IGuardedStatePayloadWriteScope? writeScope)
     {
         ArgumentNullException.ThrowIfNull(files);
         ArgumentNullException.ThrowIfNull(payloadSerializer);
@@ -36,6 +45,7 @@ internal sealed class GuardedNativeStoreStateWriter
         _publication = files as IPhysicalStorePublicationFileSystem ?? throw Unsupported("Held-parent state publication is unavailable.");
         _payloadSerializer = payloadSerializer;
         _guard = new PhysicalStoreStateSlotWriteGuard(files);
+        _writeScope = writeScope;
     }
 
     /// <summary>Publishes unbound v1 state at its resolved parent/name after proving marker absence.</summary>
@@ -60,9 +70,48 @@ internal sealed class GuardedNativeStoreStateWriter
         ArgumentNullException.ThrowIfNull(revalidateRetainedPath);
         cancellationToken.ThrowIfCancellationRequested();
         RefuseOwnerBearingState(state, "A standalone state-slot writer cannot publish owner-bearing protection metadata.");
+        return await WriteCoreAsync(parent, slot, state, revalidateRetainedPath, cancellationToken, preAcquiredLease: null).ConfigureAwait(false);
+    }
 
+    /// <summary>Publishes one already-guarded referent slot using the caller-owned path and guard scope.</summary>
+    /// <param name="scope">The retained lexical/referent evidence and all acquired guards for this operation.</param>
+    /// <param name="state">The unbound v1 state payload to publish.</param>
+    /// <param name="cancellationToken">Cancellation requested before the native publication transition.</param>
+    /// <returns>A verified committed state identity and whether exact recovery evidence remains.</returns>
+    /// <remarks>The caller retains and disposes <paramref name="scope"/> and its primary lease after this method returns.</remarks>
+    /// <exception cref="PackageStoreAdmissionException">The slot, marker, provider, path evidence, or publication outcome is unsafe or unknown.</exception>
+    /// <exception cref="OperationCanceledException">Cancellation occurs before native publication.</exception>
+    internal async Task<GuardedNativeStoreStateWriteOutcome> WriteAsync(
+        IGuardedStatePayloadWriteScope scope,
+        StoreStateRecord state,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(state);
+        cancellationToken.ThrowIfCancellationRequested();
+        RefuseOwnerBearingState(state, "A standalone state-slot writer cannot publish owner-bearing protection metadata.");
+
+        var parent = scope.Parent ?? throw new ArgumentException("The guarded state-payload scope has no retained parent.", nameof(scope));
+        var slot = scope.Slot ?? throw new ArgumentException("The guarded state-payload scope has no state slot.", nameof(scope));
+        var lease = scope.PrimaryLease ?? throw new ArgumentException("The guarded state-payload scope has no primary slot guard.", nameof(scope));
+        scope.RequireMarkerAbsenceAndGuards();
+        RequireParent(parent, slot);
+
+        var scopedWriter = new GuardedNativeStoreStateWriter(_files, _payloadSerializer, scope);
+        return await scopedWriter.WriteCoreAsync(parent, slot, state, scope.RevalidateAsync, cancellationToken, lease).ConfigureAwait(false);
+    }
+
+    private async Task<GuardedNativeStoreStateWriteOutcome> WriteCoreAsync(
+        PhysicalStoreDirectoryHandle parent,
+        StateSlotIdentity slot,
+        StoreStateRecord state,
+        Func<CancellationToken, ValueTask> revalidateRetainedPath,
+        CancellationToken cancellationToken,
+        PhysicalStoreStateSlotWriteGuard.PhysicalStoreStateSlotWriteLease? preAcquiredLease)
+    {
         await ReplayAndRequireUnboundAsync(parent, slot, null, revalidateRetainedPath, cancellationToken).ConfigureAwait(false);
-        var lease = await _guard.AcquireAsync(parent, slot, cancellationToken).ConfigureAwait(false);
+        var ownsLease = preAcquiredLease is null;
+        var lease = preAcquiredLease ?? await _guard.AcquireAsync(parent, slot, cancellationToken).ConfigureAwait(false);
         var prior = (PhysicalStoreEntryInfo?)null;
         var priorHash = (byte[]?)null;
         var temporary = (OwnedArtifact?)null;
@@ -115,12 +164,15 @@ internal sealed class GuardedNativeStoreStateWriter
             Exception? publicationError = null;
             try
             {
-                _publication.PublishControlFileAt(
-                    parent,
-                    temporary.Name,
-                    temporary.Identity,
-                    slot.CanonicalBasename,
-                    prior?.Identity);
+                if (_writeScope is { } writeScope)
+                    writeScope.Publish(temporary.Name, temporary.Identity, prior);
+                else
+                    _publication.PublishControlFileAt(
+                        parent,
+                        temporary.Name,
+                        temporary.Identity,
+                        slot.CanonicalBasename,
+                        prior?.Identity);
             }
             catch (Exception exception)
             {
@@ -191,8 +243,11 @@ internal sealed class GuardedNativeStoreStateWriter
         }
 
         Exception? guardReleaseError = null;
-        try { await lease.DisposeAsync().ConfigureAwait(false); }
-        catch (Exception exception) { guardReleaseError = exception; }
+        if (ownsLease)
+        {
+            try { await lease.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception exception) { guardReleaseError = exception; }
+        }
 
         if (committedOutcome is not null)
             return committedOutcome with { GuardReleaseError = guardReleaseError };
@@ -289,6 +344,9 @@ internal sealed class GuardedNativeStoreStateWriter
             artifact = CreateArtifact(parent, slot, ".bak", created => reservation = created);
             await ReplayAndRequireUnboundAsync(parent, slot, lease, revalidateRetainedPath, cancellationToken).ConfigureAwait(false);
             await using var source = OpenStateRead(parent, slot, prior);
+            var sourceLength = source.Stream.Length;
+            if (sourceLength < 0)
+                throw Unknown("The opened prior state payload reported a negative length.");
             source.Stream.Position = 0;
             var sourceHash = await HashStreamAsync(source.Stream, cancellationToken).ConfigureAwait(false);
             if (!CryptographicOperations.FixedTimeEquals(sourceHash, priorHash))
@@ -303,7 +361,7 @@ internal sealed class GuardedNativeStoreStateWriter
                 {
                     await source.Stream.CopyToAsync(output, 81920, cancellationToken).ConfigureAwait(false);
                     await output.FlushAsync(cancellationToken).ConfigureAwait(false);
-                    if (output.Length != prior.Length)
+                    if (output.Length != sourceLength)
                         throw Unknown("The byte-faithful state backup differs from the observed prior payload.");
                 }
             }
@@ -321,7 +379,7 @@ internal sealed class GuardedNativeStoreStateWriter
                 throw Unknown("The prior state bytes changed while its backup was staged.");
             await ReplayAndRequireUnboundAsync(parent, slot, lease, revalidateRetainedPath, cancellationToken).ConfigureAwait(false);
             var backupEvidence = await HashArtifactAsync(parent, slot, artifact!, lease, revalidateRetainedPath, cancellationToken).ConfigureAwait(false);
-            if (backupEvidence.Length != prior.Length || !CryptographicOperations.FixedTimeEquals(backupEvidence.Hash, priorHash))
+            if (backupEvidence.Length != sourceLength || !CryptographicOperations.FixedTimeEquals(backupEvidence.Hash, priorHash))
                 throw Unknown("The reopened state backup does not preserve the original bytes.");
             return artifact!;
         }
@@ -499,6 +557,9 @@ internal sealed class GuardedNativeStoreStateWriter
         PhysicalStoreEntryInfo fileInfo,
         string? fileNameOverride = null)
     {
+        if (_writeScope is { } writeScope && fileNameOverride is null)
+            return new StateReadScope(null, writeScope.OpenPayloadRead(fileInfo, MaximumStatePayloadBytes));
+
         var name = fileNameOverride ?? slot.CanonicalBasename;
         var file = _files.OpenFileChildNoFollow(parent, name, FileAccess.Read);
         try
@@ -676,14 +737,24 @@ internal sealed class GuardedNativeStoreStateWriter
         StateSlotIdentity slot,
         PhysicalStoreStateSlotWriteGuard.PhysicalStoreStateSlotWriteLease? lease)
     {
-        lease?.RequireGroupBindingMarkerAbsent();
+        if (_writeScope is { } writeScope)
+            writeScope.RequireMarkerAbsenceAndGuards();
+        else
+            lease?.RequireGroupBindingMarkerAbsent();
+
         ObserveStateSlot(parent, slot);
-        lease?.Revalidate();
+        if (_writeScope is { } scopedWriteScope)
+            scopedWriteScope.RequireMarkerAbsenceAndGuards();
+        else
+            lease?.Revalidate();
     }
 
     private PhysicalStoreEntryInfo? ObserveStateSlot(PhysicalStoreDirectoryHandle parent, StateSlotIdentity slot)
     {
         var parentInfo = RequireParent(parent, slot);
+        if (_writeScope is { } writeScope)
+            return writeScope.ObserveDestination();
+
         var current = _files.InspectChildNoFollow(parent, slot.CanonicalBasename);
         if (current is null)
             return null;
@@ -886,14 +957,14 @@ internal sealed class GuardedNativeStoreStateWriter
         }
     }
 
-    private sealed class StateReadScope(PhysicalStoreFileHandle file, Stream stream) : IAsyncDisposable
+    private sealed class StateReadScope(PhysicalStoreFileHandle? file, Stream stream) : IAsyncDisposable
     {
-        internal PhysicalStoreFileHandle File { get; } = file;
+        internal PhysicalStoreFileHandle? File { get; } = file;
         internal Stream Stream { get; } = stream;
         public async ValueTask DisposeAsync()
         {
             try { await Stream.DisposeAsync().ConfigureAwait(false); }
-            finally { File.Dispose(); }
+            finally { File?.Dispose(); }
         }
     }
 }
