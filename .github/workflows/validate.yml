@@ -480,8 +480,15 @@ jobs:
           import re
           import xml.etree.ElementTree as ET
           rows = ET.parse(sys.argv[1]).findall('.//{*}UnitTestResult')
-          if len(rows) != 33 or any(row.get('outcome') != 'Passed' for row in rows):
-              raise SystemExit('All 28 publisher cases, recovery restart case and four gate cases must pass without skips.')
+          if len(rows) != 36 or any(row.get('outcome') != 'Passed' for row in rows):
+              raise SystemExit('All 28 publisher cases, recovery restart case, four gate cases and three production admission cases must pass without skips.')
+          import json
+          from collections import Counter
+          with open('build/test-cases/pending-v1-admission.json', encoding='utf-8') as source:
+              pending_cases = json.load(source)
+          pending_rows = [row for row in rows if row.get('testName') in pending_cases]
+          if len(pending_cases) != 3 or len(set(pending_cases)) != 3 or Counter(row.get('testName') for row in pending_rows) != Counter(pending_cases) or any(row.get('outcome') != 'Passed' for row in pending_rows):
+              raise SystemExit('All three exact production pending-admission cases must pass uniquely without skips.')
           publisher = [r.get('testName', '') for r in rows if '.PublisherProcess_CheckpointsRecoverOrPreserveExactEvidenceAcrossAllPriorBindings(' in r.get('testName', '')]
           shapes = ['Prospective', 'ExistingUnprotected', 'Acknowledged']
           points = ['PendingPublished', 'StageFlushed', 'BackupFlushed', 'ArtifactsBound', 'StatePublished',

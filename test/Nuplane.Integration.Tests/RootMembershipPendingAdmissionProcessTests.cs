@@ -1,7 +1,6 @@
 using System.Runtime.ExceptionServices;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.Extensions.Options;
 using Nuplane;
 using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Feeds.Configuration;
@@ -200,6 +199,8 @@ public sealed partial class RootMembershipRegistryProcessTests
         Assert.Equal(memberId, protection.MemberId);
         Assert.Equal(PackageProtectionClosureKnowledge.Known, protection.ActiveClosure.Knowledge);
         Assert.Equal(PackageProtectionClosureKnowledge.Known, protection.RecoverableClosure.Knowledge);
+        Assert.NotNull(protection.ActiveClosure.Graphs);
+        Assert.NotNull(protection.RecoverableClosure.Graphs);
         Assert.Empty(protection.ActiveClosure.Graphs);
         Assert.Empty(protection.RecoverableClosure.Graphs);
         Assert.Equal(ProtectionDigest.StateBody(state), protection.StateBodyDigest);
