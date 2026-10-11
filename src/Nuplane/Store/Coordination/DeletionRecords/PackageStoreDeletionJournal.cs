@@ -170,6 +170,12 @@ internal sealed class PackageStoreDeletionJournal
     internal PhysicalStoreDeletionManifest Manifest { get; }
     internal string IntegrityDigest { get; }
 
+    internal PackageStoreDeletionJournal WithPhase(PackageStoreDeletionPhase phase)
+        => new(SchemaVersion, StoreRoot, EnrollmentEpoch, OperationId, CandidateId, OriginalInstall,
+            PackageParentRelativeComponents, PackageParentIdentity, PackageParentSemantics,
+            OriginalBasename, QuarantineBasename, CompletionMarkerIdentity,
+            KeepNewestInactiveVersionsPerPackage, phase, Manifest);
+
     internal static string QuarantineBasenameFor(Guid candidateId)
     {
         if (candidateId == Guid.Empty)

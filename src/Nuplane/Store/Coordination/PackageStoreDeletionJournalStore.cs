@@ -22,7 +22,7 @@ internal sealed class PackageStoreDeletionJournalStore
     private readonly IPhysicalStoreNameFileSystem _names;
     private readonly IPhysicalStoreDirectoryNameFileSystem _directories;
     private readonly IPhysicalStoreDirectoryEnumerationFileSystem _enumeration;
-    private readonly IPhysicalStorePublicationFileSystem _publication;
+    private readonly IPhysicalStorePublicationFileSystem? _publication;
     private readonly PackageStoreDeletionJournalSerializer _serializer = new();
     private readonly Action<PackageStoreDeletionJournalPublicationPoint, PackageStoreDeletionJournal>? _checkpoint;
 
@@ -38,9 +38,80 @@ internal sealed class PackageStoreDeletionJournalStore
             ?? throw Unsupported("Deletion journal publication requires native directory-name observations.");
         _enumeration = files as IPhysicalStoreDirectoryEnumerationFileSystem
             ?? throw Unsupported("Deletion journal publication requires bounded native enumeration.");
-        _publication = files as IPhysicalStorePublicationFileSystem
-            ?? throw Unsupported("Deletion journal publication requires native no-replace control publication.");
+        _publication = files as IPhysicalStorePublicationFileSystem;
         _checkpoint = checkpoint;
+    }
+
+    internal IReadOnlyList<DiscoveredJournal> Discover(
+        PhysicalStoreDirectoryHandle heldRoot,
+        PhysicalRootIdentity expectedRoot,
+        long expectedEnrollmentEpoch,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(heldRoot);
+        ArgumentNullException.ThrowIfNull(expectedRoot);
+        if (expectedEnrollmentEpoch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(expectedEnrollmentEpoch));
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var rootSemantics = VerifyRoot(heldRoot, expectedRoot);
+        using var control = OpenAndVerifyControl(heldRoot, expectedRoot, rootSemantics,
+            out var controlIdentity, out var controlSemantics);
+        var names = _enumeration.EnumerateChildNamesNoFollow(control, MaximumControlEntries);
+        var artifacts = InspectPruneArtifacts(control, controlIdentity, controlSemantics, names, expectedRoot);
+        if (artifacts.Any(static artifact => artifact.IsStage))
+            throw Refuse("A reserved prune publication stage is unresolved; it is preserved for explicit recovery.", expectedRoot);
+
+        var journals = new List<DiscoveredJournal>(artifacts.Count);
+        foreach (var artifact in artifacts)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var payload = ReadExactFile(control, controlIdentity, controlSemantics, artifact.Name,
+                artifact.Info.Identity, expectedRoot.HandleIdentity,
+                PackageStoreDeletionJournalSerializer.MaximumPayloadBytes);
+            PackageStoreDeletionJournal journal;
+            try { journal = _serializer.Deserialize(payload); }
+            catch (Exception exception) when (exception is System.Text.Json.JsonException or ArgumentException)
+            {
+                throw Refuse("A reserved canonical prune journal is malformed and was preserved.", expectedRoot, exception);
+            }
+
+            if (journal.CandidateId != artifact.CandidateId || journal.StoreRoot != expectedRoot ||
+                journal.EnrollmentEpoch != expectedEnrollmentEpoch ||
+                journal.Phase is not (PackageStoreDeletionPhase.Prepared or PackageStoreDeletionPhase.Quarantined))
+            {
+                throw Refuse("A reserved canonical prune journal is not a supported current-root/current-epoch record.", expectedRoot);
+            }
+
+            journals.Add(new DiscoveredJournal(journal, artifact.Name, artifact.Info.Identity, payload,
+                rootSemantics, controlIdentity, controlSemantics));
+        }
+
+        ValidateJournalSet(journals, expectedRoot);
+        return journals;
+    }
+
+    internal void VerifyDiscovered(
+        PhysicalStoreDirectoryHandle heldRoot,
+        PhysicalRootIdentity expectedRoot,
+        DiscoveredJournal observed,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(observed);
+        cancellationToken.ThrowIfCancellationRequested();
+        var rootSemantics = VerifyRoot(heldRoot, expectedRoot);
+        if (rootSemantics != observed.RootSemantics)
+            throw Refuse("The held store root profile changed after prune-journal discovery.", expectedRoot);
+        using var control = OpenAndVerifyControl(heldRoot, expectedRoot, rootSemantics,
+            out var controlIdentity, out var controlSemantics);
+        if (controlIdentity != observed.ControlDirectoryIdentity || controlSemantics != observed.ControlDirectorySemantics)
+            throw Refuse("The reserved control directory changed after prune-journal discovery.", expectedRoot);
+        VerifyCanonicalFile(control, controlIdentity, controlSemantics, observed.CanonicalName,
+            observed.FileIdentity, expectedRoot.HandleIdentity, observed.Payload.Length);
+        var current = ReadExactFile(control, controlIdentity, controlSemantics, observed.CanonicalName,
+            observed.FileIdentity, expectedRoot.HandleIdentity, PackageStoreDeletionJournalSerializer.MaximumPayloadBytes);
+        if (!current.AsSpan().SequenceEqual(observed.Payload))
+            throw Refuse("A discovered prune journal's exact native bytes changed during the execution scope.", expectedRoot);
     }
 
     internal PublishedJournal PublishPrepared(
@@ -56,6 +127,7 @@ internal sealed class PackageStoreDeletionJournalStore
         ArgumentNullException.ThrowIfNull(journal);
         ArgumentNullException.ThrowIfNull(requireCurrentCandidate);
         ArgumentNullException.ThrowIfNull(requireCurrentBaseline);
+        var publication = RequirePublication();
         if (journal.Phase != PackageStoreDeletionPhase.Prepared || journal.StoreRoot != expectedRoot)
             throw Refuse("Prepared publication requires a journal for the exact held root.", expectedRoot);
 
@@ -106,66 +178,113 @@ internal sealed class PackageStoreDeletionJournalStore
         PhysicalStorePublicationChecks.RequireExpectedEntry(
             _files.InspectChildNoFollow(control, stagedName), expectedIdentity: null);
 
-        var stagedIdentity = CreateFlushedStage(control, stagedName, payload, expectedRoot.HandleIdentity);
-        _checkpoint?.Invoke(PackageStoreDeletionJournalPublicationPoint.StageFlushed, journal);
-        VerifyCanonicalFile(control, controlIdentity, controlSemantics, stagedName, stagedIdentity,
-            expectedRoot.HandleIdentity, payload.Length);
-        var stagedBytes = ReadExactFile(control, controlIdentity, controlSemantics, stagedName,
-            stagedIdentity, expectedRoot.HandleIdentity, PackageStoreDeletionJournalSerializer.MaximumPayloadBytes);
-        RequireExactPayload(stagedBytes, payload, journal, expectedRoot);
+        var stagedIdentity = CreateAndVerifyStage(control, controlIdentity, controlSemantics, stagedName,
+            payload, journal, expectedRoot);
+        return PublishStagedRecord(heldRoot, expectedRoot, rootSemantics, control, controlIdentity,
+            controlSemantics, canonicalName, stagedName, stagedIdentity, payload, journal,
+            cancellationToken,
+            expectedDestinationIdentity: null,
+            publication,
+            requireCurrent: token =>
+            {
+                requireCurrentCandidate(token);
+                requireCurrentBaseline(token);
+            },
+            verifyPublished: () => VerifyPublishedInControl(heldRoot, expectedRoot, rootSemantics,
+                control, controlIdentity, controlSemantics, canonicalName, stagedName,
+                stagedIdentity, payload, journal),
+            verifyUnpublished: () => VerifyUnpublishedStageInControl(heldRoot, expectedRoot,
+                rootSemantics, control, controlIdentity, controlSemantics, canonicalName,
+                stagedName, stagedIdentity, payload, journal),
+            beforePublishPoint: PackageStoreDeletionJournalPublicationPoint.BeforeNativePublish,
+            afterPublishPoint: PackageStoreDeletionJournalPublicationPoint.AfterNativePublish,
+            refusalMessage: "Prepared publication ended in an unknown native state; all observed artifacts were preserved.");
+    }
+
+    internal PublishedJournal PublishQuarantinedPhase(
+        PhysicalStoreDirectoryHandle heldRoot,
+        PhysicalRootIdentity expectedRoot,
+        DiscoveredJournal prior,
+        Action<CancellationToken> requireCurrentCandidate,
+        Action<CancellationToken> requireCurrentQuarantine,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(prior);
+        ArgumentNullException.ThrowIfNull(requireCurrentCandidate);
+        ArgumentNullException.ThrowIfNull(requireCurrentQuarantine);
+        var publication = RequirePublication();
+        if (prior.Journal.Phase != PackageStoreDeletionPhase.Prepared || prior.Journal.StoreRoot != expectedRoot)
+            throw Refuse("Only the exact Prepared journal for the held root can advance to Quarantined.", expectedRoot);
+
+        var updated = prior.Journal.WithPhase(PackageStoreDeletionPhase.Quarantined);
+        var payload = _serializer.Serialize(updated);
+        if (payload.Length > PackageStoreDeletionJournalSerializer.MaximumPayloadBytes)
+            throw Refuse("The Quarantined journal exceeds the per-record payload limit.", expectedRoot);
 
         cancellationToken.ThrowIfCancellationRequested();
         requireCurrentCandidate(cancellationToken);
-        requireCurrentBaseline(cancellationToken);
-        VerifyRootAndControl(heldRoot, expectedRoot, rootSemantics, control, controlIdentity, controlSemantics);
-        var prepared = PhysicalStorePublicationChecks.PreparePublish(_files, _names, control,
-            stagedName, stagedIdentity, canonicalName, destinationIdentity: null);
-        if (prepared.ParentIdentity != controlIdentity || prepared.Semantics != controlSemantics)
-            throw Refuse("The Prepared stage does not bind the expected native control-directory profile.", expectedRoot);
+        requireCurrentQuarantine(cancellationToken);
+        VerifyDiscovered(heldRoot, expectedRoot, prior, cancellationToken);
+        var currentSet = Discover(heldRoot, expectedRoot, prior.Journal.EnrollmentEpoch, cancellationToken);
+        if (currentSet.Count(item => item.Journal.CandidateId == prior.Journal.CandidateId) != 1)
+            throw Refuse("The exact Prepared journal is no longer uniquely discoverable.", expectedRoot);
+
+        var rootSemantics = VerifyRoot(heldRoot, expectedRoot);
+        if (rootSemantics != prior.RootSemantics)
+            throw Refuse("The held store root profile changed before phase replacement.", expectedRoot);
+        using var control = OpenAndVerifyControl(heldRoot, expectedRoot, rootSemantics,
+            out var controlIdentity, out var controlSemantics);
+        if (controlIdentity != prior.ControlDirectoryIdentity || controlSemantics != prior.ControlDirectorySemantics)
+            throw Refuse("The reserved control directory changed before phase replacement.", expectedRoot);
+
+        var names = _enumeration.EnumerateChildNamesNoFollow(control, MaximumControlEntries);
+        if (names.Count + 1 > MaximumControlEntries)
+            throw Refuse("Publishing the phase stage would exceed the complete control-directory enumeration limit.", expectedRoot);
+        var artifacts = InspectPruneArtifacts(control, controlIdentity, controlSemantics, names, expectedRoot);
+        if (artifacts.Any(static artifact => artifact.IsStage))
+            throw Refuse("A reserved prune stage appeared before phase replacement; it is preserved.", expectedRoot);
+        if (artifacts.Count + 1 > MaximumPruneArtifacts)
+            throw Refuse("Publishing the phase stage would exceed the reserved prune-artifact count limit.", expectedRoot);
+        var aggregateBytes = artifacts.Aggregate(0L, static (sum, item) => checked(sum + item.Info.Length));
+        if (checked(aggregateBytes + payload.Length) > MaximumAggregatePruneBytes)
+            throw Refuse("Publishing the phase stage would exceed the aggregate prune-record byte limit.", expectedRoot);
+
+        var canonicalName = prior.CanonicalName;
+        var publicationId = NewDistinctId(prior.Journal.OperationId, prior.Journal.CandidateId);
+        var stagedName = StagedName(prior.Journal.CandidateId, publicationId);
+        if (!names.Contains(canonicalName, StringComparer.Ordinal) || names.Contains(stagedName, StringComparer.Ordinal))
+            throw Refuse("The exact prior journal name is absent or the new stage name is already occupied.", expectedRoot);
 
         cancellationToken.ThrowIfCancellationRequested();
-        try
-        {
-            _checkpoint?.Invoke(PackageStoreDeletionJournalPublicationPoint.BeforeNativePublish, journal);
-            _publication.PublishControlFileAt(control, stagedName, stagedIdentity, canonicalName,
-                expectedDestinationIdentity: null);
-            _checkpoint?.Invoke(PackageStoreDeletionJournalPublicationPoint.AfterNativePublish, journal);
-            VerifyPublishedInControl(heldRoot, expectedRoot, rootSemantics,
-                control, controlIdentity, controlSemantics, canonicalName, stagedName,
-                stagedIdentity, payload, journal);
-            return new PublishedJournal(journal, canonicalName, stagedName, stagedIdentity, payload,
-                rootSemantics, controlIdentity, controlSemantics);
-        }
-        catch (Exception publicationFailure)
-        {
-            try
-            {
-                VerifyPublishedInControl(heldRoot, expectedRoot, rootSemantics,
-                    control, controlIdentity, controlSemantics, canonicalName, stagedName,
-                    stagedIdentity, payload, journal);
-                return new PublishedJournal(journal, canonicalName, stagedName, stagedIdentity, payload,
-                    rootSemantics, controlIdentity, controlSemantics);
-            }
-            catch (Exception publishedStateFailure)
-            {
-                try
-                {
-                    VerifyUnpublishedStageInControl(heldRoot, expectedRoot, rootSemantics,
-                        control, controlIdentity, controlSemantics, canonicalName, stagedName,
-                        stagedIdentity, payload, journal);
-                }
-                catch (Exception stageStateFailure)
-                {
-                    throw Refuse("Prepared publication ended in an unknown native state; all observed artifacts were preserved.",
-                        expectedRoot,
-                        new AggregateException("Publication and both exact state inspections failed.",
-                            publicationFailure, publishedStateFailure, stageStateFailure));
-                }
+        requireCurrentCandidate(cancellationToken);
+        requireCurrentQuarantine(cancellationToken);
+        VerifyDiscovered(heldRoot, expectedRoot, prior, cancellationToken);
+        VerifyRootAndControl(heldRoot, expectedRoot, rootSemantics, control, controlIdentity, controlSemantics);
+        PhysicalStorePublicationChecks.RequireExpectedEntry(
+            _files.InspectChildNoFollow(control, stagedName), expectedIdentity: null);
 
-                ExceptionDispatchInfo.Capture(publicationFailure).Throw();
-                throw new InvalidOperationException("Unreachable after rethrowing a preserved publication failure.");
-            }
-        }
+        var stagedIdentity = CreateAndVerifyStage(control, controlIdentity, controlSemantics, stagedName,
+            payload, updated, expectedRoot);
+        return PublishStagedRecord(heldRoot, expectedRoot, rootSemantics, control, controlIdentity,
+            controlSemantics, canonicalName, stagedName, stagedIdentity, payload, updated,
+            cancellationToken,
+            prior.FileIdentity,
+            publication,
+            requireCurrent: token =>
+            {
+                requireCurrentCandidate(token);
+                requireCurrentQuarantine(token);
+                VerifyDiscovered(heldRoot, expectedRoot, prior, token);
+            },
+            verifyPublished: () => VerifyPublishedInControl(heldRoot, expectedRoot, rootSemantics,
+                control, controlIdentity, controlSemantics, canonicalName, stagedName,
+                stagedIdentity, payload, updated),
+            verifyUnpublished: () => VerifyUnpublishedUpdateInControl(heldRoot, expectedRoot,
+                rootSemantics, control, controlIdentity, controlSemantics, prior, stagedName,
+                stagedIdentity, payload, updated),
+            beforePublishPoint: PackageStoreDeletionJournalPublicationPoint.BeforeQuarantinedPhasePublish,
+            afterPublishPoint: PackageStoreDeletionJournalPublicationPoint.AfterQuarantinedPhasePublish,
+            refusalMessage: "Quarantined phase replacement ended in an unknown native state; all artifacts were preserved.");
     }
 
     internal void VerifyPublished(
@@ -186,6 +305,89 @@ internal sealed class PackageStoreDeletionJournalStore
         VerifyPublishedInControl(heldRoot, expectedRoot, rootSemantics, control, controlIdentity,
             controlSemantics, published.CanonicalName, published.StagedName,
             published.FileIdentity, published.Payload, published.Journal);
+    }
+
+    private PhysicalFileIdentity CreateAndVerifyStage(
+        PhysicalStoreDirectoryHandle control,
+        PhysicalFileIdentity controlIdentity,
+        PhysicalStoreNameSemantics controlSemantics,
+        string stagedName,
+        byte[] payload,
+        PackageStoreDeletionJournal journal,
+        PhysicalRootIdentity expectedRoot)
+    {
+        var stagedIdentity = CreateFlushedStage(control, stagedName, payload, expectedRoot.HandleIdentity);
+        _checkpoint?.Invoke(PackageStoreDeletionJournalPublicationPoint.StageFlushed, journal);
+        VerifyCanonicalFile(control, controlIdentity, controlSemantics, stagedName, stagedIdentity,
+            expectedRoot.HandleIdentity, payload.Length);
+        var stagedBytes = ReadExactFile(control, controlIdentity, controlSemantics, stagedName,
+            stagedIdentity, expectedRoot.HandleIdentity, PackageStoreDeletionJournalSerializer.MaximumPayloadBytes);
+        RequireExactPayload(stagedBytes, payload, journal, expectedRoot);
+        return stagedIdentity;
+    }
+
+    private PublishedJournal PublishStagedRecord(
+        PhysicalStoreDirectoryHandle heldRoot,
+        PhysicalRootIdentity expectedRoot,
+        PhysicalStoreNameSemantics rootSemantics,
+        PhysicalStoreDirectoryHandle control,
+        PhysicalFileIdentity controlIdentity,
+        PhysicalStoreNameSemantics controlSemantics,
+        string canonicalName,
+        string stagedName,
+        PhysicalFileIdentity stagedIdentity,
+        byte[] payload,
+        PackageStoreDeletionJournal journal,
+        CancellationToken cancellationToken,
+        PhysicalFileIdentity? expectedDestinationIdentity,
+        IPhysicalStorePublicationFileSystem publication,
+        Action<CancellationToken> requireCurrent,
+        Action verifyPublished,
+        Action verifyUnpublished,
+        PackageStoreDeletionJournalPublicationPoint beforePublishPoint,
+        PackageStoreDeletionJournalPublicationPoint afterPublishPoint,
+        string refusalMessage)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        requireCurrent(cancellationToken);
+        VerifyRootAndControl(heldRoot, expectedRoot, rootSemantics, control, controlIdentity, controlSemantics);
+        var prepared = PhysicalStorePublicationChecks.PreparePublish(_files, _names, control,
+            stagedName, stagedIdentity, canonicalName, expectedDestinationIdentity);
+        if (prepared.ParentIdentity != controlIdentity || prepared.Semantics != controlSemantics)
+            throw Refuse("The exact journal stage does not bind the expected native control-directory profile.", expectedRoot);
+
+        try
+        {
+            _checkpoint?.Invoke(beforePublishPoint, journal);
+            publication.PublishControlFileAt(control, stagedName, stagedIdentity, canonicalName,
+                expectedDestinationIdentity);
+            _checkpoint?.Invoke(afterPublishPoint, journal);
+            verifyPublished();
+            return new PublishedJournal(journal, canonicalName, stagedName, stagedIdentity, payload,
+                rootSemantics, controlIdentity, controlSemantics);
+        }
+        catch (Exception publicationFailure)
+        {
+            try
+            {
+                verifyPublished();
+                return new PublishedJournal(journal, canonicalName, stagedName, stagedIdentity, payload,
+                    rootSemantics, controlIdentity, controlSemantics);
+            }
+            catch (Exception publishedStateFailure)
+            {
+                try { verifyUnpublished(); }
+                catch (Exception stageStateFailure)
+                {
+                    throw Refuse(refusalMessage, expectedRoot,
+                        new AggregateException("Publication and both exact native state inspections failed.",
+                            publicationFailure, publishedStateFailure, stageStateFailure));
+                }
+
+                ExceptionDispatchInfo.Capture(publicationFailure).Throw();
+                throw new InvalidOperationException("Unreachable after rethrowing a preserved publication failure.");
+            }
+        }
     }
 
     private List<PruneArtifact> InspectPruneArtifacts(
@@ -263,10 +465,10 @@ internal sealed class PackageStoreDeletionJournalStore
             }
 
             if (existing.CandidateId != artifact.CandidateId ||
-                existing.Phase != PackageStoreDeletionPhase.Prepared ||
+                existing.Phase is not (PackageStoreDeletionPhase.Prepared or PackageStoreDeletionPhase.Quarantined) ||
                 existing.StoreRoot != expectedRoot || existing.EnrollmentEpoch != requested.EnrollmentEpoch)
             {
-                throw Refuse("An existing prune journal is unknown to this first-phase publisher and was preserved.", expectedRoot);
+                throw Refuse("An existing prune journal is unknown to this publisher and was preserved.", expectedRoot);
             }
 
             if (existing.CandidateId == requested.CandidateId ||
@@ -280,6 +482,34 @@ internal sealed class PackageStoreDeletionJournalStore
             }
         }
     }
+
+    private static void ValidateJournalSet(
+        IReadOnlyList<DiscoveredJournal> journals,
+        PhysicalRootIdentity expectedRoot)
+    {
+        for (var leftIndex = 0; leftIndex < journals.Count; leftIndex++)
+        {
+            var left = journals[leftIndex].Journal;
+            if (left.StoreRoot != expectedRoot)
+                throw Refuse("A discovered prune journal belongs to another physical store root.", expectedRoot);
+            for (var rightIndex = leftIndex + 1; rightIndex < journals.Count; rightIndex++)
+            {
+                var right = journals[rightIndex].Journal;
+                if (left.CandidateId == right.CandidateId ||
+                    left.OriginalInstall.DirectoryIdentity == right.OriginalInstall.DirectoryIdentity ||
+                    left.PackageParentIdentity == right.PackageParentIdentity &&
+                    string.Equals(left.OriginalBasename, right.OriginalBasename, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(left.OriginalInstall.RootRelativeInstallPath,
+                        right.OriginalInstall.RootRelativeInstallPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw Refuse("Multiple prune journals describe one exact or possibly aliased install slot.", expectedRoot);
+                }
+            }
+        }
+    }
+
+    private IPhysicalStorePublicationFileSystem RequirePublication()
+        => _publication ?? throw Unsupported("Deletion journal publication requires native no-replace control publication.");
 
     private PhysicalStoreDirectoryHandle OpenAndVerifyControl(
         PhysicalStoreDirectoryHandle root,
@@ -439,6 +669,38 @@ internal sealed class PackageStoreDeletionJournalStore
         VerifyRootAndControl(root, expectedRoot, rootSemantics, control, controlIdentity, controlSemantics);
     }
 
+    private void VerifyUnpublishedUpdateInControl(
+        PhysicalStoreDirectoryHandle root,
+        PhysicalRootIdentity expectedRoot,
+        PhysicalStoreNameSemantics rootSemantics,
+        PhysicalStoreDirectoryHandle control,
+        PhysicalFileIdentity controlIdentity,
+        PhysicalStoreNameSemantics controlSemantics,
+        DiscoveredJournal prior,
+        string stagedName,
+        PhysicalFileIdentity stagedIdentity,
+        byte[] payload,
+        PackageStoreDeletionJournal updated)
+    {
+        VerifyRootAndControl(root, expectedRoot, rootSemantics, control, controlIdentity, controlSemantics);
+        VerifyCanonicalFile(control, controlIdentity, controlSemantics, prior.CanonicalName,
+            prior.FileIdentity, expectedRoot.HandleIdentity, prior.Payload.Length);
+        var oldBytes = ReadExactFile(control, controlIdentity, controlSemantics, prior.CanonicalName,
+            prior.FileIdentity, expectedRoot.HandleIdentity, PackageStoreDeletionJournalSerializer.MaximumPayloadBytes);
+        if (!oldBytes.AsSpan().SequenceEqual(prior.Payload))
+            throw Refuse("The expected prior journal changed while phase publication was in progress.", expectedRoot);
+        var restoredPrior = _serializer.Deserialize(oldBytes);
+        if (restoredPrior.IntegrityDigest != prior.Journal.IntegrityDigest)
+            throw Refuse("The prior journal no longer has its exact expected integrity digest.", expectedRoot);
+
+        VerifyCanonicalFile(control, controlIdentity, controlSemantics, stagedName, stagedIdentity,
+            expectedRoot.HandleIdentity, payload.Length);
+        var stageBytes = ReadExactFile(control, controlIdentity, controlSemantics, stagedName,
+            stagedIdentity, expectedRoot.HandleIdentity, PackageStoreDeletionJournalSerializer.MaximumPayloadBytes);
+        RequireExactPayload(stageBytes, payload, updated, expectedRoot);
+        VerifyRootAndControl(root, expectedRoot, rootSemantics, control, controlIdentity, controlSemantics);
+    }
+
     private void VerifyCanonicalFile(
         PhysicalStoreDirectoryHandle parent,
         PhysicalFileIdentity parentIdentity,
@@ -509,9 +771,9 @@ internal sealed class PackageStoreDeletionJournalStore
             throw Refuse("The reopened deletion journal differs from the exact flushed candidate bytes.", expectedRoot);
         var restored = _serializer.Deserialize(actual);
         if (restored.IntegrityDigest != journal.IntegrityDigest || restored.CandidateId != journal.CandidateId ||
-            restored.OperationId != journal.OperationId || restored.Phase != PackageStoreDeletionPhase.Prepared ||
+            restored.OperationId != journal.OperationId || restored.Phase != journal.Phase ||
             restored.StoreRoot != expectedRoot || restored.Manifest.InstallDirectoryIdentity != journal.Manifest.InstallDirectoryIdentity)
-            throw Refuse("The reopened deletion journal does not bind the exact Prepared candidate.", expectedRoot);
+            throw Refuse("The reopened deletion journal does not bind the exact phase candidate.", expectedRoot);
     }
 
     private static PruneArtifactName ParseArtifactName(string name, PhysicalRootIdentity root)
@@ -597,6 +859,15 @@ internal sealed class PackageStoreDeletionJournalStore
         PhysicalFileIdentity ControlDirectoryIdentity,
         PhysicalStoreNameSemantics ControlDirectorySemantics);
 
+    internal sealed record DiscoveredJournal(
+        PackageStoreDeletionJournal Journal,
+        string CanonicalName,
+        PhysicalFileIdentity FileIdentity,
+        byte[] Payload,
+        PhysicalStoreNameSemantics RootSemantics,
+        PhysicalFileIdentity ControlDirectoryIdentity,
+        PhysicalStoreNameSemantics ControlDirectorySemantics);
+
     private sealed record PruneArtifact(string Name, Guid CandidateId, bool IsStage, PhysicalStoreEntryInfo Info);
     private readonly record struct PruneArtifactName(Guid CandidateId, bool IsStage);
 }
@@ -605,5 +876,7 @@ internal enum PackageStoreDeletionJournalPublicationPoint
 {
     StageFlushed,
     BeforeNativePublish,
-    AfterNativePublish
+    AfterNativePublish,
+    BeforeQuarantinedPhasePublish,
+    AfterQuarantinedPhasePublish
 }

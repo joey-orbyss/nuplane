@@ -1,4 +1,5 @@
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Feeds;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.DeletionRecords;
 using Nuplane.Store.Coordination.PhysicalFiles;
@@ -9,12 +10,20 @@ namespace Nuplane.Store.Maintenance;
 /// <remarks>The caller must already hold the live full-catalog execution operation.</remarks>
 internal sealed class PackageStoreDeletionCandidateBinder
 {
+    private readonly IPhysicalStoreFileSystem _files;
+    private readonly IPhysicalStoreNameFileSystem _names;
+    private readonly IPhysicalStoreDirectoryNameFileSystem _directories;
     private readonly PackageInstallIdentityReader _identities;
     private readonly PhysicalStoreDeletionManifestReader _manifests;
 
     internal PackageStoreDeletionCandidateBinder(IPhysicalStoreFileSystem files)
     {
         ArgumentNullException.ThrowIfNull(files);
+        _files = files;
+        _names = files as IPhysicalStoreNameFileSystem
+            ?? throw Unsupported("Deletion binding requires native file-name observations.");
+        _directories = files as IPhysicalStoreDirectoryNameFileSystem
+            ?? throw Unsupported("Deletion binding requires native directory-name observations.");
         _identities = new PackageInstallIdentityReader(files);
         _manifests = new PhysicalStoreDeletionManifestReader(files);
     }
@@ -78,11 +87,565 @@ internal sealed class PackageStoreDeletionCandidateBinder
         }
     }
 
+    internal void VerifyPreparedOriginal(
+        PackageStoreDeletionJournalStore.DiscoveredJournal discovered,
+        PhysicalStoreDirectoryHandle rootHandle,
+        Action<CancellationToken> revalidateOperation,
+        CancellationToken cancellationToken)
+    {
+        var journal = discovered.Journal;
+        revalidateOperation(cancellationToken);
+        RequireDirectory(_files.InspectHandle(rootHandle), journal.StoreRoot.HandleIdentity, journal.StoreRoot,
+            "The held store root changed before verifying the original Prepared install.");
+        if (RequireSupportedProfile(rootHandle, journal.StoreRoot) != discovered.RootSemantics)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The held store root profile differs from the Prepared journal discovery binding.", journal.StoreRoot);
+        using var observation = _identities.Observe(rootHandle, journal.StoreRoot,
+            journal.OriginalInstall.RootRelativeInstallPath,
+            journal.OriginalInstall.PackageId,
+            journal.OriginalInstall.Version,
+            journal.OriginalInstall.VerifiedArchiveHash);
+        if (observation.InstallIdentity != journal.OriginalInstall)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The original install path no longer identifies the exact journal-bound directory.", journal.StoreRoot);
+        var location = observation.ObserveCanonicalDeletionLocation();
+        RequireJournalLocation(journal, location, originalName: true);
+        var manifest = _manifests.Capture(observation.InstallDirectory, observation.InstallIdentity,
+            location.PackageParentHandle, location.PackageParentIdentity, location.PackageParentSemantics,
+            location.OriginalBasename, location.InstallDirectorySemantics, cancellationToken);
+        if (journal.Manifest.RequireExactSubset(manifest) != 0)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The original completed install no longer matches the full Prepared baseline.", journal.StoreRoot);
+        if (_files.InspectChildNoFollow(location.PackageParentHandle, journal.QuarantineBasename) is not null)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The exact quarantine slot is occupied while the original Prepared install remains present.", journal.StoreRoot);
+        revalidateOperation(cancellationToken);
+        if (observation.ObserveCanonicalDeletionLocation() != location)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The original canonical install location changed during journal verification.", journal.StoreRoot);
+    }
+
+    internal PackageStoreQuarantinedCandidate BindQuarantinedCandidate(
+        PackageStoreDeletionJournalStore.DiscoveredJournal discovered,
+        PhysicalStoreDirectoryHandle rootHandle,
+        Action<CancellationToken> revalidateOperation,
+        CancellationToken cancellationToken,
+        PhysicalStoreDirectoryHandle? heldPackageParent = null,
+        PhysicalFileIdentity? heldPackageParentIdentity = null,
+        PhysicalStoreNameSemantics? heldPackageParentSemantics = null,
+        Action<CancellationToken>? revalidateHeldParent = null)
+    {
+        ArgumentNullException.ThrowIfNull(discovered);
+        ArgumentNullException.ThrowIfNull(rootHandle);
+        ArgumentNullException.ThrowIfNull(revalidateOperation);
+        var journal = discovered.Journal;
+        if ((heldPackageParent is null) != (heldPackageParentIdentity is null) ||
+            (heldPackageParent is null) != (heldPackageParentSemantics is null) ||
+            (heldPackageParent is null) != (revalidateHeldParent is null))
+            throw new ArgumentException("A supplied package-parent binding must include its identity, profile, and revalidation callback.");
+        cancellationToken.ThrowIfCancellationRequested();
+        revalidateOperation(cancellationToken);
+
+        var ownedParents = new List<PhysicalStoreDirectoryHandle>(2);
+        var edges = new List<QuarantinedParentEdge>(2);
+        PhysicalStoreDirectoryHandle? packageParent = null;
+        PhysicalStoreFileHandle? marker = null;
+        PhysicalStoreDirectoryHandle? quarantine = null;
+        PackageStoreQuarantinedCandidate? result = null;
+        try
+        {
+            RequireDirectory(_files.InspectHandle(rootHandle), journal.StoreRoot.HandleIdentity, journal.StoreRoot,
+                "The held store root changed before quarantine binding.");
+            if (RequireSupportedProfile(rootHandle, journal.StoreRoot) != discovered.RootSemantics)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "The held store root profile differs from the quarantine journal discovery binding.", journal.StoreRoot);
+
+            PhysicalFileIdentity packageParentIdentity;
+            PhysicalStoreNameSemantics packageParentSemantics;
+            if (heldPackageParent is null)
+            {
+                packageParent = OpenPackageParent(discovered, rootHandle, ownedParents, edges,
+                    out packageParentIdentity, out packageParentSemantics, cancellationToken);
+            }
+            else
+            {
+                packageParent = heldPackageParent;
+                packageParentIdentity = heldPackageParentIdentity!;
+                packageParentSemantics = heldPackageParentSemantics!;
+                RequireDirectory(_files.InspectHandle(packageParent), packageParentIdentity, journal.StoreRoot,
+                    "The retained package parent changed before quarantine rebinding.");
+                if (RequireSupportedProfile(packageParent, journal.StoreRoot) != packageParentSemantics)
+                    throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                        "The retained package parent's native profile changed before quarantine rebinding.", journal.StoreRoot);
+            }
+
+            if (packageParentIdentity != journal.PackageParentIdentity ||
+                packageParentSemantics != journal.PackageParentSemantics)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "The current package parent differs from the journal's exact native parent binding.", journal.StoreRoot);
+
+            var quarantineName = journal.QuarantineBasename;
+            var quarantineInfo = _files.InspectChildNoFollow(packageParent, quarantineName)
+                ?? throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "The exact journal quarantine directory is absent.", journal.StoreRoot);
+            RequireDirectory(quarantineInfo, journal.Manifest.InstallDirectoryIdentity, journal.StoreRoot,
+                "The journal quarantine name does not identify its exact original install directory.");
+            PhysicalStoreDirectoryPublicationChecks.ObserveExactDirectory(
+                _files, _directories, packageParent, quarantineName, quarantineInfo.Identity);
+
+            quarantine = _files.OpenDirectoryChildNoFollow(packageParent, quarantineName);
+            RequireDirectory(_files.InspectHandle(quarantine), quarantineInfo.Identity, journal.StoreRoot,
+                "The opened quarantine directory differs from its exact no-follow observation.");
+            var quarantineSemantics = RequireSupportedProfile(quarantine, journal.StoreRoot);
+            if (quarantineSemantics != journal.Manifest.InstallDirectorySemantics)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "The quarantine directory profile differs from the immutable deletion baseline.", journal.StoreRoot);
+
+            var markerInfo = _files.InspectChildNoFollow(quarantine, PackageStoreDeletionJournal.CompletionMarkerName);
+            RequireMarker(markerInfo, journal, quarantineSemantics);
+            marker = _files.OpenFileChildNoFollow(quarantine,
+                PackageStoreDeletionJournal.CompletionMarkerName, FileAccess.Read);
+            RequireMarker(_files.InspectHandle(marker), journal, quarantineSemantics);
+            RequireCanonicalMarker(quarantine, journal, quarantineSemantics);
+
+            var manifest = _manifests.Capture(quarantine, journal.OriginalInstall,
+                packageParent, packageParentIdentity, packageParentSemantics,
+                quarantineName, quarantineSemantics, cancellationToken);
+            if (journal.Manifest.RequireExactSubset(manifest) != 0)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "The quarantine directory no longer matches the journal's complete baseline.", journal.StoreRoot);
+
+            result = new PackageStoreQuarantinedCandidate(
+                _files, _names, _directories, _manifests, journal, rootHandle,
+                packageParent, packageParentIdentity, packageParentSemantics,
+                quarantine, quarantineSemantics, marker, edges.ToArray(), ownedParents.ToArray(),
+                revalidateOperation, heldPackageParent is null ? null : revalidateHeldParent);
+            result.Revalidate(cancellationToken);
+
+            ownedParents.Clear();
+            edges.Clear();
+            quarantine = null;
+            marker = null;
+            return result;
+        }
+        catch (Exception primaryFailure)
+        {
+            try
+            {
+                if (result is not null)
+                    result.Dispose();
+                else
+                {
+                    DisposeAll(marker, quarantine, ownedParents);
+                }
+            }
+            catch (Exception cleanupFailure)
+            {
+                throw new AggregateException("Quarantine candidate binding failed and native observations also failed to close.",
+                    primaryFailure, cleanupFailure);
+            }
+
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+            throw new InvalidOperationException("Unreachable after rethrowing the candidate-binding failure.");
+        }
+    }
+
+    private PhysicalStoreDirectoryHandle OpenPackageParent(
+        PackageStoreDeletionJournalStore.DiscoveredJournal discovered,
+        PhysicalStoreDirectoryHandle rootHandle,
+        List<PhysicalStoreDirectoryHandle> ownedParents,
+        List<QuarantinedParentEdge> edges,
+        out PhysicalFileIdentity packageParentIdentity,
+        out PhysicalStoreNameSemantics packageParentSemantics,
+        CancellationToken cancellationToken)
+    {
+        var journal = discovered.Journal;
+        var rootInfo = _files.InspectHandle(rootHandle);
+        RequireDirectory(rootInfo, journal.StoreRoot.HandleIdentity, journal.StoreRoot,
+            "The held store root changed before package-parent opening.");
+        var rootSemantics = RequireSupportedProfile(rootHandle, journal.StoreRoot);
+        if (rootSemantics != discovered.RootSemantics)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The held store root profile differs from the journal discovery binding.", journal.StoreRoot);
+
+        var feed = OpenExactDirectoryChild(rootHandle, journal.PackageParentRelativeComponents[0],
+            rootInfo.Identity, rootSemantics, journal.StoreRoot, cancellationToken);
+        ownedParents.Add(feed.Handle);
+        edges.Add(feed.Edge);
+
+        var package = OpenExactDirectoryChild(feed.Handle, journal.PackageParentRelativeComponents[1],
+            feed.Identity, feed.Semantics, journal.StoreRoot, cancellationToken);
+        ownedParents.Add(package.Handle);
+        edges.Add(package.Edge);
+        packageParentIdentity = package.Identity;
+        packageParentSemantics = package.Semantics;
+        return package.Handle;
+    }
+
+    private (PhysicalStoreDirectoryHandle Handle, PhysicalFileIdentity Identity,
+        PhysicalStoreNameSemantics Semantics, QuarantinedParentEdge Edge) OpenExactDirectoryChild(
+        PhysicalStoreDirectoryHandle parent,
+        string name,
+        PhysicalFileIdentity parentIdentity,
+        PhysicalStoreNameSemantics parentSemantics,
+        PhysicalRootIdentity root,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        PhysicalStoreDeletionManifestEntry.ValidateComponent(name, parentSemantics);
+        var info = _files.InspectChildNoFollow(parent, name)
+            ?? throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "A journal-bound package-parent path component is absent.", root);
+        RequireDirectory(info, info.Identity, root,
+            "A journal-bound package-parent component is not a safe directory.");
+        var canonical = PhysicalStoreDirectoryPublicationChecks.ObserveExactDirectory(
+            _files, _directories, parent, name, info.Identity);
+        if (canonical.ParentIdentity != parentIdentity || canonical.Semantics != parentSemantics ||
+            !string.Equals(canonical.Basename, name, StringComparison.Ordinal))
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "A journal-bound package-parent component is not at its exact canonical native name.", root);
+        PhysicalStoreDeletionChecks.RequireSameVolume(parentIdentity, info.Identity);
+
+        var child = _files.OpenDirectoryChildNoFollow(parent, name);
+        try
+        {
+            RequireDirectory(_files.InspectHandle(child), info.Identity, root,
+                "A package-parent directory changed during open.");
+            var childSemantics = RequireSupportedProfile(child, root);
+            RequireDirectory(_files.InspectHandle(parent), parentIdentity, root,
+                "A retained package parent changed during open.");
+            var namedAfter = _files.InspectChildNoFollow(parent, name);
+            RequireDirectory(namedAfter, info.Identity, root,
+                "A package-parent name changed during open.");
+            var afterCanonical = PhysicalStoreDirectoryPublicationChecks.ObserveExactDirectory(
+                _files, _directories, parent, name, info.Identity);
+            if (afterCanonical.ParentIdentity != parentIdentity || afterCanonical.Semantics != parentSemantics ||
+                !string.Equals(afterCanonical.Basename, name, StringComparison.Ordinal))
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "A package-parent name changed during canonical revalidation.", root);
+
+            return (child, info.Identity, childSemantics,
+                new QuarantinedParentEdge(parent, parentIdentity, parentSemantics,
+                    name, child, info.Identity, childSemantics));
+        }
+        catch
+        {
+            child.Dispose();
+            throw;
+        }
+    }
+
+    private PhysicalStoreNameSemantics RequireSupportedProfile(
+        PhysicalStoreDirectoryHandle directory,
+        PhysicalRootIdentity root)
+        => PackageInstallStore.RequireSupportedNameProfile(_names.ObserveDirectoryNameSemantics(directory), root);
+
+    private static void RequireDirectory(
+        PhysicalStoreEntryInfo? info,
+        PhysicalFileIdentity expectedIdentity,
+        PhysicalRootIdentity root,
+        string message)
+    {
+        if (info is null || info.Kind != PhysicalStoreEntryKind.Directory || info.Identity != expectedIdentity ||
+            info.ReparseTag is not (null or 0))
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority, message, root);
+        PhysicalStoreDeletionChecks.RequireSameVolume(root.HandleIdentity, info.Identity);
+    }
+
+    private static void RequireMarker(
+        PhysicalStoreEntryInfo? info,
+        PackageStoreDeletionJournal journal,
+        PhysicalStoreNameSemantics semantics)
+    {
+        if (info is null || info.Kind != PhysicalStoreEntryKind.RegularFile || info.LinkCount != 1 ||
+            info.Length != 0 || info.Identity != journal.CompletionMarkerIdentity ||
+            info.ReparseTag is not (null or 0) ||
+            !string.Equals(info.Identity.Provider, journal.StoreRoot.HandleIdentity.Provider, StringComparison.Ordinal) ||
+            !string.Equals(info.Identity.VolumeOrDeviceId, journal.StoreRoot.HandleIdentity.VolumeOrDeviceId, StringComparison.Ordinal))
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The quarantine root completion marker differs from its exact single-link empty baseline.", journal.StoreRoot);
+        PhysicalStoreDeletionManifestEntry.ValidateComponent(PackageStoreDeletionJournal.CompletionMarkerName, semantics);
+    }
+
+    private void RequireCanonicalMarker(
+        PhysicalStoreDirectoryHandle quarantine,
+        PackageStoreDeletionJournal journal,
+        PhysicalStoreNameSemantics semantics)
+    {
+        var canonical = _names.ObserveCanonicalFileNameNoFollow(quarantine,
+            PackageStoreDeletionJournal.CompletionMarkerName, journal.CompletionMarkerIdentity);
+        if (canonical.ParentIdentity != journal.Manifest.InstallDirectoryIdentity ||
+            canonical.Semantics != semantics || canonical.FileIdentity != journal.CompletionMarkerIdentity ||
+            !string.Equals(canonical.Basename, PackageStoreDeletionJournal.CompletionMarkerName, StringComparison.Ordinal))
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The quarantine completion marker is not at its exact canonical native name.", journal.StoreRoot);
+    }
+
+    private static void RequireJournalLocation(
+        PackageStoreDeletionJournal journal,
+        PackageInstallIdentityReader.PackageInstallDeletionLocation location,
+        bool originalName)
+    {
+        var expectedName = originalName ? journal.OriginalBasename : journal.QuarantineBasename;
+        if (location.RootIdentity != journal.StoreRoot.HandleIdentity ||
+            location.PackageParentIdentity != journal.PackageParentIdentity ||
+            location.PackageParentSemantics != journal.PackageParentSemantics ||
+            !string.Equals(location.OriginalBasename, expectedName, StringComparison.Ordinal) ||
+            location.InstallDirectoryIdentity != journal.Manifest.InstallDirectoryIdentity ||
+            location.CompletionMarkerIdentity != journal.CompletionMarkerIdentity ||
+            location.InstallIdentity != journal.OriginalInstall)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The native install location differs from its exact journal-bound parent/name/marker.", journal.StoreRoot);
+    }
+
+    private static void DisposeAll(
+        PhysicalStoreFileHandle? marker,
+        PhysicalStoreDirectoryHandle? quarantine,
+        IEnumerable<PhysicalStoreDirectoryHandle> parents)
+    {
+        List<Exception>? failures = null;
+        TryDispose(marker);
+        TryDispose(quarantine);
+        foreach (var parent in parents.Reverse())
+            TryDispose(parent);
+        if (failures is { Count: 1 })
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        if (failures is { Count: > 1 })
+            throw new AggregateException("Multiple native quarantine observations failed to close.", failures);
+
+        void TryDispose(IDisposable? resource)
+        {
+            if (resource is null)
+                return;
+            try { resource.Dispose(); }
+            catch (Exception exception) { (failures ??= []).Add(exception); }
+        }
+    }
+
     private static PackageStoreAdmissionException Refuse(
         PackageStoreAdmissionReason reason,
         string message,
         PhysicalRootIdentity root)
         => new(reason, message, root);
+
+    private static PackageStoreAdmissionException Unsupported(string message)
+        => new(PackageStoreAdmissionReason.UnsupportedFilesystem, message);
+}
+
+internal sealed record QuarantinedParentEdge(
+    PhysicalStoreDirectoryHandle Parent,
+    PhysicalFileIdentity ParentIdentity,
+    PhysicalStoreNameSemantics ParentSemantics,
+    string Name,
+    PhysicalStoreDirectoryHandle Child,
+    PhysicalFileIdentity ChildIdentity,
+    PhysicalStoreNameSemantics ChildSemantics);
+
+/// <summary>Call-scoped rebind of one journal's exact full baseline at its quarantine basename.</summary>
+/// <remarks>It is native observation evidence only; it has no move, removal, or journal-publication method.</remarks>
+internal sealed class PackageStoreQuarantinedCandidate : IDisposable
+{
+    private readonly IPhysicalStoreFileSystem _files;
+    private readonly IPhysicalStoreNameFileSystem _names;
+    private readonly IPhysicalStoreDirectoryNameFileSystem _directories;
+    private readonly PhysicalStoreDeletionManifestReader _manifests;
+    private readonly PhysicalStoreDirectoryHandle _root;
+    private readonly PhysicalStoreDirectoryHandle _packageParent;
+    private readonly PhysicalFileIdentity _packageParentIdentity;
+    private readonly PhysicalStoreNameSemantics _packageParentSemantics;
+    private readonly PhysicalStoreDirectoryHandle _quarantine;
+    private readonly PhysicalStoreNameSemantics _quarantineSemantics;
+    private readonly PhysicalStoreFileHandle _marker;
+    private readonly QuarantinedParentEdge[] _edges;
+    private readonly PhysicalStoreDirectoryHandle[] _ownedParents;
+    private readonly Action<CancellationToken> _revalidateOperation;
+    private readonly Action<CancellationToken>? _revalidateHeldParent;
+    private bool _disposed;
+
+    internal PackageStoreQuarantinedCandidate(
+        IPhysicalStoreFileSystem files,
+        IPhysicalStoreNameFileSystem names,
+        IPhysicalStoreDirectoryNameFileSystem directories,
+        PhysicalStoreDeletionManifestReader manifests,
+        PackageStoreDeletionJournal journal,
+        PhysicalStoreDirectoryHandle root,
+        PhysicalStoreDirectoryHandle packageParent,
+        PhysicalFileIdentity packageParentIdentity,
+        PhysicalStoreNameSemantics packageParentSemantics,
+        PhysicalStoreDirectoryHandle quarantine,
+        PhysicalStoreNameSemantics quarantineSemantics,
+        PhysicalStoreFileHandle marker,
+        QuarantinedParentEdge[] edges,
+        PhysicalStoreDirectoryHandle[] ownedParents,
+        Action<CancellationToken> revalidateOperation,
+        Action<CancellationToken>? revalidateHeldParent)
+    {
+        _files = files;
+        _names = names;
+        _directories = directories;
+        _manifests = manifests;
+        Journal = journal;
+        _root = root;
+        _packageParent = packageParent;
+        _packageParentIdentity = packageParentIdentity;
+        _packageParentSemantics = packageParentSemantics;
+        _quarantine = quarantine;
+        _quarantineSemantics = quarantineSemantics;
+        _marker = marker;
+        _edges = edges;
+        _ownedParents = ownedParents;
+        _revalidateOperation = revalidateOperation;
+        _revalidateHeldParent = revalidateHeldParent;
+    }
+
+    internal PackageStoreDeletionJournal Journal { get; }
+
+    internal PhysicalStoreDeletionManifest Manifest => Journal.Manifest;
+
+    internal void Revalidate(CancellationToken cancellationToken)
+    {
+        EnsureLive(cancellationToken);
+        if (_revalidateHeldParent is not null)
+            _revalidateHeldParent(cancellationToken);
+        else
+            foreach (var edge in _edges)
+                RevalidateEdge(edge);
+
+        RequireDirectory(_files.InspectHandle(_root), Journal.StoreRoot.HandleIdentity,
+            "The held store root changed while validating a quarantine candidate.");
+        RequireDirectory(_files.InspectHandle(_packageParent), _packageParentIdentity,
+            "The exact package parent changed while validating a quarantine candidate.");
+        if (_names.ObserveDirectoryNameSemantics(_packageParent) != _packageParentSemantics)
+            throw Refuse("The exact package parent's native profile changed.");
+        RequireExactDirectoryName(_packageParent, Journal.QuarantineBasename,
+            Journal.Manifest.InstallDirectoryIdentity, _packageParentIdentity, _packageParentSemantics);
+        RequireDirectory(_files.InspectHandle(_quarantine), Journal.Manifest.InstallDirectoryIdentity,
+            "The held quarantine directory changed.");
+        if (_names.ObserveDirectoryNameSemantics(_quarantine) != _quarantineSemantics ||
+            _quarantineSemantics != Journal.Manifest.InstallDirectorySemantics)
+            throw Refuse("The quarantine directory's exact native name profile changed.");
+
+        RequireMarker(_files.InspectHandle(_marker));
+        RequireMarker(_files.InspectChildNoFollow(_quarantine, PackageStoreDeletionJournal.CompletionMarkerName));
+        var canonicalMarker = _names.ObserveCanonicalFileNameNoFollow(_quarantine,
+            PackageStoreDeletionJournal.CompletionMarkerName, Journal.CompletionMarkerIdentity);
+        if (canonicalMarker.ParentIdentity != Journal.Manifest.InstallDirectoryIdentity ||
+            canonicalMarker.Semantics != _quarantineSemantics ||
+            canonicalMarker.FileIdentity != Journal.CompletionMarkerIdentity ||
+            !string.Equals(canonicalMarker.Basename, PackageStoreDeletionJournal.CompletionMarkerName,
+                StringComparison.Ordinal))
+            throw Refuse("The quarantine completion marker is not at its exact canonical native name.");
+
+        var observed = _manifests.Capture(_quarantine, Journal.OriginalInstall,
+            _packageParent, _packageParentIdentity, _packageParentSemantics,
+            Journal.QuarantineBasename, _quarantineSemantics, cancellationToken);
+        if (Journal.Manifest.RequireExactSubset(observed) != 0)
+            throw Refuse("The quarantine tree no longer matches the full journal baseline.");
+        EnsureLive(cancellationToken);
+    }
+
+    /// <summary>Checks the independent original-name slot without following it or granting replacement authority.</summary>
+    internal PhysicalStoreEntryInfo? InspectOriginalSlot(CancellationToken cancellationToken)
+    {
+        Revalidate(cancellationToken);
+        var info = _files.InspectChildNoFollow(_packageParent, Journal.OriginalBasename);
+        if (info is null)
+            return null;
+        RequireDirectory(info, info.Identity,
+            "The original logical install slot is occupied by an unsafe native entry.");
+        var canonical = PhysicalStoreDirectoryPublicationChecks.ObserveExactDirectory(
+            _files, _directories, _packageParent, Journal.OriginalBasename, info.Identity);
+        if (canonical.ParentIdentity != _packageParentIdentity || canonical.Semantics != _packageParentSemantics ||
+            !string.Equals(canonical.Basename, Journal.OriginalBasename, StringComparison.Ordinal))
+            throw Refuse("The original logical install slot is not the exact canonical name expected by the journal.");
+        EnsureLive(cancellationToken);
+        return info;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+            return;
+        _disposed = true;
+        List<Exception>? failures = null;
+        TryDispose(_marker);
+        TryDispose(_quarantine);
+        foreach (var parent in _ownedParents.Reverse())
+            TryDispose(parent);
+        if (failures is { Count: 1 })
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0]).Throw();
+        if (failures is { Count: > 1 })
+            throw new AggregateException("Multiple native quarantine observations failed to close.", failures);
+
+        void TryDispose(IDisposable handle)
+        {
+            try { handle.Dispose(); }
+            catch (Exception exception) { (failures ??= []).Add(exception); }
+        }
+    }
+
+    private void RevalidateEdge(QuarantinedParentEdge edge)
+    {
+        RequireDirectory(_files.InspectHandle(edge.Parent), edge.ParentIdentity,
+            "A retained quarantine ancestor changed.");
+        if (_names.ObserveDirectoryNameSemantics(edge.Parent) != edge.ParentSemantics)
+            throw Refuse("A retained quarantine ancestor profile changed.");
+        RequireDirectory(_files.InspectChildNoFollow(edge.Parent, edge.Name), edge.ChildIdentity,
+            "A retained quarantine ancestor name changed.");
+        var canonical = _directories.ObserveCanonicalDirectoryNameNoFollow(
+            edge.Parent, edge.Name, edge.ChildIdentity);
+        if (canonical.ParentIdentity != edge.ParentIdentity || canonical.Semantics != edge.ParentSemantics ||
+            canonical.FileIdentity != edge.ChildIdentity || !string.Equals(canonical.Basename, edge.Name, StringComparison.Ordinal))
+            throw Refuse("A retained quarantine ancestor is not at its exact canonical name.");
+        RequireDirectory(_files.InspectHandle(edge.Child), edge.ChildIdentity,
+            "A retained quarantine ancestor handle changed.");
+        if (_names.ObserveDirectoryNameSemantics(edge.Child) != edge.ChildSemantics)
+            throw Refuse("A retained quarantine ancestor child profile changed.");
+    }
+
+    private void RequireExactDirectoryName(
+        PhysicalStoreDirectoryHandle parent,
+        string name,
+        PhysicalFileIdentity identity,
+        PhysicalFileIdentity parentIdentity,
+        PhysicalStoreNameSemantics semantics)
+    {
+        var canonical = _directories.ObserveCanonicalDirectoryNameNoFollow(parent, name, identity);
+        if (canonical.ParentIdentity != parentIdentity || canonical.Semantics != semantics ||
+            canonical.FileIdentity != identity || !string.Equals(canonical.Basename, name, StringComparison.Ordinal))
+            throw Refuse("The quarantine directory is not at its exact canonical native name.");
+    }
+
+    private void RequireMarker(PhysicalStoreEntryInfo? info)
+    {
+        if (info is null || info.Kind != PhysicalStoreEntryKind.RegularFile || info.LinkCount != 1 ||
+            info.Length != 0 || info.Identity != Journal.CompletionMarkerIdentity ||
+            info.ReparseTag is not (null or 0) ||
+            !string.Equals(info.Identity.Provider, Journal.StoreRoot.HandleIdentity.Provider, StringComparison.Ordinal) ||
+            !string.Equals(info.Identity.VolumeOrDeviceId, Journal.StoreRoot.HandleIdentity.VolumeOrDeviceId, StringComparison.Ordinal))
+            throw Refuse("The quarantine root completion marker differs from its exact single-link empty baseline.");
+    }
+
+    private void RequireDirectory(PhysicalStoreEntryInfo? info, PhysicalFileIdentity identity, string message)
+    {
+        if (info is null || info.Kind != PhysicalStoreEntryKind.Directory || info.Identity != identity ||
+            info.ReparseTag is not (null or 0) ||
+            !string.Equals(info.Identity.Provider, Journal.StoreRoot.HandleIdentity.Provider, StringComparison.Ordinal) ||
+            !string.Equals(info.Identity.VolumeOrDeviceId, Journal.StoreRoot.HandleIdentity.VolumeOrDeviceId, StringComparison.Ordinal))
+            throw Refuse(message);
+    }
+
+    private void EnsureLive(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_disposed)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.ExpiredScope,
+                "The quarantine candidate observation has expired.", Journal.StoreRoot);
+        _revalidateOperation(cancellationToken);
+    }
+
+    private PackageStoreAdmissionException Refuse(string message)
+        => new(PackageStoreAdmissionReason.UnknownAuthority, message, Journal.StoreRoot);
 }
 
 /// <summary>Call-scoped exact binding for one freshly planned eligible completed install.</summary>
