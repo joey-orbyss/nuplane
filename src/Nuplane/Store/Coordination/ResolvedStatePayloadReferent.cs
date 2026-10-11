@@ -49,6 +49,7 @@ internal sealed class ResolvedStatePayloadReferent : IDisposable
 {
     private readonly ResolvedPackageStorePath _resolution;
     private readonly Action<StatePayloadSlotMetadata> _revalidateAbsentSlot;
+    private readonly Action<PhysicalFileIdentity> _revalidateAfterLexicalReplacement;
     private readonly object _gate = new();
     private bool _disposed;
 
@@ -56,12 +57,14 @@ internal sealed class ResolvedStatePayloadReferent : IDisposable
         ResolvedPackageStorePath resolution,
         IReadOnlyList<StatePayloadSlotMetadata> terminalLinkSlots,
         StatePayloadSlotMetadata finalPayloadSlot,
-        Action<StatePayloadSlotMetadata> revalidateAbsentSlot)
+        Action<StatePayloadSlotMetadata> revalidateAbsentSlot,
+        Action<PhysicalFileIdentity> revalidateAfterLexicalReplacement)
     {
         ArgumentNullException.ThrowIfNull(resolution);
         ArgumentNullException.ThrowIfNull(terminalLinkSlots);
         ArgumentNullException.ThrowIfNull(finalPayloadSlot);
         ArgumentNullException.ThrowIfNull(revalidateAbsentSlot);
+        ArgumentNullException.ThrowIfNull(revalidateAfterLexicalReplacement);
         if (resolution.Target is not PhysicalStoreDirectoryHandle ||
             (finalPayloadSlot.Entry is not null && finalPayloadSlot.Entry.Kind != PhysicalStoreEntryKind.RegularFile))
         {
@@ -72,6 +75,7 @@ internal sealed class ResolvedStatePayloadReferent : IDisposable
 
         _resolution = resolution;
         _revalidateAbsentSlot = revalidateAbsentSlot;
+        _revalidateAfterLexicalReplacement = revalidateAfterLexicalReplacement;
         TerminalLinkSlots = terminalLinkSlots.ToArray();
         FinalPayloadSlot = finalPayloadSlot;
         RequestedSlot = TerminalLinkSlots.Count == 0 ? finalPayloadSlot : TerminalLinkSlots[0];
@@ -113,6 +117,24 @@ internal sealed class ResolvedStatePayloadReferent : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             if (FinalPayloadSlot.Entry is null)
                 _revalidateAbsentSlot(FinalPayloadSlot);
+        }
+    }
+
+    /// <summary>Replays all path evidence after the caller has verified its own lexical replacement.</summary>
+    /// <remarks>Only the original outer terminal-link edge and a directly replaced absent leaf may transition.</remarks>
+    internal void RevalidateAfterLexicalReplacement(
+        PhysicalFileIdentity publishedIdentity,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(publishedIdentity);
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            cancellationToken.ThrowIfCancellationRequested();
+            _revalidateAfterLexicalReplacement(publishedIdentity);
+            if (FinalPayloadSlot.Entry is null && !ReferenceEquals(RequestedSlot, FinalPayloadSlot))
+                _revalidateAbsentSlot(FinalPayloadSlot);
+            cancellationToken.ThrowIfCancellationRequested();
         }
     }
 

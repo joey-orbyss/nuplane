@@ -10,10 +10,17 @@ parser.add_argument("provider", choices=("Unix", "Windows"))
 parser.add_argument("results_directory", type=Path)
 args = parser.parse_args()
 trx = args.results_directory / "state-files.trx"
+selected_tests = (
+    f"FullyQualifiedName~{args.provider}PhysicalStoreStateFileTests|"
+    "FullyQualifiedName~ResolveStatePayloadReferentMetadata_|"
+    "FullyQualifiedName~GuardedStatePayloadWriteScopeTests"
+)
+if args.provider == "Windows":
+    selected_tests = f"({selected_tests})&FullyQualifiedName!~ScopedWrite_PostPublicationReplayStillRejectsChangedIntermediateAlias"
 subprocess.run([
     "dotnet", "test", "test/Nuplane.Store.Tests/Nuplane.Store.Tests.csproj",
     "--configuration", "Release",
-    "--filter", f"FullyQualifiedName~{args.provider}PhysicalStoreStateFileTests|FullyQualifiedName~ResolveStatePayloadReferentMetadata_",
+    "--filter", selected_tests,
     "--logger", f"trx;LogFileName={trx.name}",
     "--results-directory", str(args.results_directory),
 ], check=True)

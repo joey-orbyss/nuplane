@@ -74,6 +74,18 @@ internal sealed class PackageStoreAuthorityResolver
     internal ResolvedNativeStateSlot ResolveStateSlotForWrite(
         string exactAbsoluteStatePath,
         CancellationToken cancellationToken = default)
+        => ResolveStateSlotForWriteCore(exactAbsoluteStatePath, allowOrdinaryEntries: false, cancellationToken);
+
+    /// <summary>Resolves the lexical destination of an ordinary state write, including hardlinks and final links.</summary>
+    internal ResolvedNativeStateSlot ResolveOrdinaryStateSlotForWrite(
+        string exactAbsoluteStatePath,
+        CancellationToken cancellationToken = default)
+        => ResolveStateSlotForWriteCore(exactAbsoluteStatePath, allowOrdinaryEntries: true, cancellationToken);
+
+    private ResolvedNativeStateSlot ResolveStateSlotForWriteCore(
+        string exactAbsoluteStatePath,
+        bool allowOrdinaryEntries,
+        CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(exactAbsoluteStatePath);
         cancellationToken.ThrowIfCancellationRequested();
@@ -115,7 +127,7 @@ internal sealed class PackageStoreAuthorityResolver
                 throw Unknown("The state parent changed identity during strict post-creation re-resolution.");
 
             ResolvedNativeStateSlot.RequireSameAuthorityEvidence(creationEvidence, finalEvidence);
-            var (slot, existingFileIdentity) = ObserveStateSlotForWrite(finalParent, requestedBasename);
+            var (slot, existingFileIdentity) = ObserveStateSlotForWrite(finalParent, requestedBasename, allowOrdinaryEntries);
             var result = new ResolvedNativeStateSlot(
                 _files, _names, creationEvidence, finalEvidence, requestedBasename, slot, existingFileIdentity);
             creationEvidence = null;
@@ -199,7 +211,9 @@ internal sealed class PackageStoreAuthorityResolver
                 resolution,
                 capture.TerminalLinkSlots,
                 payloadSlot,
-                RevalidateAbsentStatePayloadSlot);
+                RevalidateAbsentStatePayloadSlot,
+                capture.RevalidateAfterLexicalReplacement
+                    ?? throw new InvalidOperationException("State-payload replacement replay was not captured."));
             resolution = null;
             result.Revalidate(cancellationToken);
             var transferred = result;
@@ -292,7 +306,8 @@ internal sealed class PackageStoreAuthorityResolver
 
     private (StateSlotIdentity Slot, PhysicalFileIdentity? ExistingFileIdentity) ObserveStateSlotForWrite(
         PhysicalStoreDirectoryHandle parent,
-        string requestedBasename)
+        string requestedBasename,
+        bool allowOrdinaryEntries)
     {
         var parentBefore = _files.InspectHandle(parent);
         if (parentBefore.Kind != PhysicalStoreEntryKind.Directory)
@@ -317,6 +332,25 @@ internal sealed class PackageStoreAuthorityResolver
             }
 
             return (new StateSlotIdentity(parentBefore.Identity, semantics, requestedBasename), null);
+        }
+
+        if (allowOrdinaryEntries)
+        {
+            var semantics = _names.ObserveDirectoryNameSemantics(parent);
+            PhysicalStoreStateFileChecks.RequireEntry(entry, entry);
+            var name = requestedBasename;
+            if (_files is WindowsPhysicalStoreFileSystem windows)
+            {
+                var observedEntry = windows.ObserveStateDestinationEntryNoFollow(
+                    parent, requestedBasename, parentBefore.Identity, semantics);
+                PhysicalStoreStateFileChecks.RequireEntry(observedEntry.Entry, entry);
+                name = observedEntry.StoredName;
+            }
+            PhysicalStoreStateFileChecks.RequireEntry(_files.InspectChildNoFollow(parent, requestedBasename), entry);
+            if (_files.InspectHandle(parent).Identity != parentBefore.Identity ||
+                _names.ObserveDirectoryNameSemantics(parent) != semantics)
+                throw Unknown("The ordinary state destination parent changed during observation.");
+            return (new StateSlotIdentity(parentBefore.Identity, semantics, name), entry.Identity);
         }
 
         if (entry.Kind != PhysicalStoreEntryKind.RegularFile || entry.LinkCount != 1)
@@ -643,7 +677,7 @@ internal sealed class PackageStoreAuthorityResolver
                     if (terminalLink && statePayloadCapture is not null)
                     {
                         statePayloadCapture.RecordTerminalLink(CaptureStatePayloadSlot(
-                            current, component, entry, alias.Target));
+                            current, component, entry, alias.Target), alias);
                     }
 
                     if (!state.ActiveAliases.Add(alias.Identity) || ++state.AliasExpansions > MaximumAliasExpansions)
@@ -754,6 +788,17 @@ internal sealed class PackageStoreAuthorityResolver
                     target == PhysicalStorePathTarget.ConfiguredRootDirectoryAllowMissingSuffix,
                 isProspectiveMissingSuffix: prospectiveMissingSuffix,
                 isRetainedGraphUseRoot: retainedInstall is not null);
+            if (statePayloadCapture is not null)
+            {
+                var lexicalSlot = statePayloadCapture.TerminalLinkSlots.FirstOrDefault()
+                    ?? statePayloadCapture.FinalPayloadSlot
+                    ?? throw Unknown("State-payload resolution did not capture its lexical slot.");
+                statePayloadCapture.RevalidateAfterLexicalReplacement = replacementIdentity => state.Revalidate(
+                    finalTarget, target, finalFileParent,
+                    replacedStateSlot: lexicalSlot,
+                    replacedStateAlias: statePayloadCapture.LexicalAlias,
+                    replacementIdentity: replacementIdentity);
+            }
             state.DetachHandles();
             return result;
         }
@@ -1090,9 +1135,15 @@ internal sealed class PackageStoreAuthorityResolver
 
         internal IReadOnlyList<StatePayloadSlotMetadata> TerminalLinkSlots => _terminalLinkSlots;
         internal StatePayloadSlotMetadata? FinalPayloadSlot { get; private set; }
+        internal AliasEvidence? LexicalAlias { get; private set; }
+        internal Action<PhysicalFileIdentity>? RevalidateAfterLexicalReplacement { get; set; }
 
-        internal void RecordTerminalLink(StatePayloadSlotMetadata slot)
-            => _terminalLinkSlots.Add(slot);
+        internal void RecordTerminalLink(StatePayloadSlotMetadata slot, AliasEvidence alias)
+        {
+            if (_terminalLinkSlots.Count == 0)
+                LexicalAlias = alias;
+            _terminalLinkSlots.Add(slot);
+        }
 
         internal void RecordPayloadSlot(StatePayloadSlotMetadata slot)
         {
@@ -1619,8 +1670,27 @@ internal sealed class PackageStoreAuthorityResolver
             PhysicalStoreDirectoryHandle? targetParent,
             bool allowStableMissingDirectoryRetry = false,
             RootMembershipRecord? expectedOwnedLedger = null,
-            PhysicalFileIdentity? expectedOwnedLedgerIdentity = null)
+            PhysicalFileIdentity? expectedOwnedLedgerIdentity = null,
+            StatePayloadSlotMetadata? replacedStateSlot = null,
+            AliasEvidence? replacedStateAlias = null,
+            PhysicalFileIdentity? replacementIdentity = null)
         {
+            if ((replacedStateSlot is null) != (replacementIdentity is null) ||
+                (replacedStateAlias is not null &&
+                    (replacedStateSlot is null || !_aliases.Any(alias => ReferenceEquals(alias, replacedStateAlias)) ||
+                     replacedStateAlias.Identity != replacedStateSlot.Entry?.Identity ||
+                     replacedStateAlias.Name != replacedStateSlot.Name)))
+                throw new ArgumentException("Replacement replay must identify the captured lexical state slot and its exact alias.");
+            if (replacedStateSlot is not null)
+            {
+                var parent = resolver._files.InspectHandle(replacedStateSlot.Parent);
+                var semantics = resolver._names.ObserveDirectoryNameSemantics(replacedStateSlot.Parent);
+                var entry = resolver._files.InspectChildNoFollow(replacedStateSlot.Parent, replacedStateSlot.Name);
+                if (parent.Kind != PhysicalStoreEntryKind.Directory || parent.Identity != replacedStateSlot.ParentIdentity ||
+                    semantics != replacedStateSlot.NameSemantics || entry is null ||
+                    entry.Kind != PhysicalStoreEntryKind.RegularFile || entry.LinkCount != 1 || entry.Identity != replacementIdentity)
+                    throw Unknown("The lexical state slot is not the caller's exact published regular file.", RootIdentity);
+            }
             if ((expectedOwnedLedger is null) != (expectedOwnedLedgerIdentity is null))
                 throw new ArgumentException("An owned ledger replay requires both the expected record and native identity.");
             if (expectedOwnedLedger is not null && !AllowCatalogCandidate)
@@ -1689,6 +1759,10 @@ internal sealed class PackageStoreAuthorityResolver
 
             foreach (var alias in _aliases)
             {
+                // Only the exact outer terminal-link edge is replaced by this state operation.
+                // Every other alias, directory, ancestry and authority observation is still replayed.
+                if (ReferenceEquals(alias, replacedStateAlias))
+                    continue;
                 var parent = resolver._files.InspectHandle(alias.Parent);
                 var current = resolver._files.InspectChildNoFollow(alias.Parent, alias.Name);
                 if (parent.Kind != PhysicalStoreEntryKind.Directory || current is null ||

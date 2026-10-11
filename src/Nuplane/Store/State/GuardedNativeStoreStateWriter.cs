@@ -530,7 +530,7 @@ internal sealed class GuardedNativeStoreStateWriter
         if (expected?.Identity != fileInfo.Identity)
             throw Unknown("The state file changed before its held-handle payload read.");
 
-        await using var openedFile = OpenStateRead(parent, slot, fileInfo, name);
+        await using var openedFile = OpenStateRead(parent, slot, fileInfo, fileNameOverride);
         var payload = openedFile.Stream;
         var state = await RunCodecAsync(
             () => _payloadSerializer.ReadPayloadAsync(payload, cancellationToken),
