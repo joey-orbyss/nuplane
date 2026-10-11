@@ -6,6 +6,8 @@ internal static partial class UnixNative
 {
     private const uint DarwinRenameExclusive = 0x00000004;
     private const uint LinuxRenameNoReplace = 0x00000001;
+    private const int DarwinAtRemoveDirectory = 0x0080;
+    private const int LinuxAtRemoveDirectory = 0x0200;
 
     internal static int PublishReplaceAt(UnixPlatform platform, int parentFd, string stagedName, string destinationName)
     {
@@ -46,11 +48,32 @@ internal static partial class UnixNative
     }
 
     internal static int UnlinkFileAt(UnixPlatform platform, int parentFd, string singleName)
+        => UnlinkFileAt(platform, parentFd, singleName, "a held-parent transaction control file");
+
+    internal static int UnlinkFileAt(
+        UnixPlatform platform,
+        int parentFd,
+        string singleName,
+        string objectDescription)
     {
         var result = platform == UnixPlatform.Darwin
             ? DarwinPublication.UnlinkAt(parentFd, singleName, flags: 0)
             : LinuxPublication.UnlinkAt(parentFd, singleName, flags: 0);
-        return result == 0 ? 0 : throw NativeResultException("remove a held-parent transaction control file");
+        return result == 0 ? 0 : throw NativeResultException($"remove {objectDescription}");
+    }
+
+    internal static int UnlinkEmptyDirectoryAt(UnixPlatform platform, int parentFd, string singleName)
+    {
+        var flags = platform switch
+        {
+            UnixPlatform.Darwin => DarwinAtRemoveDirectory,
+            UnixPlatform.Linux => LinuxAtRemoveDirectory,
+            _ => throw new ArgumentOutOfRangeException(nameof(platform))
+        };
+        var result = platform == UnixPlatform.Darwin
+            ? DarwinPublication.UnlinkAt(parentFd, singleName, flags)
+            : LinuxPublication.UnlinkAt(parentFd, singleName, flags);
+        return result == 0 ? 0 : throw NativeResultException("remove a held-parent empty directory");
     }
 
     private static class DarwinPublication
