@@ -1,7 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using Nuplane.Store.Coordination.PhysicalFiles.Unix;
+using Nuplane.Store.Coordination;
 using Nuplane.Tests.Shared;
 
 namespace Nuplane.Store.Tests.Coordination;

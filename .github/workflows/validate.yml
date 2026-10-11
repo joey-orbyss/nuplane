@@ -51,6 +51,7 @@ jobs:
           - ubuntu-latest
           - ubuntu-24.04-arm
           - macos-latest
+          - macos-15-intel
           - windows-latest
     steps:
       - name: Checkout candidate commit
@@ -66,6 +67,28 @@ jobs:
             8.0.x
             9.0.x
             10.0.x
+
+      - name: Qualify Darwin native stat ABI on the actual runner architecture
+        if: startsWith(matrix.os, 'macos-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_arch=arm64
+          if [[ "${{ matrix.os }}" == "macos-15-intel" ]]; then
+            expected_arch=x86_64
+          fi
+          if [[ "$(uname -m)" != "$expected_arch" ]]; then
+            echo "The Darwin lane must execute natively on $expected_arch."
+            exit 1
+          fi
+          dotnet test test/Nuplane.Store.Tests/Nuplane.Store.Tests.csproj \
+            --configuration Release \
+            --filter "FullyQualifiedName~DarwinStatAbiCanaryTests" \
+            --logger "trx;LogFileName=darwin-stat-abi.trx" \
+            --results-directory "$RUNNER_TEMP/darwin-stat-abi-results"
+          python3 build/verify-required-trx.py \
+            "$RUNNER_TEMP/darwin-stat-abi-results/darwin-stat-abi.trx" \
+            build/test-cases/darwin-stat-abi.json
 
       - name: Verify protection serialization and canonical digests on every supported framework
         shell: bash
@@ -996,10 +1019,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$RUNNER_OS" == "macOS" && "$(uname -m)" != "arm64" ]]; then
-            echo "The native Unix store adapter qualification requires a macOS arm64 runner."
-            exit 1
-          fi
           if [[ "${{ matrix.os }}" == "ubuntu-24.04-arm" && "$(uname -m)" != "aarch64" ]]; then
             echo "The Linux arm64 lane must execute natively on arm64."
             exit 1
