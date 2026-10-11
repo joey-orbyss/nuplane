@@ -4,7 +4,6 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Nuplane;
 using Nuplane.Abstractions.PackageStoreProtection;
-using Nuplane.Feeds;
 using Nuplane.Feeds.Configuration;
 using Nuplane.Integration.Tests.Fixtures;
 using Nuplane.Store.Coordination;
@@ -64,6 +63,8 @@ public sealed partial class RootMembershipRegistryProcessTests
             Assert.True(publisher.HasExited);
 
             provider = CreateConfiguredProvider(fixture);
+            var trustedRoots = provider.GetRequiredService<ITrustedPackageStoreRootCatalog>().Roots;
+            Assert.Contains(trustedRoots, root => root.Label == "fixture" && root.RootPath == fixture.RootPath);
             var admission = provider.GetRequiredService<IPackageStoreAdmission>();
             if (expectRefusal)
             {
@@ -72,13 +73,14 @@ public sealed partial class RootMembershipRegistryProcessTests
                         PackageStoreAdmissionKind.Reconciliation, deadline.Token));
                 Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
                 AssertSnapshotsEqual(heldSnapshot, fixture.CaptureDataSnapshot());
+                Assert.Equal(beforeSiblingDigest, fixture.ReadStateDigest("sibling"));
+                Assert.Equal(beforeSiblingIdentity, fixture.InspectState("sibling")!.Identity);
                 var unchanged = fixture.Registry.ReadCandidate(fixture.Root);
                 Assert.Equal(RootMembershipStatus.Incomplete, unchanged.Status);
                 Assert.NotNull(unchanged.PendingStateCommit);
                 Assert.Equal(checkpoint.RootElement.GetProperty("ledgerDigest").GetString(), unchanged.LedgerDigest);
                 Assert.Null(unchanged.PendingStateCommit!.StagedStateFileIdentity);
             }
-
             else
             {
                 await using (var recovered = await admission.AcquireConfiguredRootOperationAsync(
@@ -175,7 +177,11 @@ public sealed partial class RootMembershipRegistryProcessTests
     {
         var services = new ServiceCollection();
         services.AddLogging();
-        services.AddNuplane(nuplane => nuplane.WithStateFile(fixture.StateFilePath));
+        services.AddNuplane(nuplane =>
+        {
+            nuplane.WithStateFile(fixture.StateFilePath);
+            nuplane.AddPackageStoreRoot("fixture", fixture.RootPath);
+        });
         services.Configure<FeedResolutionOptions>(options => options.PackageInstallRoot = fixture.RootPath);
         services.RemoveAll<IPhysicalStoreFileSystem>();
         services.AddSingleton<IPhysicalStoreFileSystem>(fixture.Files);
