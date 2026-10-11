@@ -170,7 +170,7 @@ public sealed class OwnedPackageResolverGraphReadTests
 
     private sealed class NuspecReadObservingFileSystem(IPhysicalStoreFileSystem inner)
         : IPhysicalStoreFileSystem, IPhysicalStoreNameFileSystem, IPhysicalStoreDirectoryEnumerationFileSystem,
-            IPhysicalStorePublicationFileSystem, IPhysicalStoreControlRecoveryFileSystem
+            IPhysicalStorePublicationFileSystem, IPhysicalStoreControlRecoveryFileSystem, IPhysicalStoreDirectoryPublicationFileSystem
     {
         private readonly HashSet<PhysicalFileIdentity> _nuspecIdentities = [];
 
@@ -230,6 +230,15 @@ public sealed class OwnedPackageResolverGraphReadTests
                 destinationName, destinationIdentity);
         public void RemoveControlFileAt(PhysicalStoreDirectoryHandle parent, string name, PhysicalFileIdentity identity)
             => ((IPhysicalStorePublicationFileSystem)inner).RemoveControlFileAt(parent, name, identity);
+        public PhysicalStoreCanonicalName ObserveCanonicalDirectoryNameNoFollow(
+            PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedDirectoryIdentity)
+            => ((IPhysicalStoreDirectoryPublicationFileSystem)inner).ObserveCanonicalDirectoryNameNoFollow(
+                parent, singleName, expectedDirectoryIdentity);
+        public PhysicalStoreEntryInfo PublishDirectoryNoReplaceAt(
+            PhysicalStoreDirectoryHandle parent, string stagedName,
+            PhysicalFileIdentity expectedStagedIdentity, string destinationName)
+            => ((IPhysicalStoreDirectoryPublicationFileSystem)inner).PublishDirectoryNoReplaceAt(
+                parent, stagedName, expectedStagedIdentity, destinationName);
         public ValueTask<PhysicalStoreLockedControlFile?> TryOpenAndLockControlFileForRemovalAt(
             PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedIdentity)
             => ((IPhysicalStoreControlRecoveryFileSystem)inner)

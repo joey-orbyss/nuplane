@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Integration.Tests.Fixtures;
+using Nuplane.Loading;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.GraphUseRecords;
 using Nuplane.Store.Coordination.GraphUseSerialization;
@@ -123,9 +124,10 @@ public sealed partial class OverlappingPackageGraphProtectionTests
 
             if (refuseForUnknownArtifact)
             {
-                await Assert.ThrowsAsync<PackageStoreAdmissionException>(async () =>
+                var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(async () =>
                     await admission.AcquireConfiguredRootOperationAsync(
                         PackageStoreAdmissionKind.Reconciliation, deadline.Token));
+                Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
                 Assert.Contains(unknownArtifactName!, CaptureUseNamespace(fixture).Keys);
                 AssertUseNamespaceEqual(namespaceBeforeAdmission, CaptureUseNamespace(fixture));
             }

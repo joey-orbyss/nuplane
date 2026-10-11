@@ -111,10 +111,10 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                     if (projection is not null)
                     {
                         try { await projection.DisposeAsync().ConfigureAwait(false); }
-                        catch (Exception cleanupError) { cleanupErrors.Add(cleanupError); }
+                        catch (Exception cleanupError) { AddDistinctCleanupErrors(cleanupErrors, cleanupError, exception); }
                     }
                     try { await session.DisposeUnprojectedAsync().ConfigureAwait(false); }
-                    catch (Exception cleanupError) { cleanupErrors.Add(cleanupError); }
+                    catch (Exception cleanupError) { AddDistinctCleanupErrors(cleanupErrors, cleanupError, exception); }
                     if (cleanupErrors.Count > 0)
                         throw new AggregateException("Catalog-backed configured-root admission failed and its retained session did not release cleanly.",
                             new[] { exception }.Concat(cleanupErrors));
@@ -294,9 +294,12 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                             try { await projection.DisposeAsync().ConfigureAwait(false); }
                             catch (Exception cleanupError)
                             {
-                                throw new AggregateException(
-                                    "Catalog-backed path projection failed and its retained context did not release cleanly.",
-                                    exception, cleanupError);
+                                var cleanupErrors = new List<Exception>();
+                                AddDistinctCleanupErrors(cleanupErrors, cleanupError, exception);
+                                if (cleanupErrors.Count > 0)
+                                    throw new AggregateException(
+                                        "Catalog-backed path projection failed and its retained context did not release cleanly.",
+                                        new[] { exception }.Concat(cleanupErrors));
                             }
                         }
                         throw;
@@ -428,7 +431,7 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                     if (owners[index].State is { } state)
                     {
                         try { await state.Owner.DisposeAsync().ConfigureAwait(false); }
-                        catch (Exception exception) { cleanupErrors.Add(exception); }
+                        catch (Exception exception) { AddDistinctCleanupErrors(cleanupErrors, exception, admissionError); }
                     }
                     else if (owners[index].Locked is { } locked)
                     {
@@ -446,7 +449,7 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                 if (catalogSession is not null)
                 {
                     try { await catalogSession.DisposeUnprojectedAsync().ConfigureAwait(false); }
-                    catch (Exception cleanupError) { cleanupErrors.Add(cleanupError); }
+                    catch (Exception cleanupError) { AddDistinctCleanupErrors(cleanupErrors, cleanupError, admissionError); }
                 }
 
                 if (cleanupErrors.Count > 0)
@@ -610,6 +613,20 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                 "Install-path admission failed and its retained path observation did not close cleanly.",
                 admissionError, cleanupError);
         }
+    }
+
+    private static void AddDistinctCleanupErrors(List<Exception> errors, Exception cleanupError, Exception? primaryError)
+    {
+        // A poisoned catalog session can replay the exact operation failure during disposal.
+        if (ReferenceEquals(cleanupError, primaryError))
+            return;
+        if (cleanupError is AggregateException { InnerExceptions.Count: > 0 } aggregate)
+        {
+            foreach (var inner in aggregate.InnerExceptions)
+                AddDistinctCleanupErrors(errors, inner, primaryError);
+        }
+        else
+            errors.Add(cleanupError);
     }
 
     private static PackageStoreAdmissionException Refusal(string message, PhysicalRootIdentity? root = null)

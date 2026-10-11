@@ -146,7 +146,7 @@ public sealed class PackageStoreAdmissionRefusalTests
 
     private sealed class TrackingFileSystem : IPhysicalStoreFileSystem,
         IPhysicalStoreNameFileSystem, IPhysicalStorePublicationFileSystem,
-        IPhysicalStoreDirectoryEnumerationFileSystem, IPhysicalStoreControlRecoveryFileSystem
+        IPhysicalStoreDirectoryEnumerationFileSystem, IPhysicalStoreControlRecoveryFileSystem, IPhysicalStoreDirectoryPublicationFileSystem
     {
         private readonly IPhysicalStoreFileSystem _inner;
         private readonly IPhysicalStoreNameFileSystem _names;
@@ -222,6 +222,15 @@ public sealed class PackageStoreAdmissionRefusalTests
             => _publication.RemoveControlFileAt(parent, singleName, expectedIdentity);
         public IReadOnlyList<string> EnumerateChildNamesNoFollow(PhysicalStoreDirectoryHandle parent, int maximumEntries)
             => ((IPhysicalStoreDirectoryEnumerationFileSystem)_inner).EnumerateChildNamesNoFollow(parent, maximumEntries);
+        public PhysicalStoreCanonicalName ObserveCanonicalDirectoryNameNoFollow(
+            PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedDirectoryIdentity)
+            => ((IPhysicalStoreDirectoryPublicationFileSystem)_inner).ObserveCanonicalDirectoryNameNoFollow(
+                parent, singleName, expectedDirectoryIdentity);
+        public PhysicalStoreEntryInfo PublishDirectoryNoReplaceAt(
+            PhysicalStoreDirectoryHandle parent, string stagedName,
+            PhysicalFileIdentity expectedStagedIdentity, string destinationName)
+            => ((IPhysicalStoreDirectoryPublicationFileSystem)_inner).PublishDirectoryNoReplaceAt(
+                parent, stagedName, expectedStagedIdentity, destinationName);
         public ValueTask<PhysicalStoreLockedControlFile?> TryOpenAndLockControlFileForRemovalAt(
             PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedIdentity)
             => ((IPhysicalStoreControlRecoveryFileSystem)_inner)

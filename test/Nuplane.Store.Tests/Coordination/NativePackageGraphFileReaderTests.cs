@@ -231,7 +231,7 @@ public sealed class NativePackageGraphFileReaderTests
 
     private sealed class TrackingFileSystem(IPhysicalStoreFileSystem inner, PhysicalFileIdentity nuspecIdentity)
         : IPhysicalStoreFileSystem, IPhysicalStoreNameFileSystem, IPhysicalStoreDirectoryEnumerationFileSystem,
-            IPhysicalStorePublicationFileSystem, IPhysicalStoreControlRecoveryFileSystem
+            IPhysicalStorePublicationFileSystem, IPhysicalStoreControlRecoveryFileSystem, IPhysicalStoreDirectoryPublicationFileSystem
     {
         internal Action? OnNuspecRead { get; set; }
         internal int NuspecReadCount { get; private set; }
@@ -267,6 +267,15 @@ public sealed class NativePackageGraphFileReaderTests
                 stagedIdentity, destinationName, destinationIdentity);
         public void RemoveControlFileAt(PhysicalStoreDirectoryHandle parent, string name, PhysicalFileIdentity identity)
             => ((IPhysicalStorePublicationFileSystem)inner).RemoveControlFileAt(parent, name, identity);
+        public PhysicalStoreCanonicalName ObserveCanonicalDirectoryNameNoFollow(
+            PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedDirectoryIdentity)
+            => ((IPhysicalStoreDirectoryPublicationFileSystem)inner).ObserveCanonicalDirectoryNameNoFollow(
+                parent, singleName, expectedDirectoryIdentity);
+        public PhysicalStoreEntryInfo PublishDirectoryNoReplaceAt(
+            PhysicalStoreDirectoryHandle parent, string stagedName,
+            PhysicalFileIdentity expectedStagedIdentity, string destinationName)
+            => ((IPhysicalStoreDirectoryPublicationFileSystem)inner).PublishDirectoryNoReplaceAt(
+                parent, stagedName, expectedStagedIdentity, destinationName);
         public ValueTask<PhysicalStoreLockedControlFile?> TryOpenAndLockControlFileForRemovalAt(
             PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedIdentity)
             => ((IPhysicalStoreControlRecoveryFileSystem)inner)

@@ -699,7 +699,7 @@ public sealed class PackageStoreAdmissionOrderingTests
         PhysicalFileIdentity? failLocatorParentIdentity = null,
         PhysicalFileIdentity? priorLocatorStateIdentity = null)
         : IPhysicalStoreFileSystem, IPhysicalStoreNameFileSystem, IPhysicalStorePublicationFileSystem,
-            IPhysicalStoreDirectoryEnumerationFileSystem, IPhysicalStoreControlRecoveryFileSystem
+            IPhysicalStoreDirectoryEnumerationFileSystem, IPhysicalStoreControlRecoveryFileSystem, IPhysicalStoreDirectoryPublicationFileSystem
     {
         private readonly object _gate = new();
         private bool _captured;
@@ -882,6 +882,15 @@ public sealed class PackageStoreAdmissionOrderingTests
             => ((IPhysicalStorePublicationFileSystem)inner).RemoveControlFileAt(parent, singleName, expectedIdentity);
         public IReadOnlyList<string> EnumerateChildNamesNoFollow(PhysicalStoreDirectoryHandle parent, int maximumEntries)
             => ((IPhysicalStoreDirectoryEnumerationFileSystem)inner).EnumerateChildNamesNoFollow(parent, maximumEntries);
+        public PhysicalStoreCanonicalName ObserveCanonicalDirectoryNameNoFollow(
+            PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedDirectoryIdentity)
+            => ((IPhysicalStoreDirectoryPublicationFileSystem)inner).ObserveCanonicalDirectoryNameNoFollow(
+                parent, singleName, expectedDirectoryIdentity);
+        public PhysicalStoreEntryInfo PublishDirectoryNoReplaceAt(
+            PhysicalStoreDirectoryHandle parent, string stagedName,
+            PhysicalFileIdentity expectedStagedIdentity, string destinationName)
+            => ((IPhysicalStoreDirectoryPublicationFileSystem)inner).PublishDirectoryNoReplaceAt(
+                parent, stagedName, expectedStagedIdentity, destinationName);
         public ValueTask<PhysicalStoreLockedControlFile?> TryOpenAndLockControlFileForRemovalAt(
             PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedIdentity)
             => ((IPhysicalStoreControlRecoveryFileSystem)inner)

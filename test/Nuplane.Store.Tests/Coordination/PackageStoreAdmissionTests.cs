@@ -1,5 +1,7 @@
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.Options;
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Feeds.Configuration;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.PhysicalFiles;
 using Nuplane.Store.State;
@@ -284,6 +286,67 @@ public sealed class PackageStoreAdmissionTests
             (_, _) => Task.FromResult(true), CancellationToken.None);
     }
 
+    [SupportedPhysicalStoreTheory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task CatalogRecoveryRefusalPreservesPrimaryAndDistinctCleanupFailures(
+        bool pathAdmission, bool failRelease)
+    {
+        using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        using var control = context.Files.OpenDirectoryChildNoFollow(context.Root,
+            RootMembershipRegistry.ControlDirectoryName);
+        var unknownName = $"use-{Guid.NewGuid():N}.unknown";
+        PhysicalFileIdentity unknownIdentity;
+        using (var unknown = context.Files.CreateFileExclusiveAt(control, unknownName))
+        {
+            context.Files.WriteNewControlFile(unknown, "unrecognized"u8.ToArray());
+            unknownIdentity = context.Files.InspectHandle(unknown).Identity;
+        }
+
+        var files = new LockReleaseFaultFileSystem(context.Files, failFirstRelease: failRelease);
+        var registry = new RootMembershipRegistry(files, new StoreStateSerializer());
+        var catalog = new TrustedPackageStoreRootCatalog(new TrustedPackageStoreRootCatalogDefinition([]),
+            Options.Create(new FeedResolutionOptions { PackageInstallRoot = context.Fixture.PackageInstallRoot }));
+        var admission = new PackageStoreAdmission(files, registry, context.Fixture.PackageInstallRoot,
+            trustedCatalog: catalog);
+        var error = await Record.ExceptionAsync(async () =>
+        {
+            if (pathAdmission)
+            {
+                await using var operation = await admission.AcquireForInstallPathsAsync(
+                    [GetInstallPaths(context).First()], PackageStoreAdmissionKind.Loading);
+            }
+            else
+            {
+                await using var operation = await admission.AcquireConfiguredRootOperationAsync(
+                    PackageStoreAdmissionKind.Loading);
+            }
+        });
+
+        if (failRelease)
+        {
+            var failures = Assert.IsType<AggregateException>(error).Flatten().InnerExceptions;
+            var refusal = Assert.IsType<PackageStoreAdmissionException>(
+                Assert.Single(failures, failure => failure is PackageStoreAdmissionException));
+            Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
+            Assert.Contains(failures, failure => failure is IOException &&
+                failure.Message.Contains("Injected native lock release failure", StringComparison.Ordinal));
+        }
+        else
+        {
+            var refusal = Assert.IsType<PackageStoreAdmissionException>(error);
+            Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
+        }
+
+        Assert.Equal(unknownIdentity, context.Files.InspectChildNoFollow(control, unknownName)!.Identity);
+        using var retainedUnknown = context.Files.OpenFileChildNoFollow(control, unknownName, FileAccess.Read);
+        Assert.Equal("unrecognized"u8.ToArray(), context.Files.ReadControlFile(retainedUnknown, 64));
+        await context.Registry.WithCompleteMemberLocationsAsync(context.Root, context.RootIdentity, 1,
+            (_, _) => Task.FromResult(true), CancellationToken.None);
+    }
+
     [SupportedPhysicalStoreFact]
     public async Task UnenrolledConfiguredRootIsOnlyReturnedAfterPositiveNativeAbsenceObservation()
     {
@@ -364,7 +427,7 @@ public sealed class PackageStoreAdmissionTests
 
     private abstract class DelegatingPhysicalStoreFileSystem(IPhysicalStoreFileSystem inner)
         : IPhysicalStoreFileSystem, IPhysicalStoreNameFileSystem, IPhysicalStorePublicationFileSystem,
-            IPhysicalStoreDirectoryEnumerationFileSystem, IPhysicalStoreControlRecoveryFileSystem
+            IPhysicalStoreDirectoryEnumerationFileSystem, IPhysicalStoreControlRecoveryFileSystem, IPhysicalStoreDirectoryPublicationFileSystem
     {
         protected IPhysicalStoreFileSystem Inner { get; } = inner;
 
@@ -403,6 +466,15 @@ public sealed class PackageStoreAdmissionTests
             => ((IPhysicalStoreNameFileSystem)Inner).ObserveCanonicalFileNameNoFollow(parent, singleName, expectedFileIdentity);
         public IReadOnlyList<string> EnumerateChildNamesNoFollow(PhysicalStoreDirectoryHandle parent, int maximumEntries)
             => ((IPhysicalStoreDirectoryEnumerationFileSystem)Inner).EnumerateChildNamesNoFollow(parent, maximumEntries);
+        public PhysicalStoreCanonicalName ObserveCanonicalDirectoryNameNoFollow(
+            PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedDirectoryIdentity)
+            => ((IPhysicalStoreDirectoryPublicationFileSystem)Inner).ObserveCanonicalDirectoryNameNoFollow(
+                parent, singleName, expectedDirectoryIdentity);
+        public PhysicalStoreEntryInfo PublishDirectoryNoReplaceAt(
+            PhysicalStoreDirectoryHandle parent, string stagedName,
+            PhysicalFileIdentity expectedStagedIdentity, string destinationName)
+            => ((IPhysicalStoreDirectoryPublicationFileSystem)Inner).PublishDirectoryNoReplaceAt(
+                parent, stagedName, expectedStagedIdentity, destinationName);
         public ValueTask<PhysicalStoreLockedControlFile?> TryOpenAndLockControlFileForRemovalAt(
             PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedIdentity)
             => ((IPhysicalStoreControlRecoveryFileSystem)Inner)
