@@ -15,8 +15,12 @@ The explicit operation-aware verifier validates the exact current token and regi
 
 Root reviewed the delegated exact-token change and integrated it as `e66d4bd` from worker `733edd1`. Independent source review found no correctness blocker in this bounded internal slice. Private qualification artifacts retain raw TRX, omission/restoration hashes and reviewed source hashes.
 
+## Exact-head hosted qualification
+
+Exact `2410e5186a90a509cdd6afe5cc38bec9306cc1c9` passed [Validate 38168539490](https://github.com/valence-works/nuplane/actions/runs/38168539490). Root and independent audits verified all seven jobs, five native lanes and 137 frozen source pins. Each native lane passed all 71 required group/catalog cases without skips. Actual full build-test totals were 2,468 passed, zero failed, 68 explicit platform skips, 2,536 total. This qualifies the internal planning increment; it does not accept the complete executor or public activation.
+
 ## Remaining integration and acceptance
 
 The generic internal callback and retained root handle are not candidate mutation authority. T107 must bind one exact current Eligible row to held native ancestry/parent/install/marker evidence under this same operation and revalidate immediately before quarantine/removal. Quarantine recovery also needs the verified journal/inventory join in the [recovery contract](../contracts/quarantine-recovery.md); ordinary inventory classification of a quarantine name is insufficient. The protection-change-to-Retained deletion integration test remains required.
 
-No public execution service, DI registration, schema-2 activation, quarantine transition or recursive deletion is added. Public confirmation/routing still depends on the pending owner support-policy decision. T106/T107/T111/T112 remain open until complete integration and exact-head native qualification. Original extraction/releases/Foundation adoption remain shipped separately.
+No public execution service, DI registration, schema-2 activation, quarantine transition or recursive deletion is added. The [answered owner support policy](pruning-support-policy.md) preserves ordinary compatibility and restricts pruning to verified environments and participating clients. Public confirmation/routing still requires implementation and qualification. T106/T107/T111/T112 remain open until complete integration and exact-head native qualification. Original extraction/releases/Foundation adoption remain shipped separately.
