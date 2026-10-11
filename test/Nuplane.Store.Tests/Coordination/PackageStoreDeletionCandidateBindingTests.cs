@@ -244,6 +244,7 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
             return Task.FromResult(Array.Empty<string>());
         }, withCrossRootGraph: false);
         var packagePath = Path.Combine(fixture.Context.RootAPath, "feed", "inactive");
+        var temporaryPath = Path.Combine(fixture.Context.RootAPath, "feed", "inactive.renaming");
         var aliasPath = Path.Combine(fixture.Context.RootAPath, "feed", "INACTIVE");
 
         await fixture.Service.PlanAndRunAsync("root-0", 1, 0, (scope, token) =>
@@ -251,7 +252,22 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
             var row = Assert.Single(scope.Snapshot.RetentionPlan!.Entries,
                 entry => entry.Install.PackageId == "inactive");
             Assert.Equal(PackageStoreRetentionClassification.Eligible, row.Classification);
-            Directory.Move(packagePath, aliasPath);
+            var files = fixture.Context.Files;
+            using var feed = files.OpenDirectoryChildNoFollow(scope.RootHandle, "feed");
+            var original = Assert.IsType<PhysicalStoreEntryInfo>(files.InspectChildNoFollow(feed, "inactive"));
+
+            // A rename directly to an equivalent ext4 name can leave the stored spelling unchanged.
+            Directory.Move(packagePath, temporaryPath);
+            Directory.Move(temporaryPath, aliasPath);
+
+            var requested = Assert.IsType<PhysicalStoreEntryInfo>(files.InspectChildNoFollow(feed, "inactive"));
+            var alias = Assert.IsType<PhysicalStoreEntryInfo>(files.InspectChildNoFollow(feed, "INACTIVE"));
+            var canonical = Assert.IsAssignableFrom<IPhysicalStoreDirectoryNameFileSystem>(files)
+                .ObserveCanonicalDirectoryNameNoFollow(feed, "inactive", original.Identity);
+            Assert.Equal(original.Identity, requested.Identity);
+            Assert.Equal(original.Identity, alias.Identity);
+            Assert.Equal("INACTIVE", canonical.Basename);
+            Assert.Equal("linux-ext4-casefold-v1", canonical.Semantics.ProfileId);
 
             var refusal = Assert.Throws<PackageStoreAdmissionException>(() =>
                 scope.BindEligibleCandidate(row, token));
