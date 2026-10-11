@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Nuplane\Nuplane.csproj" />
+    <ProjectReference Include="..\..\src\Nuplane.Loading\Nuplane.Loading.csproj" />
     <Compile Include="..\Shared\OwnedProcessDirectory.cs" Link="Shared\OwnedProcessDirectory.cs" />
   </ItemGroup>
 

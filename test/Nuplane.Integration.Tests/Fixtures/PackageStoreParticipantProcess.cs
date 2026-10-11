@@ -53,6 +53,10 @@ internal sealed class PackageStoreParticipantProcess : IAsyncDisposable
         string operationId, string requestPath, CancellationToken cancellationToken)
         => StartOperationAsync("--membership-bind", operationId, requestPath, cancellationToken);
 
+    public static Task<PackageStoreParticipantProcess> StartGraphUseIdleAsync(
+        string operationId, string requestPath, CancellationToken cancellationToken)
+        => StartOperationAsync("--graph-use-idle", operationId, requestPath, cancellationToken);
+
     private static Task<PackageStoreParticipantProcess> StartOperationAsync(
         string command, string operationId, string requestPath, CancellationToken cancellationToken)
     {
@@ -108,6 +112,22 @@ internal sealed class PackageStoreParticipantProcess : IAsyncDisposable
         await _process.StandardInput.WriteLineAsync(command.AsMemory(), cancellationToken);
         await _process.StandardInput.FlushAsync(cancellationToken);
         using var response = await ReadResponseAsync("released", cancellationToken).ConfigureAwait(false);
+        return await CaptureExitAsync(cancellationToken);
+    }
+
+    public async Task<PackageStoreParticipantExit> ReleaseOperationAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(_disposeTask is not null, this);
+        if (_correlationProperty != "operationId")
+            throw new InvalidOperationException("Only an operation participant accepts an operation release.");
+        if (_released)
+            throw new InvalidOperationException("The participant gate was already released.");
+        _released = true;
+        var command = JsonSerializer.Serialize(new { command = "release", operationId = OperationId });
+        await _process.StandardInput.WriteLineAsync(command.AsMemory(), cancellationToken);
+        await _process.StandardInput.FlushAsync(cancellationToken);
+        using var response = await ReadResponseAsync("exiting", cancellationToken).ConfigureAwait(false);
         return await CaptureExitAsync(cancellationToken);
     }
 

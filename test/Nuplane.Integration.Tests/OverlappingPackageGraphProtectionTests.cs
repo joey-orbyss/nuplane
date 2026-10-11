@@ -195,10 +195,12 @@ public sealed partial class OverlappingPackageGraphProtectionTests
     {
         private readonly PackageStoreFixture _fixture = new();
         private readonly Dictionary<string, PhysicalStoreDirectoryHandle> _stateParents = new(StringComparer.Ordinal);
+        private readonly PackageLoadMode _packageLoadMode;
         private bool _disposed;
 
-        private GraphUseFixture()
+        private GraphUseFixture(PackageLoadMode packageLoadMode)
         {
+            _packageLoadMode = packageLoadMode;
             IPhysicalStoreFileSystem inner = OperatingSystem.IsWindows()
                 ? new WindowsPhysicalStoreFileSystem()
                 : new UnixPhysicalStoreFileSystem();
@@ -213,9 +215,9 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         internal ResolvedPackage UnrelatedInstall { get; private set; } = null!;
         internal Dictionary<string, ResolvedGraphFixture> Graphs { get; } = new(StringComparer.Ordinal);
 
-        internal static async Task<GraphUseFixture> CreateAsync()
+        internal static async Task<GraphUseFixture> CreateAsync(PackageLoadMode packageLoadMode = PackageLoadMode.Collectible)
         {
-            var fixture = new GraphUseFixture();
+            var fixture = new GraphUseFixture(packageLoadMode);
             try
             {
                 await fixture.InitializeAsync();
@@ -237,7 +239,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             services.AddNuplane(nuplane =>
             {
                 nuplane.WithStateFile(StatePaths[memberId]);
-                nuplane.AutoloadPackages(loading => loading.WithDefaultLoadMode(PackageLoadMode.Collectible));
+                nuplane.AutoloadPackages(loading => loading.WithDefaultLoadMode(_packageLoadMode));
             });
             services.Configure<FeedResolutionOptions>(options => options.PackageInstallRoot = RootPath);
             if (desiredRequests is not null)
@@ -415,7 +417,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 $"<package><metadata><id>{packageId}</id><version>{version}</version>{dependency}</metadata></package>");
             EmitPackageAssembly(packageId, Path.Combine(path, packageId + ".dll"));
             File.WriteAllText(Path.Combine(path, Nuplane.Metadata.NuplanePackageMetadataReader.MetadataFileName),
-                "{\"schemaVersion\":2,\"loading\":{\"loadMode\":\"Collectible\",\"scope\":\"DependencyClosure\"}}");
+                $"{{\"schemaVersion\":2,\"loading\":{{\"loadMode\":\"{_packageLoadMode}\",\"scope\":\"DependencyClosure\"}}}}");
             File.WriteAllBytes(Path.Combine(path, PackageInstallStore.CompletionMarkerFileName), []);
             return new ResolvedPackage(packageId, version, "feed", path, DateTimeOffset.UnixEpoch, sourceName);
         }

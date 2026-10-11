@@ -9,7 +9,7 @@ using Nuplane.Tests.Shared;
 
 namespace Nuplane.PackageStore.TestHost;
 
-internal static class Program
+internal static partial class Program
 {
     private const int InvalidProtocolExitCode = 3;
     private const int PrematureEofExitCode = 2;
@@ -44,7 +44,10 @@ internal static class Program
                 return await RunBindAsync(request).ConfigureAwait(false);
             }
 
-            await WriteDiagnosticAsync("Expected --gate <name>, --membership-publish <request.json>, --membership-recover <request.json>, --membership-initialize <request.json>, or --membership-bind <request.json>.")
+            if (args.Length == 2 && args[0] == "--graph-use-idle")
+                return await RunGraphUseIdleAsync(args[1]).ConfigureAwait(false);
+
+            await WriteDiagnosticAsync("Expected --gate <name>, --membership-publish <request.json>, --membership-recover <request.json>, --membership-initialize <request.json>, --membership-bind <request.json>, or --graph-use-idle <request.json>.")
                 .ConfigureAwait(false);
             return InvalidProtocolExitCode;
         }
