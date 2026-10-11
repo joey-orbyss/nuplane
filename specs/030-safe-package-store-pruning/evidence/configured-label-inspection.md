@@ -1,6 +1,6 @@
 # Internal configured-label inspection
 
-Status: root and independent source/result review and local qualification complete; exact-head native qualification pending. Full T051 and public maintenance operations remain open.
+Status: accepted at exact `ef932de28667036d33a7b2b9ea9242e11bcf98be` after root and independent local/source/native qualification. Full T051 and public maintenance operations remain open.
 
 ## Behavior and ownership
 
@@ -26,4 +26,4 @@ Restored Release/net10 Store passed 920 cases with zero failures and 63 explicit
 
 Native preview manifests preserve their previous 41 Unix and 40 Windows requirements and add six actual service names, requiring 47/46. The native multiroot manifest preserves its 48 requirements and adds four actual v2 rows, requiring 52. Existing CI filters select these cases without a workflow change. Strict verification passes against subsets derived by those filters from the actual restored full Store TRX; these subsets are not separate test runs or Windows-native proof.
 
-Exact-head native acceptance remains pending. Full T051, T052–T059, enrollment/migration, public writer policy, schema-2 activation, T105's complete before-read proof and pruning execution remain open. This increment checks off no complete task; the accepted checklist remains 45/128.
+Exact-head [Validate 38151279564](https://github.com/valence-works/nuplane/actions/runs/38151279564) passed all seven jobs and five native lanes. Root and independent raw-log/source audits reconciled all 87 pins. Each native lane passed preview 47 Unix/46 Windows and multiroot52 without skips, plus runtime57, process36, retained Loading25, recovery26 and same-handle11. Full six-suite CI: 2396 passed, zero failures, 68 explicit platform skips, 2464 total. The retained Loading cases here precede the strengthened T105 sequence; this run does not qualify its later source. Full T051, T052–T059, enrollment/migration, public writer policy, schema-2 activation, T105's complete before-read proof and pruning execution remain open. This increment checks off no complete task; the accepted checklist remains 45/128.

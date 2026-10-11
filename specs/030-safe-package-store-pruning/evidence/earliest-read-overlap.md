@@ -1,0 +1,13 @@
+# Earliest-read and overlapping-generation protection proof
+
+Status: strengthened test integrated locally; focused and compiled negative-control checks pass their required outcomes. Restored full Integration passes all 241 cases without skips; exact-head native qualification remains pending.
+
+`MaintenanceInspection_OverlapsActualLoadingAndRetainsLiveOnlyOldGraph` now arms two existing native barriers in the same actual composition A reconciliation. At the first completion-marker open, it verifies the exact Root.First parent identity and ownership of one root and both member locks. A competing real Maintenance inspection refuses with root.lock busy before inventory. Captured native install identities and payload bytes remain unchanged.
+
+After that barrier releases, A pauses at deferred Loading's first metadata read with both lock counts zero. A freshly verified persisted Active graph is read under root/member ownership; exactly one live use must match its roots, requested-root selections, install identities and dependency edges, and must carry the same actual generation. Node GUIDs are freshly assigned during graph projection, so the assertion compares their exact install/edge meaning rather than GUID equality.
+
+Composition B then commits and loads a newer generation while A remains paused. A fresh catalog inspection still sees A's same live generation. It retains every exact A, old B and new B graph install, including old Root.Second solely through its live collectible context after persistent Active/LKG has advanced. Only the unrelated recognized install is eligible. Before/after native identity and byte comparisons remain equal; actual A and new B assembly loading completes after release. Cleanup releases both barriers, unloads contexts and waits for use release while preserving primary failures.
+
+The two-test focused run passes without skips. Root's compiled negative control omits only the live-use contribution to retention protection: first-open contention still passes, while the strengthened overlap test fails at the old live-only install, Expected Retained / Actual Eligible. Production source is restored byte-for-byte (SHA-256 `0230701ce41dcf84435e50634ff8b52ad261d3f931e14ffc386f3a25cbb2e00d`). Independent source review found no actionable blocker.
+
+No production behavior or native manifest changes are introduced. The existing 25-case retained-Loading manifest already names both tests. This proof does not accept every T100/T101 driver, public maintenance/enrollment, schema-2 runtime activation or physical pruning. Recursive deletion remains unstarted pending accepted native qualification and evidence review of this required two-composition sequence.
