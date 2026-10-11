@@ -61,13 +61,18 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             AssertGraphUseMatchesFixture(live.Record.GraphSnapshot, fixture, inventoryBefore);
 
             var idlePersistence = CapturePersistenceEvidence(fixture);
+            Assert.Equal(RootMembershipStatus.Complete, idlePersistence.LedgerStatus);
+            Assert.Equal(fixture.RootIdentity, idlePersistence.LedgerRootIdentity);
+            Assert.False(string.IsNullOrWhiteSpace(idlePersistence.LedgerDigest));
             await AssertMembersRemainProtectedAsync(fixture, inventoryBefore);
             AssertNativeEvidenceEqual(inventoryBefore, CaptureFixtureNativeEvidence(fixture));
 
             var exit = terminateProcess
                 ? await participant.TerminateAsync(deadline.Token)
                 : await participant.ReleaseOperationAsync(deadline.Token);
-            if (!terminateProcess)
+            if (terminateProcess)
+                Assert.NotEqual(0, exit.ExitCode);
+            else
                 Assert.Equal(0, exit.ExitCode);
 
             var stale = await InspectUseStateAsync(admission, fixture, GraphUseRecordOwnershipState.Stale, deadline.Token);
@@ -168,14 +173,33 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             var protection = Assert.IsType<PackageProtectionRecord>(state.ProtectionRecord);
             Assert.Equal(PackageProtectionClosureKnowledge.Known, protection.ActiveClosure.Knowledge);
             Assert.Equal(PackageProtectionClosureKnowledge.Known, protection.RecoverableClosure.Knowledge);
-            foreach (var graph in protection.ActiveClosure.Graphs!.Concat(protection.RecoverableClosure.Graphs!))
-            {
-                foreach (var node in graph.Nodes)
-                {
-                    var evidence = RequireNativeEvidence(nativeEvidence, node.Install.RootRelativeInstallPath);
-                    Assert.Equal(evidence.Identity, node.Install);
-                }
-            }
+            AssertProtectedGraphsMatchFixture(protection.ActiveClosure.Graphs!, packages, nativeEvidence);
+            AssertProtectedGraphsMatchFixture(protection.RecoverableClosure.Graphs!, packages, nativeEvidence);
+        }
+    }
+
+    private static void AssertProtectedGraphsMatchFixture(
+        IReadOnlyList<ProtectedGraphSnapshot> graphs,
+        IReadOnlyList<ResolvedPackage> expectedPackages,
+        IReadOnlyDictionary<string, NativeInstallEvidence> nativeEvidence)
+    {
+        Assert.NotEmpty(graphs);
+        var expectedIdentities = expectedPackages.Select(package =>
+        {
+            var evidence = nativeEvidence.Values.Single(candidate =>
+                string.Equals(candidate.Identity.PackageId, package.Id, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(candidate.Identity.Version, package.Version, StringComparison.OrdinalIgnoreCase));
+            return evidence.Identity;
+        }).OrderBy(static identity => identity.PackageId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(static identity => identity.Version, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        foreach (var graph in graphs)
+        {
+            Assert.Equal(expectedIdentities,
+                graph.Nodes.Select(static node => node.Install)
+                    .OrderBy(static identity => identity.PackageId, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(static identity => identity.Version, StringComparer.OrdinalIgnoreCase));
         }
     }
 
@@ -204,13 +228,14 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         }
 
         return new PersistenceEvidence(fixture.Files.InspectHandle(fixture.Root).Identity,
-            ledgerEntry.Identity, ledgerBytes, ledger.Status, ledger.LedgerDigest,
+            ledger.RootIdentity, ledgerEntry.Identity, ledgerBytes, ledger.Status, ledger.LedgerDigest,
             ledger.EnrollmentEpoch, states);
     }
 
     private static void AssertPersistenceEvidenceEqual(PersistenceEvidence expected, PersistenceEvidence actual)
     {
         Assert.Equal(expected.RootHandleIdentity, actual.RootHandleIdentity);
+        Assert.Equal(expected.LedgerRootIdentity, actual.LedgerRootIdentity);
         Assert.Equal(expected.LedgerIdentity, actual.LedgerIdentity);
         Assert.Equal(expected.LedgerBytes, actual.LedgerBytes);
         Assert.Equal(expected.LedgerStatus, actual.LedgerStatus);
@@ -245,6 +270,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
 
     private sealed record PersistenceEvidence(
         PhysicalFileIdentity RootHandleIdentity,
+        PhysicalRootIdentity LedgerRootIdentity,
         PhysicalFileIdentity LedgerIdentity,
         byte[] LedgerBytes,
         RootMembershipStatus LedgerStatus,
