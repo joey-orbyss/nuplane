@@ -406,6 +406,8 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         private ResolvedPackage CreateInstall(string packageId, string version, string? dependencyId, string sourceName)
         {
             var path = _fixture.CreateDirectory($"packages/feed/{packageId}/{version}");
+            using (var packageDirectory = OwnedProcessDirectory.Open(Files, path))
+                Files.RegisterPackageDirectory(packageDirectory);
             var dependency = dependencyId is null
                 ? string.Empty
                 : $"<dependencies><dependency id=\"{dependencyId}\" version=\"[2.1.0]\" /></dependencies>";
@@ -478,6 +480,8 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         IPhysicalStorePackageStreamFileSystem
     {
         private MetadataReadBarrier? _barrier;
+        private PackageFileOpenBarrier? _packageFileOpenBarrier;
+        private readonly ConcurrentDictionary<PhysicalFileIdentity, byte> _packageDirectories = new();
         private readonly ConcurrentDictionary<PhysicalFileIdentity, byte> _rootLockFiles = new();
         private readonly ConcurrentDictionary<PhysicalFileIdentity, byte> _memberLockFiles = new();
         private int _activeRootLocks;
@@ -487,6 +491,17 @@ public sealed partial class OverlappingPackageGraphProtectionTests
 
         internal int SuccessfulRootLockAcquisitions => Volatile.Read(ref _successfulRootLockAcquisitions);
         internal int SuccessfulMemberLockAcquisitions => Volatile.Read(ref _successfulMemberLockAcquisitions);
+
+        internal void RegisterPackageDirectory(PhysicalStoreDirectoryHandle directory)
+            => _packageDirectories.TryAdd(inner.InspectHandle(directory).Identity, 0);
+
+        internal PackageFileOpenBarrier BlockNextPackageFileOpen()
+        {
+            var barrier = new PackageFileOpenBarrier();
+            if (Interlocked.CompareExchange(ref _packageFileOpenBarrier, barrier, null) is not null)
+                throw new InvalidOperationException("A package-file open barrier is already armed.");
+            return barrier;
+        }
 
         internal MetadataReadBarrier BlockNextMetadataRead()
         {
@@ -517,6 +532,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             string singleName,
             FileAccess access)
         {
+            PauseBeforePackageFileAccess(parent, singleName);
             var file = inner.OpenFileChildNoFollow(parent, singleName, access);
             RememberOperationLockFile(singleName, file);
             if (string.Equals(singleName, Nuplane.Metadata.NuplanePackageMetadataReader.MetadataFileName,
@@ -613,16 +629,30 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             PhysicalStoreEntryInfo expectedParent,
             PhysicalStoreEntryInfo expectedFile,
             long maximumBytes)
-            => ((IPhysicalStorePackageStreamFileSystem)inner).OpenPackageArchiveReadStream(
+        {
+            PauseBeforePackageFileAccess(parent, singleName);
+            return ((IPhysicalStorePackageStreamFileSystem)inner).OpenPackageArchiveReadStream(
                 parent, singleName, file, expectedParent, expectedFile, maximumBytes);
+        }
         public Stream CreatePackageFileWriteStream(
             PhysicalStoreDirectoryHandle parent,
             string singleName,
             PhysicalStoreFileHandle file,
             PhysicalStoreEntryInfo expectedParent,
             long maximumBytes)
-            => ((IPhysicalStorePackageStreamFileSystem)inner).CreatePackageFileWriteStream(
+        {
+            PauseBeforePackageFileAccess(parent, singleName);
+            return ((IPhysicalStorePackageStreamFileSystem)inner).CreatePackageFileWriteStream(
                 parent, singleName, file, expectedParent, maximumBytes);
+        }
+
+        private void PauseBeforePackageFileAccess(PhysicalStoreDirectoryHandle parent, string singleName)
+        {
+            var parentIdentity = inner.InspectHandle(parent).Identity;
+            if (_packageDirectories.ContainsKey(parentIdentity))
+                Volatile.Read(ref _packageFileOpenBarrier)?.PauseBeforeOpen(
+                    parentIdentity, singleName, Volatile.Read(ref _activeRootLocks), Volatile.Read(ref _activeMemberLocks));
+        }
 
         private void RememberOperationLockFile(string singleName, PhysicalStoreFileHandle file)
         {
@@ -693,6 +723,43 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 !ReferenceEquals(Volatile.Read(ref _file), file) || Interlocked.Exchange(ref _blocked, 1) != 0)
                 return;
 
+            Volatile.Write(ref _rootLockCountAtPause, activeRootLocks);
+            Volatile.Write(ref _memberLockCountAtPause, activeMemberLocks);
+            _started.TrySetResult(true);
+            _release.Task.GetAwaiter().GetResult();
+        }
+    }
+
+    internal sealed class PackageFileOpenBarrier
+    {
+        private readonly TaskCompletionSource<bool> _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _claimed;
+        private int _rootLockCountAtPause = -1;
+        private int _memberLockCountAtPause = -1;
+        private PhysicalFileIdentity? _parentIdentity;
+        private string? _basename;
+
+        internal int RootLockCountAtPause => Volatile.Read(ref _rootLockCountAtPause);
+        internal int MemberLockCountAtPause => Volatile.Read(ref _memberLockCountAtPause);
+        internal PhysicalFileIdentity ParentIdentity => Volatile.Read(ref _parentIdentity)
+            ?? throw new InvalidOperationException("The package-file barrier has not observed an open.");
+        internal string Basename => Volatile.Read(ref _basename)
+            ?? throw new InvalidOperationException("The package-file barrier has not observed an open.");
+
+        internal async Task WaitUntilBlockedAsync()
+            => await _started.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        internal void Release() => _release.TrySetResult(true);
+
+        internal void PauseBeforeOpen(PhysicalFileIdentity parentIdentity, string basename,
+            int activeRootLocks, int activeMemberLocks)
+        {
+            if (Interlocked.Exchange(ref _claimed, 1) != 0)
+                return;
+
+            Volatile.Write(ref _parentIdentity, parentIdentity);
+            Volatile.Write(ref _basename, basename);
             Volatile.Write(ref _rootLockCountAtPause, activeRootLocks);
             Volatile.Write(ref _memberLockCountAtPause, activeMemberLocks);
             _started.TrySetResult(true);

@@ -13,11 +13,119 @@ using Nuplane.Store.Coordination.GraphUseRecords;
 using Nuplane.Store.Coordination.ProtectionRecords;
 using Nuplane.Store.Maintenance;
 using Nuplane.Store.State;
+using Nuplane.Tests.Shared;
 
 namespace Nuplane.Integration.Tests;
 
 public sealed partial class OverlappingPackageGraphProtectionTests
 {
+    [Fact]
+    public async Task MaintenanceInspection_RefusesBeforeFirstNativePackageOpenUnderReconciliationAdmission()
+    {
+        using var fixture = await GraphUseFixture.CreateAsync();
+        await using var providerA = fixture.CreateProvider("member-a",
+            desiredRequests: fixture.Graphs["member-a"].Requests);
+        await using var providerB = fixture.CreateProvider("member-b");
+
+        var inventory = new CountingPackageStoreInventory(new PackageStoreInventory(fixture.Files));
+        var inspection = new PackageStoreInspectionService(
+            fixture.Files,
+            providerB.GetRequiredService<IPackageStoreAdmission>(),
+            inventory,
+            new PackageStoreRetentionPlanner());
+        var nativeBefore = CaptureFixtureNativeEvidence(fixture);
+        PackageFileOpenBarrier? packageOpenBarrier = null;
+        Task<ReconciliationRunResult>? cycleA = null;
+        Exception? primaryFailure = null;
+        try
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            packageOpenBarrier = fixture.Files.BlockNextPackageFileOpen();
+            cycleA = Task.Run(() => providerA.GetRequiredService<IReconciliationService>()
+                .TriggerAsync(ReconciliationTrigger.Manual("maintenance-before-package-open-a"), deadline.Token));
+
+            var barrierWait = packageOpenBarrier.WaitUntilBlockedAsync();
+            var first = await Task.WhenAny(barrierWait, cycleA);
+            Assert.Same(barrierWait, first);
+            await barrierWait;
+            Assert.Equal(PackageInstallStore.CompletionMarkerFileName, packageOpenBarrier.Basename);
+            Assert.Equal(1, packageOpenBarrier.RootLockCountAtPause);
+            Assert.Equal(2, packageOpenBarrier.MemberLockCountAtPause);
+            var rootPackage = Assert.Single(fixture.Graphs["member-a"].Packages,
+                static package => package.Id == "Root.First");
+            using (var rootPackageDirectory = OwnedProcessDirectory.Open(fixture.Files, rootPackage.InstallPath!))
+                Assert.Equal(fixture.Files.InspectHandle(rootPackageDirectory).Identity,
+                    packageOpenBarrier.ParentIdentity);
+            Assert.False(cycleA.IsCompleted);
+
+            var busy = await Assert.ThrowsAsync<PackageStoreAdmissionException>(async () =>
+                await inspection.InspectAsync(0, deadline.Token).WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, busy.Reason);
+            Assert.Contains("root.lock", busy.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("busy", busy.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(0, inventory.ReadCount);
+
+            var nativeAfterRefusal = CaptureFixtureNativeEvidence(fixture);
+            Assert.Equal(nativeBefore.OrderBy(static pair => pair.Key, StringComparer.Ordinal),
+                nativeAfterRefusal.OrderBy(static pair => pair.Key, StringComparer.Ordinal));
+
+            packageOpenBarrier.Release();
+            var resultA = await cycleA.WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.False(resultA.Skipped);
+            Assert.Equal(0, inventory.ReadCount);
+
+            var completedInspection = await inspection.InspectAsync(0, deadline.Token)
+                .WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(PackageStoreAdmissionStatus.Enrolled, completedInspection.AdmissionStatus);
+            Assert.True(Assert.IsType<PackageStoreInventorySnapshot>(completedInspection.Inventory).IsComplete);
+            Assert.Equal(1, inventory.ReadCount);
+            var nativeAfterRelease = CaptureFixtureNativeEvidence(fixture);
+            Assert.Equal(nativeBefore.OrderBy(static pair => pair.Key, StringComparer.Ordinal),
+                nativeAfterRelease.OrderBy(static pair => pair.Key, StringComparer.Ordinal));
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+        }
+
+        var cleanupFailures = new List<Exception>();
+        packageOpenBarrier?.Release();
+        if (cycleA is not null)
+        {
+            try { await cycleA.WaitAsync(TimeSpan.FromSeconds(30)); }
+            catch (Exception exception) { cleanupFailures.Add(exception); }
+        }
+
+        try
+        {
+            providerA.GetRequiredService<PackageLoader>().UnloadContextsNotActive(
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+            providerB.GetRequiredService<PackageLoader>().UnloadContextsNotActive(
+                new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+        }
+        catch (Exception exception)
+        {
+            cleanupFailures.Add(exception);
+        }
+
+        try
+        {
+            await fixture.WaitForGraphUseReleaseAsync(providerA.GetRequiredService<IPackageStoreAdmission>());
+        }
+        catch (Exception exception)
+        {
+            cleanupFailures.Add(exception);
+        }
+
+        if (primaryFailure is not null && cleanupFailures.Count > 0)
+            throw new AggregateException("The package-open overlap assertion and graph-use cleanup both failed.",
+                [primaryFailure, .. cleanupFailures]);
+        if (primaryFailure is not null)
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+        if (cleanupFailures.Count > 0)
+            throw new AggregateException("Graph-use cleanup failed after the package-open overlap test.", cleanupFailures);
+    }
+
     [Fact]
     public async Task MaintenanceInspection_OverlapsActualLoadingAndRetainsLiveOnlyOldGraph()
     {
@@ -316,4 +424,19 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         => Path.GetRelativePath(fixture.RootPath, installPath).Replace(Path.DirectorySeparatorChar, '/');
 
     private sealed record NativeInstallEvidence(PackageInstallIdentity Identity, string PayloadDigest);
+
+    private sealed class CountingPackageStoreInventory(IPackageStoreInventory inner) : IPackageStoreInventory
+    {
+        private int _readCount;
+
+        internal int ReadCount => Volatile.Read(ref _readCount);
+
+        public Task<PackageStoreInventorySnapshot> ReadAsync(
+            PackageStoreOperationBorrow borrow,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _readCount);
+            return inner.ReadAsync(borrow, cancellationToken);
+        }
+    }
 }
