@@ -231,7 +231,7 @@ public sealed class NativePackageGraphFileReaderTests
 
     private sealed class TrackingFileSystem(IPhysicalStoreFileSystem inner, PhysicalFileIdentity nuspecIdentity)
         : IPhysicalStoreFileSystem, IPhysicalStoreNameFileSystem, IPhysicalStoreDirectoryEnumerationFileSystem,
-            IPhysicalStorePublicationFileSystem
+            IPhysicalStorePublicationFileSystem, IPhysicalStoreControlRecoveryFileSystem
     {
         internal Action? OnNuspecRead { get; set; }
         internal int NuspecReadCount { get; private set; }
@@ -267,5 +267,19 @@ public sealed class NativePackageGraphFileReaderTests
                 stagedIdentity, destinationName, destinationIdentity);
         public void RemoveControlFileAt(PhysicalStoreDirectoryHandle parent, string name, PhysicalFileIdentity identity)
             => ((IPhysicalStorePublicationFileSystem)inner).RemoveControlFileAt(parent, name, identity);
+        public ValueTask<PhysicalStoreLockedControlFile?> TryOpenAndLockControlFileForRemovalAt(
+            PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedIdentity)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner)
+                .TryOpenAndLockControlFileForRemovalAt(parent, singleName, expectedIdentity);
+        public ValueTask RemoveLockedControlFileAsync(PhysicalStoreLockedControlFile file)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).RemoveLockedControlFileAsync(file);
+        public PhysicalStoreEntryInfo InspectLockedControlFile(PhysicalStoreLockedControlFile file)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).InspectLockedControlFile(file);
+        public byte[] ReadLockedControlFile(PhysicalStoreLockedControlFile file, int maximumBytes)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).ReadLockedControlFile(file, maximumBytes);
+        public PhysicalStoreEntryInfo MoveControlFileNoReplaceAt(PhysicalStoreDirectoryHandle parent,
+            string sourceName, PhysicalFileIdentity expectedSourceIdentity, string destinationName)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).MoveControlFileNoReplaceAt(
+                parent, sourceName, expectedSourceIdentity, destinationName);
     }
 }

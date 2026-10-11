@@ -326,7 +326,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
     private static async Task RemoveStaleFixtureUseArtifactsAsync(IServiceProvider provider)
     {
         await using var operation = await provider.GetRequiredService<IPackageStoreAdmission>()
-            .AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Reconciliation);
+            .AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Maintenance);
         using var borrow = operation.Owner!.Borrow();
         await PackageStoreOperationAccess.WithValidatedRootAsync(borrow, async (files, root, token) =>
         {

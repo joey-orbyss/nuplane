@@ -145,7 +145,8 @@ public sealed class PackageStoreAdmissionRefusalTests
     }
 
     private sealed class TrackingFileSystem : IPhysicalStoreFileSystem,
-        IPhysicalStoreNameFileSystem, IPhysicalStorePublicationFileSystem
+        IPhysicalStoreNameFileSystem, IPhysicalStorePublicationFileSystem,
+        IPhysicalStoreDirectoryEnumerationFileSystem, IPhysicalStoreControlRecoveryFileSystem
     {
         private readonly IPhysicalStoreFileSystem _inner;
         private readonly IPhysicalStoreNameFileSystem _names;
@@ -219,5 +220,21 @@ public sealed class PackageStoreAdmissionRefusalTests
                 destinationName, expectedDestinationIdentity);
         public void RemoveControlFileAt(PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedIdentity)
             => _publication.RemoveControlFileAt(parent, singleName, expectedIdentity);
+        public IReadOnlyList<string> EnumerateChildNamesNoFollow(PhysicalStoreDirectoryHandle parent, int maximumEntries)
+            => ((IPhysicalStoreDirectoryEnumerationFileSystem)_inner).EnumerateChildNamesNoFollow(parent, maximumEntries);
+        public ValueTask<PhysicalStoreLockedControlFile?> TryOpenAndLockControlFileForRemovalAt(
+            PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedIdentity)
+            => ((IPhysicalStoreControlRecoveryFileSystem)_inner)
+                .TryOpenAndLockControlFileForRemovalAt(parent, singleName, expectedIdentity);
+        public ValueTask RemoveLockedControlFileAsync(PhysicalStoreLockedControlFile file)
+            => ((IPhysicalStoreControlRecoveryFileSystem)_inner).RemoveLockedControlFileAsync(file);
+        public PhysicalStoreEntryInfo InspectLockedControlFile(PhysicalStoreLockedControlFile file)
+            => ((IPhysicalStoreControlRecoveryFileSystem)_inner).InspectLockedControlFile(file);
+        public byte[] ReadLockedControlFile(PhysicalStoreLockedControlFile file, int maximumBytes)
+            => ((IPhysicalStoreControlRecoveryFileSystem)_inner).ReadLockedControlFile(file, maximumBytes);
+        public PhysicalStoreEntryInfo MoveControlFileNoReplaceAt(PhysicalStoreDirectoryHandle parent,
+            string sourceName, PhysicalFileIdentity expectedSourceIdentity, string destinationName)
+            => ((IPhysicalStoreControlRecoveryFileSystem)_inner).MoveControlFileNoReplaceAt(
+                parent, sourceName, expectedSourceIdentity, destinationName);
     }
 }

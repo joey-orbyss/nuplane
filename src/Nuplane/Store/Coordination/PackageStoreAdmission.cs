@@ -89,6 +89,12 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                         resolved.RootIdentity!, cancellationToken).ConfigureAwait(false);
                     var retainedProjection = projection
                         ?? throw new InvalidOperationException("Catalog projection creation returned no operation owner.");
+                    var verifiedLedger = retainedProjection.Ledger;
+                    if (kind != PackageStoreAdmissionKind.Maintenance)
+                        await StalePackageGraphUseRecovery.RecoverAsync(_files,
+                            retainedProjection.LockedMemberLocations, resolved.RootIdentity!, verifiedLedger,
+                            cancellationToken).ConfigureAwait(false);
+                    session.RevalidateRequestObservations([resolved]);
                     var validator = new AdmittedPathValidator(_files, _resolver, resolved.RootIdentity!,
                         candidate.EnrollmentEpoch, () => (retainedProjection.Ledger.LedgerDigest, retainedProjection.LedgerIdentity),
                         pathIdentities: null);
@@ -122,6 +128,11 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                 candidate.EnrollmentEpoch, candidate.LedgerDigest, ledgerIdentity, cancellationToken).ConfigureAwait(false);
             try
             {
+                resolved.Revalidate();
+                var verifiedLedger = owner.Ledger;
+                if (kind != PackageStoreAdmissionKind.Maintenance)
+                    await StalePackageGraphUseRecovery.RecoverAsync(_files, owner.Context,
+                        resolved.RootIdentity, verifiedLedger, cancellationToken).ConfigureAwait(false);
                 resolved.Revalidate();
                 var validator = new AdmittedPathValidator(_files, _resolver, resolved.RootIdentity,
                     candidate.EnrollmentEpoch, () => (owner.Ledger.LedgerDigest, owner.LedgerIdentity),
@@ -257,6 +268,12 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                             ?? throw new InvalidOperationException("Catalog projection creation returned no operation owner.");
                         if (retainedProjection.Ledger.EnrollmentEpoch != group.Epoch)
                             throw Refusal("The selected catalog root changed enrollment epoch during request-path recovery.", group.Root);
+                        var verifiedLedger = retainedProjection.Ledger;
+                        if (kind != PackageStoreAdmissionKind.Maintenance)
+                            await StalePackageGraphUseRecovery.RecoverAsync(_files,
+                                retainedProjection.LockedMemberLocations, group.Root, verifiedLedger,
+                                cancellationToken).ConfigureAwait(false);
+                        catalogSession.RevalidateRequestObservations(observations.Select(static observation => observation.Resolved));
                         var expectedIdentities = group.Paths
                             .GroupBy(static observation => observation.Path, StringComparer.Ordinal)
                             .ToDictionary(static paths => paths.Key,
@@ -346,6 +363,23 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     observation.Resolved.Revalidate();
+                }
+
+                if (kind != PackageStoreAdmissionKind.Maintenance)
+                {
+                    foreach (var owner in owners)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var verifiedLedger = owner.Ledger;
+                        await StalePackageGraphUseRecovery.RecoverAsync(_files, owner.Context,
+                            owner.Group.Root, verifiedLedger, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    foreach (var observation in observations)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        observation.Resolved.Revalidate();
+                    }
                 }
             }
 

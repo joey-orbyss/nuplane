@@ -158,7 +158,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         IPackageStoreAdmission admission,
         GraphUseFixture fixture)
     {
-        var operation = await admission.AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Loading);
+        var operation = await admission.AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Maintenance);
         await using (operation)
         {
             var borrow = operation.Owner!.Borrow();
@@ -479,7 +479,8 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         IPhysicalStorePublicationFileSystem,
         IPhysicalStoreDirectoryPublicationFileSystem,
         IPhysicalStoreDirectoryEnumerationFileSystem,
-        IPhysicalStorePackageStreamFileSystem
+        IPhysicalStorePackageStreamFileSystem,
+        IPhysicalStoreControlRecoveryFileSystem
     {
         private MetadataReadBarrier? _barrier;
         private PackageFileOpenBarrier? _packageFileOpenBarrier;
@@ -624,6 +625,21 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 parent, stagedName, expectedStagedIdentity, destinationName);
         public IReadOnlyList<string> EnumerateChildNamesNoFollow(PhysicalStoreDirectoryHandle parent, int maximumEntries)
             => ((IPhysicalStoreDirectoryEnumerationFileSystem)inner).EnumerateChildNamesNoFollow(parent, maximumEntries);
+        public ValueTask<PhysicalStoreLockedControlFile?> TryOpenAndLockControlFileForRemovalAt(
+            PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedIdentity)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner)
+                .TryOpenAndLockControlFileForRemovalAt(parent, singleName, expectedIdentity);
+        public ValueTask RemoveLockedControlFileAsync(PhysicalStoreLockedControlFile file)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).RemoveLockedControlFileAsync(file);
+        public PhysicalStoreEntryInfo InspectLockedControlFile(PhysicalStoreLockedControlFile file)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).InspectLockedControlFile(file);
+        public byte[] ReadLockedControlFile(PhysicalStoreLockedControlFile file, int maximumBytes)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).ReadLockedControlFile(file, maximumBytes);
+        public PhysicalStoreEntryInfo MoveControlFileNoReplaceAt(
+            PhysicalStoreDirectoryHandle parent, string sourceName,
+            PhysicalFileIdentity expectedSourceIdentity, string destinationName)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).MoveControlFileNoReplaceAt(
+                parent, sourceName, expectedSourceIdentity, destinationName);
         public Stream OpenPackageArchiveReadStream(
             PhysicalStoreDirectoryHandle parent,
             string singleName,

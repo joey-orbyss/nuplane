@@ -93,6 +93,7 @@ public sealed class PackageContentAdmissionTests
         var payloadIdentity = GetFileIdentity(context.Files, context.SharedInstallPath, Path.GetFileName(matchingFile));
         var files = new TrackingFileSystem(context.Files, payloadIdentity)
         {
+            EnumeratedDirectoryIdentity = GetDirectoryIdentity(context.Files, context.SharedInstallPath),
             EnumeratedNames = names =>
             [
                 "00.nuspec",
@@ -528,6 +529,12 @@ public sealed class PackageContentAdmissionTests
         return files.InspectHandle(file).Identity;
     }
 
+    private static PhysicalFileIdentity GetDirectoryIdentity(IPhysicalStoreFileSystem files, string path)
+    {
+        using var directory = PhysicalStoreTestDirectory.Open(files, path);
+        return files.InspectHandle(directory).Identity;
+    }
+
     private static IPhysicalStoreFileSystem CreateNativeFileSystem()
         => OperatingSystem.IsWindows() ? new WindowsPhysicalStoreFileSystem() : new UnixPhysicalStoreFileSystem();
 
@@ -579,7 +586,7 @@ public sealed class PackageContentAdmissionTests
     private sealed class TrackingFileSystem(IPhysicalStoreFileSystem inner, PhysicalFileIdentity payloadIdentity)
         : IPhysicalStoreFileSystem, IPhysicalStoreNameFileSystem, IPhysicalStoreDirectoryEnumerationFileSystem,
             IPhysicalStorePackageStreamFileSystem, IPhysicalStorePublicationFileSystem,
-            IPhysicalStoreDirectoryPublicationFileSystem
+            IPhysicalStoreDirectoryPublicationFileSystem, IPhysicalStoreControlRecoveryFileSystem
     {
         private readonly HashSet<PhysicalFileIdentity> _payloadIdentities = [payloadIdentity];
         private int _matchingMissingObservations;
@@ -593,6 +600,7 @@ public sealed class PackageContentAdmissionTests
         internal string? MissingContentNameToObserve { get; set; }
         internal Action? OnSecondMissingContentProbe { get; set; }
         internal Func<IReadOnlyList<string>, IReadOnlyList<string>>? EnumeratedNames { get; set; }
+        internal PhysicalFileIdentity? EnumeratedDirectoryIdentity { get; set; }
         internal PhysicalFileIdentity? ReplacementParentIdentity { get; set; }
         internal string? ReplacementChildName { get; set; }
         internal PhysicalStoreEntryInfo? ReplacementChildObservation { get; set; }
@@ -645,7 +653,9 @@ public sealed class PackageContentAdmissionTests
         public IReadOnlyList<string> EnumerateChildNamesNoFollow(PhysicalStoreDirectoryHandle parent, int maximumEntries)
         {
             var names = ((IPhysicalStoreDirectoryEnumerationFileSystem)inner).EnumerateChildNamesNoFollow(parent, maximumEntries);
-            return EnumeratedNames?.Invoke(names) ?? names;
+            return EnumeratedNames is not null && EnumeratedDirectoryIdentity == inner.InspectHandle(parent).Identity
+                ? EnumeratedNames(names)
+                : names;
         }
         public Stream OpenPackageArchiveReadStream(PhysicalStoreDirectoryHandle parent, string singleName, PhysicalStoreFileHandle file,
             PhysicalStoreEntryInfo expectedParent, PhysicalStoreEntryInfo expectedFile, long maximumBytes)
@@ -674,5 +684,19 @@ public sealed class PackageContentAdmissionTests
             PhysicalFileIdentity expectedStagedIdentity, string destinationName)
             => ((IPhysicalStoreDirectoryPublicationFileSystem)inner).PublishDirectoryNoReplaceAt(
                 parent, stagedName, expectedStagedIdentity, destinationName);
+        public ValueTask<PhysicalStoreLockedControlFile?> TryOpenAndLockControlFileForRemovalAt(
+            PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedIdentity)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner)
+                .TryOpenAndLockControlFileForRemovalAt(parent, singleName, expectedIdentity);
+        public ValueTask RemoveLockedControlFileAsync(PhysicalStoreLockedControlFile file)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).RemoveLockedControlFileAsync(file);
+        public PhysicalStoreEntryInfo InspectLockedControlFile(PhysicalStoreLockedControlFile file)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).InspectLockedControlFile(file);
+        public byte[] ReadLockedControlFile(PhysicalStoreLockedControlFile file, int maximumBytes)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).ReadLockedControlFile(file, maximumBytes);
+        public PhysicalStoreEntryInfo MoveControlFileNoReplaceAt(PhysicalStoreDirectoryHandle parent,
+            string sourceName, PhysicalFileIdentity expectedSourceIdentity, string destinationName)
+            => ((IPhysicalStoreControlRecoveryFileSystem)inner).MoveControlFileNoReplaceAt(
+                parent, sourceName, expectedSourceIdentity, destinationName);
     }
 }
