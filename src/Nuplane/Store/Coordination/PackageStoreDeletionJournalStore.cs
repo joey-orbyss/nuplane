@@ -6,7 +6,7 @@ using Nuplane.Store.Coordination.PhysicalFiles;
 
 namespace Nuplane.Store.Coordination;
 
-/// <summary>Publishes one first-phase Prepared journal through the existing native control-file publisher.</summary>
+/// <summary>Discovers bounded Prepared/Quarantined journals and publishes their exact native control-file transitions.</summary>
 /// <remarks>
 /// The journal is descriptive data. This store accepts only a live execution caller's callbacks for fresh
 /// candidate validation and returns readback evidence only after reopening the exact canonical bytes.

@@ -9,7 +9,8 @@ namespace Nuplane.Store.Maintenance;
 /// <remarks>
 /// This internal boundary accepts explicit epoch and retention inputs, never a preview as authority.
 /// Candidate work must independently bind and revalidate native install evidence before any mutation.
-/// Quarantine recovery and public execution are not implemented by this boundary.
+/// Verified Prepared and Quarantined records participate in fresh planning and bounded quarantine recovery.
+/// Recursive deletion, finalization, and public execution are not implemented by this boundary.
 /// </remarks>
 internal sealed class PackageStoreExecutionService(
     RootMembershipRegistry registry,
