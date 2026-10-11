@@ -254,7 +254,7 @@ internal sealed class PackageInstallIdentityReader
             throw Unknown("A package install path directory's native name profile changed.", root);
     }
 
-    private static string[] ValidateRelativeInstallPath(string path, string packageId, string version)
+    internal static string[] ValidateRelativeInstallPath(string path, string packageId, string version)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         if (path.StartsWith("/", StringComparison.Ordinal) || path.Contains(':') || path.Contains('\\') || path.Contains('\0'))

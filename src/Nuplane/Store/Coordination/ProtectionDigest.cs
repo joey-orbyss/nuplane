@@ -18,7 +18,7 @@ namespace Nuplane.Store.Coordination;
 /// completeness, filesystem identity, admission, or deletion authority. Revision 1 uses the fixed
 /// tag tables below and invariant uppercase for case-insensitive identifiers and map keys.
 /// </remarks>
-internal static class ProtectionDigest
+internal static partial class ProtectionDigest
 {
     private const uint EncodingRevision = 1;
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
