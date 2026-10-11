@@ -592,6 +592,6 @@ public sealed class SupportedPhysicalStoreTheoryAttribute : TheoryAttribute
     public SupportedPhysicalStoreTheoryAttribute()
     {
         if (!UnixPhysicalStoreFileSystem.IsSupportedPlatform && !WindowsPhysicalStoreFileSystem.IsSupportedPlatform)
-            Skip = "Physical store locking is qualified only on Darwin arm64, Linux x64/arm64, and Windows x64; this skip is not runtime acceptance.";
+            Skip = "Physical store locking is qualified only on Darwin x64/arm64, Linux x64/arm64, and Windows x64; this skip is not runtime acceptance.";
     }
 }

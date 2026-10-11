@@ -885,7 +885,7 @@ public sealed class SupportedCaseInsensitivePhysicalStoreFactAttribute : FactAtt
     public SupportedCaseInsensitivePhysicalStoreFactAttribute()
     {
         if (!UnixPhysicalStoreFileSystem.IsSupportedPlatform && !WindowsPhysicalStoreFileSystem.IsSupportedPlatform)
-            Skip = "Physical store operations are qualified only on Darwin arm64, Linux x64/arm64, and Windows x64.";
+            Skip = "Physical store operations are qualified only on Darwin x64/arm64, Linux x64/arm64, and Windows x64.";
         else if (OperatingSystem.IsLinux() &&
                  !string.Equals(Environment.GetEnvironmentVariable("NUPLANE_REQUIRE_EXT4_CASEFOLD"), "1", StringComparison.Ordinal))
             Skip = "Native case-alias proof requires a case-insensitive volume or the dedicated ext4 casefold lane.";

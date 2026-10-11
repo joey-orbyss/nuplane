@@ -80,7 +80,7 @@ internal static partial class UnixNative
 
     internal static UnixPlatform? GetPlatform()
     {
-        if (OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture == Architecture.Arm64)
+        if (OperatingSystem.IsMacOS() && RuntimeInformation.ProcessArchitecture is Architecture.Arm64 or Architecture.X64)
             return UnixPlatform.Darwin;
 
         if (OperatingSystem.IsLinux() && RuntimeInformation.ProcessArchitecture is Architecture.X64 or Architecture.Arm64)

@@ -308,6 +308,6 @@ public sealed class SupportedUnixFactAttribute : FactAttribute
     public SupportedUnixFactAttribute()
     {
         if (!UnixPhysicalStoreFileSystem.IsSupportedPlatform)
-            Skip = "Native Unix operations are qualified only on Darwin arm64 and Linux x64/arm64; this skip is not runtime acceptance.";
+            Skip = "Native Unix operations are qualified only on Darwin x64/arm64 and Linux x64/arm64; this skip is not runtime acceptance.";
     }
 }

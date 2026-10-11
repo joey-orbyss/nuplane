@@ -9,4 +9,7 @@
   <ItemGroup>
     <Compile Include="..\Shared\PackageStoreFixture.cs" Link="Shared\PackageStoreFixture.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <None Update="Native\darwin-stat-layout.c" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
