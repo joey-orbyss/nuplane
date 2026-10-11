@@ -173,6 +173,49 @@ public sealed partial class PackageStoreAuthorityResolverTests
     }
 
     [SupportedPhysicalStoreFact]
+    public void ResolveStatePayloadReferentMetadata_TerminalDotsAndSeparatorsRequireDirectories()
+    {
+        using var context = new Context();
+        var packageRoot = context.Fixture.PackageInstallRoot;
+        var separator = Path.DirectorySeparatorChar;
+        var existing = Path.Combine(packageRoot, "terminal-dot-state.json");
+        var absent = Path.Combine(packageRoot, "terminal-dot-absent-state.json");
+        File.WriteAllBytes(existing, "state"u8.ToArray());
+
+        var existingAlias = Path.Combine(packageRoot, "terminal-dot-existing-alias");
+        var absentAlias = Path.Combine(packageRoot, "terminal-dot-absent-alias");
+        File.CreateSymbolicLink(existingAlias, Path.GetFileName(existing) + separator + ".");
+        File.CreateSymbolicLink(absentAlias, Path.GetFileName(absent) + separator + ".");
+
+        var refusedPaths = new[]
+        {
+            existing + separator + ".",
+            existing + separator,
+            absent + separator + ".",
+            absent + separator,
+            existingAlias,
+            absentAlias
+        };
+
+        context.Observed.ResetForCall();
+        foreach (var path in refusedPaths)
+        {
+            Assert.Throws<PackageStoreAdmissionException>(() =>
+            {
+                using var unexpected = context.Resolver.ResolveStatePayloadReferentMetadata(path);
+            });
+            context.AssertTrackedHandlesClosed();
+        }
+
+        Assert.True(File.Exists(existing));
+        Assert.False(File.Exists(absent));
+        Assert.Equal(0, context.Observed.FileOpenCount);
+        Assert.Equal(0, context.Observed.PackagePayloadReadCount);
+        Assert.Equal(0, context.Observed.CreateCount);
+        context.AssertTrackedHandlesClosed();
+    }
+
+    [SupportedPhysicalStoreFact]
     public void ResolveStatePayloadReferentMetadata_CycleAliasRetargetProfileAndAuthorityChangesRefuseAndRelease()
     {
         using (var context = new Context())

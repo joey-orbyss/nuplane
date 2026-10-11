@@ -588,7 +588,7 @@ internal sealed class PackageStoreAuthorityResolver
                 var entry = _files.InspectChildNoFollow(current, component);
                 if (entry is null)
                 {
-                    if (statePayloadCapture is not null && !HasMeaningfulRemainingComponents(frames))
+                    if (statePayloadCapture is not null && !HasAnyRemainingComponents(frames))
                     {
                         statePayloadCapture.RecordPayloadSlot(CaptureStatePayloadSlot(
                             current, component, expectedEntry: null, linkTargetText: null));
@@ -669,7 +669,7 @@ internal sealed class PackageStoreAuthorityResolver
 
                 var hasAnyRemaining = HasAnyRemainingComponents(frames);
                 if (statePayloadCapture is not null && entry.Kind == PhysicalStoreEntryKind.RegularFile &&
-                    !HasMeaningfulRemainingComponents(frames))
+                    !hasAnyRemaining)
                 {
                     statePayloadCapture.RecordPayloadSlot(CaptureStatePayloadSlot(
                         current, component, entry, linkTargetText: null));
