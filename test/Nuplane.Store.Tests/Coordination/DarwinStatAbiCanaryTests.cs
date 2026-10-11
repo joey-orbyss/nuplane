@@ -1,7 +1,10 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
 using Nuplane.Store.Coordination;
+using Nuplane.Store.Coordination.PhysicalFiles.Unix;
 using Nuplane.Tests.Shared;
 
 namespace Nuplane.Store.Tests.Coordination;
@@ -29,7 +32,7 @@ public sealed class DarwinStatAbiCanaryTests
             executablePath);
         Assert.True(compile.ExitCode == 0, $"Darwin C ABI canary compilation failed: {compile.StandardError}");
 
-        var native = await RunAsync(executablePath, fixture.RootPath);
+        var native = await RunAsync(executablePath, fixture.RootPath, fixture.RootPath);
         Assert.True(native.ExitCode == 0, $"Darwin C ABI canary failed: {native.StandardError}");
         var nativeLayout = JsonSerializer.Deserialize<NativeStatLayout>(native.StandardOutput)
             ?? throw new InvalidOperationException("The native Darwin stat ABI canary returned no layout.");
@@ -52,6 +55,23 @@ public sealed class DarwinStatAbiCanaryTests
         Assert.Equal(nativeLayout.LinkCount, OffsetOf(managedStat, "LinkCount"));
         Assert.Equal(nativeLayout.Inode, OffsetOf(managedStat, "Inode"));
         Assert.Equal(nativeLayout.Length, OffsetOf(managedStat, "Length"));
+
+        using var directory = new SafeFileHandle(
+            (IntPtr)UnixNative.OpenDirectoryAt(UnixPlatform.Darwin, -2, fixture.RootPath), ownsHandle: true);
+        var directoryFd = checked((int)directory.DangerousGetHandle());
+        AssertMetadata(nativeLayout.ByHandle, UnixNative.StatHandle(UnixPlatform.Darwin, directoryFd));
+        var byName = UnixNative.StatAt(UnixPlatform.Darwin, directoryFd, ".");
+        Assert.Equal(UnixStatResultStatus.Success, byName.Status);
+        AssertMetadata(nativeLayout.ByName, byName.Metadata);
+    }
+
+    private static void AssertMetadata(NativeStatMetadata expected, UnixMetadata actual)
+    {
+        Assert.Equal(expected.Device.ToString(CultureInfo.InvariantCulture), actual.Device);
+        Assert.Equal(expected.Mode, actual.Mode);
+        Assert.Equal(expected.LinkCount, actual.LinkCount);
+        Assert.Equal(expected.Inode, actual.Inode);
+        Assert.Equal(expected.Length, actual.Length);
     }
 
     private static int OffsetOf(Type structureType, string fieldName)
@@ -84,7 +104,11 @@ public sealed class DarwinStatAbiCanaryTests
         int Mode,
         int LinkCount,
         int Inode,
-        int Length);
+        int Length,
+        NativeStatMetadata ByHandle,
+        NativeStatMetadata ByName);
+
+    private sealed record NativeStatMetadata(int Device, int Mode, ulong LinkCount, ulong Inode, long Length);
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);
 }

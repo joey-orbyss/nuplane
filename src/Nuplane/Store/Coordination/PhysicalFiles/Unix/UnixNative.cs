@@ -394,11 +394,29 @@ internal static partial class UnixNative
         [DllImport("nuplane_store_native", EntryPoint = "nuplane_openat_create", SetLastError = true, CharSet = CharSet.Ansi)]
         internal static extern int OpenAtCreate(int parentFd, string name, int flags, uint mode);
 
+        // Apple's headers select the inode64 symbol on x64; arm64 exposes only
+        // the modern layout through the unsuffixed symbol.
+        internal static int FStat(int fd, out DarwinStat stat)
+            => RuntimeInformation.ProcessArchitecture == Architecture.X64
+                ? FStatInode64(fd, out stat)
+                : FStatArm64(fd, out stat);
+
+        internal static int FStatAt(int parentFd, string name, out DarwinStat stat, int flags)
+            => RuntimeInformation.ProcessArchitecture == Architecture.X64
+                ? FStatAtInode64(parentFd, name, out stat, flags)
+                : FStatAtArm64(parentFd, name, out stat, flags);
+
         [DllImport("libSystem.B.dylib", EntryPoint = "fstat", SetLastError = true)]
-        internal static extern int FStat(int fd, out DarwinStat stat);
+        private static extern int FStatArm64(int fd, out DarwinStat stat);
+
+        [DllImport("libSystem.B.dylib", EntryPoint = "fstat$INODE64", SetLastError = true)]
+        private static extern int FStatInode64(int fd, out DarwinStat stat);
 
         [DllImport("libSystem.B.dylib", EntryPoint = "fstatat", SetLastError = true, CharSet = CharSet.Ansi)]
-        internal static extern int FStatAt(int parentFd, string name, out DarwinStat stat, int flags);
+        private static extern int FStatAtArm64(int parentFd, string name, out DarwinStat stat, int flags);
+
+        [DllImport("libSystem.B.dylib", EntryPoint = "fstatat$INODE64", SetLastError = true, CharSet = CharSet.Ansi)]
+        private static extern int FStatAtInode64(int parentFd, string name, out DarwinStat stat, int flags);
 
         [DllImport("libSystem.B.dylib", EntryPoint = "mkdirat", SetLastError = true, CharSet = CharSet.Ansi)]
         internal static extern int MkdirAt(int parentFd, string name, uint mode);
