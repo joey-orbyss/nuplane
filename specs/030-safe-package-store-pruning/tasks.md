@@ -191,6 +191,7 @@ The [coordinated runtime increment](evidence/coordinated-runtime-admission.md) s
 ### Runtime and lifetime tests
 
 - [ ] T100 [US3] Add reconciliation before-read regression tests in `test/Nuplane.Runtime.Tests/ReconciliationPackageStoreAdmissionTests.cs`; cover feed/cache resolver, custom resolver, contributor, activation participant, observer, cleanup publication and cancellation.
+  - The [ordinary resolution compatibility correction](evidence/ordinary-resolution-compatibility.md) restores released default completion/hash and graph-file reads, retains explicit native/owned paths, and passes local42 Runtime/32 native cases plus a compiled regression control. Hosted and explicit participant-routing proof remain pending; T100/T101 stay unchecked.
 - [ ] T101 [US3] Add direct restore/content/startup LKG admission tests in `test/Nuplane.Runtime.Tests/PackagePathAdmissionTests.cs`; every denied path must refuse before its first package read.
 - [ ] T102 [US3] Add Loading overlap/partial-failure tests in `test/Nuplane.Loading.Tests/PackageGraphUseLifetimeTests.cs`; prove lease publication precedes first read and unload request alone does not release it.
 - [ ] T103 [US3] Add separate passive idle living-process weak-death test in `test/Nuplane.Runtime.Tests/PackageGraphUseWeakDeathTests.cs`; controlled test GC may establish death, but production observer must not initiate it and no later admission may be needed.

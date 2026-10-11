@@ -59,7 +59,7 @@ public sealed class PackageDependencyGraphResolver
     {
         _packageResolver = packageResolver ?? throw new ArgumentNullException(nameof(packageResolver));
         _retryPolicy = retryPolicy ?? throw new ArgumentNullException(nameof(retryPolicy));
-        _packageFiles = packageFiles ?? packageResolver as IPackageGraphFileReader ?? new NativePackageGraphFileReader();
+        _packageFiles = packageFiles ?? packageResolver as IPackageGraphFileReader ?? new OrdinaryPackageGraphFileReader();
         _hostProvidedPackageDeclarations =
             HostProvidedPackageDeclarationIndex.Build((IEnumerable<string>?)hostProvidedPackagesOptions?.Entries ?? HostProvidedPackagesOptions.DefaultEntries);
         _hostPackageVersionsOverride = hostPackageVersions;

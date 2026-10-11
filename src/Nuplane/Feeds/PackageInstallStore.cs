@@ -20,7 +20,7 @@ namespace Nuplane.Feeds;
 internal static class PackageInstallStore
 {
     // A bounded set avoids retaining a semaphore for every package ever seen. Collisions only
-    // serialize independent local publications; the native probe remains the authority check.
+    // serialize independent local publications; coordinated callers use native admission separately.
     private static readonly SemaphoreSlim[] LocalInstallGates = Enumerable.Range(0, 64)
         .Select(static _ => new SemaphoreSlim(1, 1)).ToArray();
     private const int ContentHashFileByteCount = 95;
@@ -66,7 +66,11 @@ internal static class PackageInstallStore
     /// Determines whether the install directory holds a completed extraction.
     /// </summary>
     /// <param name="installDirectory">The install directory to probe.</param>
-    public static bool IsInstalled(string installDirectory)
+    public static bool IsInstalled(string installDirectory) =>
+        File.Exists(Path.Combine(installDirectory, CompletionMarkerFileName));
+
+    /// <summary>Checks an explicitly guarded unscoped path without granting enrolled access.</summary>
+    internal static bool IsInstalledGuardedUnscoped(string installDirectory)
         => PackageStoreRuntimeAdmission.WithUnenrolledPackageDirectory(
             installDirectory,
             (files, status, directory) => status == UnenrolledPackageDirectoryStatus.Missing
@@ -185,6 +189,23 @@ internal static class PackageInstallStore
     /// <param name="installDirectory">The completed package install directory.</param>
     /// <param name="cancellationToken">A token to cancel the operation.</param>
     public static async Task<string?> ReadContentHashAsync(string installDirectory, CancellationToken cancellationToken)
+    {
+        string contentHash;
+        try
+        {
+            contentHash = await File.ReadAllTextAsync(Path.Combine(installDirectory, ContentHashFileName), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        return ParseCanonicalContentHash(contentHash);
+    }
+
+    /// <summary>Reads an explicitly guarded unscoped hash without granting enrolled access.</summary>
+    internal static async Task<string?> ReadContentHashGuardedUnscopedAsync(string installDirectory, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(installDirectory);
         cancellationToken.ThrowIfCancellationRequested();
@@ -317,20 +338,24 @@ internal static class PackageInstallStore
             return null;
         }
 
+        var result = ParseCanonicalContentHash(contentHash);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result;
+    }
+
+    private static string? ParseCanonicalContentHash(string contentHash)
+    {
         const string prefix = "sha512:";
         if (contentHash.Length != prefix.Length + 88 || !contentHash.StartsWith(prefix, StringComparison.Ordinal))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
             return null;
-        }
 
         var decoded = new byte[64];
         var base64 = contentHash[prefix.Length..];
-        var isCanonical = Convert.TryFromBase64String(base64, decoded, out var bytesWritten)
+        return Convert.TryFromBase64String(base64, decoded, out var bytesWritten)
             && bytesWritten == decoded.Length
-            && string.Equals(base64, Convert.ToBase64String(decoded), StringComparison.Ordinal);
-        cancellationToken.ThrowIfCancellationRequested();
-        return isCanonical ? contentHash : null;
+            && string.Equals(base64, Convert.ToBase64String(decoded), StringComparison.Ordinal)
+                ? contentHash
+                : null;
     }
 
     private static IPhysicalStoreNameFileSystem RequireNameFileSystem(

@@ -900,6 +900,19 @@ jobs:
           python3 build/verify-required-trx.py "$RUNNER_TEMP/manifest-admission/manifest-admission.trx" \
             build/test-cases/manifest-source-admission.json
 
+      - name: Qualify ordinary installed-package probes and dependency graph compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet test test/Nuplane.Runtime.Tests/Nuplane.Runtime.Tests.csproj \
+            --configuration Release --framework net10.0 \
+            --filter "FullyQualifiedName~OrdinaryProbeAndHashRead_IncidentalControlDataRetainsReleasedCompatibility|FullyQualifiedName~ResolveAsync_OrdinaryGraphReadsIgnoreIncidentalCoordinationData" \
+            --blame-hang-timeout 3m \
+            --logger "trx;LogFileName=ordinary-resolution-readers.trx" \
+            --results-directory "$RUNNER_TEMP/ordinary-resolution-readers"
+          python3 build/verify-required-trx.py "$RUNNER_TEMP/ordinary-resolution-readers/ordinary-resolution-readers.trx" \
+            build/test-cases/ordinary-resolution-readers.json
+
       - name: Qualify native installed-package probes and dependency graph inputs
         shell: bash
         run: |

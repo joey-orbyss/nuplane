@@ -13,7 +13,18 @@ namespace Nuplane.Store.Tests;
 public sealed class PackageInstallStoreAdmissionTests
 {
     [SupportedPhysicalStoreFact]
-    public async Task UnenrolledProbeAndHashReadPreservePositiveMissingAndCanonicalHashResults()
+    public async Task OrdinaryProbeAndHashRead_CompleteRootRetainsReleasedCompatibility()
+    {
+        using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        var hash = CanonicalHash();
+        File.WriteAllText(Path.Combine(context.SharedInstallPath, PackageInstallStore.ContentHashFileName), hash);
+
+        Assert.True(PackageInstallStore.IsInstalled(context.SharedInstallPath));
+        Assert.Equal(hash, await PackageInstallStore.ReadContentHashAsync(context.SharedInstallPath, CancellationToken.None));
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task GuardedUnscopedProbeAndHashReadPreservePositiveMissingAndCanonicalHashResults()
     {
         using var fixture = new PackageStoreFixture();
         var installPath = fixture.CreateDirectory("packages/feed/Example/1.0.0");
@@ -21,45 +32,45 @@ public sealed class PackageInstallStoreAdmissionTests
         var hashPath = Path.Combine(installPath, PackageInstallStore.ContentHashFileName);
         var hash = CanonicalHash();
 
-        Assert.False(PackageInstallStore.IsInstalled(installPath));
-        Assert.Null(await PackageInstallStore.ReadContentHashAsync(installPath, CancellationToken.None));
+        Assert.False(PackageInstallStore.IsInstalledGuardedUnscoped(installPath));
+        Assert.Null(await PackageInstallStore.ReadContentHashGuardedUnscopedAsync(installPath, CancellationToken.None));
 
         File.WriteAllBytes(markerPath, []);
         File.WriteAllText(hashPath, hash);
-        Assert.True(PackageInstallStore.IsInstalled(installPath));
-        Assert.Equal(hash, await PackageInstallStore.ReadContentHashAsync(installPath, CancellationToken.None));
+        Assert.True(PackageInstallStore.IsInstalledGuardedUnscoped(installPath));
+        Assert.Equal(hash, await PackageInstallStore.ReadContentHashGuardedUnscopedAsync(installPath, CancellationToken.None));
 
         File.Delete(markerPath);
-        Assert.False(PackageInstallStore.IsInstalled(installPath));
-        Assert.Equal(hash, await PackageInstallStore.ReadContentHashAsync(installPath, CancellationToken.None));
+        Assert.False(PackageInstallStore.IsInstalledGuardedUnscoped(installPath));
+        Assert.Equal(hash, await PackageInstallStore.ReadContentHashGuardedUnscopedAsync(installPath, CancellationToken.None));
 
         var invalidEncoding = hash.ToCharArray();
         invalidEncoding[10] = '!';
         File.WriteAllText(hashPath, new string(invalidEncoding));
-        Assert.Null(await PackageInstallStore.ReadContentHashAsync(installPath, CancellationToken.None));
+        Assert.Null(await PackageInstallStore.ReadContentHashGuardedUnscopedAsync(installPath, CancellationToken.None));
 
         var nonCanonicalEncoding = hash.ToCharArray();
         nonCanonicalEncoding[^3] = 'B';
         File.WriteAllText(hashPath, new string(nonCanonicalEncoding));
-        Assert.Null(await PackageInstallStore.ReadContentHashAsync(installPath, CancellationToken.None));
+        Assert.Null(await PackageInstallStore.ReadContentHashGuardedUnscopedAsync(installPath, CancellationToken.None));
 
         var missing = fixture.GetPath("packages/feed/Missing/1.0.0");
-        Assert.False(PackageInstallStore.IsInstalled(missing));
-        Assert.Null(await PackageInstallStore.ReadContentHashAsync(missing, CancellationToken.None));
+        Assert.False(PackageInstallStore.IsInstalledGuardedUnscoped(missing));
+        Assert.Null(await PackageInstallStore.ReadContentHashGuardedUnscopedAsync(missing, CancellationToken.None));
     }
 
     [SupportedPhysicalStoreFact]
-    public async Task PathOnlyProbeAndHashReadRefuseEnrolledPathBeforeReturningPayloadMetadata()
+    public async Task GuardedUnscopedProbeAndHashReadRefuseEnrolledPathBeforeReturningPayloadMetadata()
     {
         using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
         var installPath = context.SharedInstallPath;
         File.WriteAllText(Path.Combine(installPath, PackageInstallStore.ContentHashFileName), CanonicalHash());
 
-        var probe = Assert.Throws<PackageStoreAdmissionException>(() => PackageInstallStore.IsInstalled(installPath));
+        var probe = Assert.Throws<PackageStoreAdmissionException>(() => PackageInstallStore.IsInstalledGuardedUnscoped(installPath));
         Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, probe.Reason);
 
         var hash = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
-            PackageInstallStore.ReadContentHashAsync(installPath, CancellationToken.None));
+            PackageInstallStore.ReadContentHashGuardedUnscopedAsync(installPath, CancellationToken.None));
         Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, hash.Reason);
     }
 
@@ -367,7 +378,7 @@ public sealed class PackageInstallStoreAdmissionTests
         File.WriteAllBytes(markerAlias, []);
         CreateHardLink(markerAlias, marker);
 
-        var markerError = Assert.Throws<PackageStoreAdmissionException>(() => PackageInstallStore.IsInstalled(markerInstall));
+        var markerError = Assert.Throws<PackageStoreAdmissionException>(() => PackageInstallStore.IsInstalledGuardedUnscoped(markerInstall));
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, markerError.Reason);
 
         var hashInstall = fixture.CreateDirectory("packages/feed/Hash/1.0.0");
@@ -376,7 +387,7 @@ public sealed class PackageInstallStoreAdmissionTests
         File.WriteAllText(hashAlias, hash);
         CreateHardLink(hashAlias, Path.Combine(hashInstall, PackageInstallStore.ContentHashFileName));
         var hashError = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
-            PackageInstallStore.ReadContentHashAsync(hashInstall, CancellationToken.None));
+            PackageInstallStore.ReadContentHashGuardedUnscopedAsync(hashInstall, CancellationToken.None));
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, hashError.Reason);
 
         var linkedMarkerInstall = fixture.CreateDirectory("packages/feed/LinkedMarker/1.0.0");
@@ -384,7 +395,7 @@ public sealed class PackageInstallStoreAdmissionTests
         File.WriteAllBytes(markerTarget, []);
         File.CreateSymbolicLink(Path.Combine(linkedMarkerInstall, PackageInstallStore.CompletionMarkerFileName), markerTarget);
         var linkedMarkerError = Assert.Throws<PackageStoreAdmissionException>(() =>
-            PackageInstallStore.IsInstalled(linkedMarkerInstall));
+            PackageInstallStore.IsInstalledGuardedUnscoped(linkedMarkerInstall));
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, linkedMarkerError.Reason);
 
         var linkedHashInstall = fixture.CreateDirectory("packages/feed/LinkedHash/1.0.0");
@@ -392,7 +403,7 @@ public sealed class PackageInstallStoreAdmissionTests
         File.WriteAllText(hashTarget, hash);
         File.CreateSymbolicLink(Path.Combine(linkedHashInstall, PackageInstallStore.ContentHashFileName), hashTarget);
         var linkedHashError = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
-            PackageInstallStore.ReadContentHashAsync(linkedHashInstall, CancellationToken.None));
+            PackageInstallStore.ReadContentHashGuardedUnscopedAsync(linkedHashInstall, CancellationToken.None));
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, linkedHashError.Reason);
     }
 
