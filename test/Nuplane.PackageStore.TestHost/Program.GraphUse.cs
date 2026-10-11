@@ -128,7 +128,7 @@ internal static partial class Program
         string[] AssemblyNames);
     private sealed record ExitingMessage(string Kind, string OperationId, int ProcessId);
 
-    private sealed class GraphUseDesiredSource(IReadOnlyList<PackageRequest> requests) : IDesiredPackageSource
+    private sealed class GraphUseDesiredSource(IReadOnlyList<PackageRequest> requests) : IPackagePathIndependentDesiredPackageSource
     {
         public Task<IReadOnlyList<PackageRequest>> GetDesiredAsync(CancellationToken ct)
         {

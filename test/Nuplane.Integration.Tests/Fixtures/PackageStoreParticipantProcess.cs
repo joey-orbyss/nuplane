@@ -174,8 +174,13 @@ internal sealed class PackageStoreParticipantProcess : IAsyncDisposable
 
     private async Task<JsonDocument> ReadNextResponseCoreAsync(CancellationToken cancellationToken)
     {
-        var line = await _process.StandardOutput.ReadLineAsync(cancellationToken)
-            ?? throw new EndOfStreamException("Participant exited before reporting its next response.");
+        var line = await _process.StandardOutput.ReadLineAsync(cancellationToken);
+        if (line is null)
+        {
+            var exit = await CaptureExitAsync(cancellationToken).ConfigureAwait(false);
+            throw new EndOfStreamException(
+                $"Participant exited with code {exit.ExitCode} before reporting its next response. {exit.StandardError}");
+        }
         _standardOutput.AppendLine(line);
         var message = JsonDocument.Parse(line);
         try
