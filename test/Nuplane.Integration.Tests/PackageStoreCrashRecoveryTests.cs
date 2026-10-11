@@ -5,6 +5,7 @@ using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Integration.Tests.Fixtures;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.GraphUseRecords;
+using Nuplane.Store.Coordination.GraphUseSerialization;
 using Nuplane.Store.Coordination.MembershipRecords;
 using Nuplane.Store.Coordination.PhysicalFiles;
 using Nuplane.Store.Maintenance;
@@ -200,7 +201,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             var entry = Assert.IsType<PhysicalStoreEntryInfo>(fixture.Files.InspectChildNoFollow(control, name));
             using var file = fixture.Files.OpenFileChildNoFollow(control, name, FileAccess.Read);
             result.Add(name, new FileEvidence(entry.Identity,
-                fixture.Files.ReadControlFile(file, checked((int)PackageGraphUseRecordStore.DefaultMaximumTotalUseRecordBytes))));
+                fixture.Files.ReadControlFile(file, GraphUsePayloadSerializer.MaximumPayloadBytes)));
         }
         return result;
     }
