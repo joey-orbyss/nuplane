@@ -962,7 +962,7 @@ internal sealed partial class RootMembershipRegistry
         private readonly RootMembershipRegistry _registry;
         private readonly object _gate = new();
         private int _disposed;
-        private bool _operationActive;
+        private Operation? _activeOperation;
 
         internal NativeCatalogOwnerBorrow(NativeCatalogOwner owner, RootMembershipRegistry registry, object mint)
         {
@@ -990,26 +990,39 @@ internal sealed partial class RootMembershipRegistry
                 ObjectDisposedException.ThrowIf(_disposed != 0, this);
                 if (!ReferenceEquals(registry, _registry))
                     throw Refused("A catalog owner minted by another membership registry cannot authorize this operation.");
-                if (_operationActive)
+                if (_activeOperation is not null)
                     throw Refused("One catalog-owner borrow cannot run overlapping adopted mutations.");
                 _owner.RequireOperationMayStart();
-                _operationActive = true;
-                return new Operation(this);
+                var operation = new Operation(this);
+                _activeOperation = operation;
+                return operation;
             }
         }
 
-        private void ExitOperation()
+        internal void RequireOperation(Operation operation, RootMembershipRegistry registry)
+        {
+            ArgumentNullException.ThrowIfNull(operation);
+            lock (_gate)
+            {
+                if (!ReferenceEquals(registry, _registry))
+                    throw Refused("A catalog owner minted by another membership registry cannot authorize this operation.");
+                if (!ReferenceEquals(_activeOperation, operation) || !operation.IsBoundTo(this))
+                    throw Refused("Only the exact active operation minted for this catalog-owner borrow can authorize verification.");
+            }
+        }
+
+        private void ExitOperation(Operation operation)
         {
             var releaseBorrow = false;
             lock (_gate)
             {
-                if (!_operationActive)
-                    return;
-                _operationActive = false;
+                if (!ReferenceEquals(_activeOperation, operation))
+                    throw Refused("An expired or foreign catalog-owner operation cannot end the active borrow operation.");
+                _activeOperation = null;
                 releaseBorrow = _disposed != 0;
             }
             if (releaseBorrow)
-            _owner.ReturnBorrow(_registry._catalogOwnerMint);
+                _owner.ReturnBorrow(_registry._catalogOwnerMint);
         }
 
         public ValueTask DisposeAsync()
@@ -1020,7 +1033,7 @@ internal sealed partial class RootMembershipRegistry
                 if (_disposed != 0)
                     return ValueTask.CompletedTask;
                 _disposed = 1;
-                releaseBorrow = !_operationActive;
+                releaseBorrow = _activeOperation is null;
             }
             if (releaseBorrow)
                 _owner.ReturnBorrow(_registry._catalogOwnerMint);
@@ -1031,7 +1044,10 @@ internal sealed partial class RootMembershipRegistry
         {
             private NativeCatalogOwnerBorrow? _borrow;
             internal Operation(NativeCatalogOwnerBorrow borrow) => _borrow = borrow;
-            public void Dispose() => Interlocked.Exchange(ref _borrow, null)?.ExitOperation();
+            internal bool IsBoundTo(NativeCatalogOwnerBorrow borrow)
+                => ReferenceEquals(Volatile.Read(ref _borrow), borrow);
+
+            public void Dispose() => Interlocked.Exchange(ref _borrow, null)?.ExitOperation(this);
         }
     }
 

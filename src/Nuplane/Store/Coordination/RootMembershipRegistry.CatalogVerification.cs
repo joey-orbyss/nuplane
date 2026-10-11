@@ -20,8 +20,23 @@ internal sealed partial class RootMembershipRegistry
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(borrow);
-        borrow.RequireRegistry(this);
         using var operation = borrow.EnterOperation(this);
+        return await VerifyCatalogMemberProtectionUnderOperationAsync(borrow, operation, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>Verifies catalog protection under the exact operation already held by the supplied borrow.</summary>
+    /// <remarks>
+    /// The caller must retain and dispose the operation token. This method validates the token by reference before
+    /// reading any state payload; it does not enter another operation or grant authority beyond the retained borrow.
+    /// </remarks>
+    internal async Task<IReadOnlyList<NativeCatalogMemberVerification>> VerifyCatalogMemberProtectionUnderOperationAsync(
+        NativeCatalogOwnerBorrow borrow,
+        NativeCatalogOwnerBorrow.Operation operation,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(borrow);
+        borrow.RequireOperation(operation, this);
         cancellationToken.ThrowIfCancellationRequested();
 
         var owner = borrow.Owner;
