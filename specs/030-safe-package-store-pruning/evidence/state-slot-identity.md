@@ -1,0 +1,11 @@
+# State-slot identity regression evidence
+
+Status: local native basename-change proof and the required writer suite pass 21/21 without skips. T041 remains unchecked pending independent review, complete evidence reconciliation and exact-head native qualification.
+
+The existing `Coordination/PhysicalStoreIdentityTests.cs` fixture proves refusal on a changed observed parent, mismatched observed file, a different file on canonical reopen, parent/file identity changes during validation, and new hard-link ambiguity. It also verifies disposal of each opened fake native handle. Existing Unix and Windows identity suites prove ordinary atomic replacement preserves the parent/name slot while changing file identity; the guarded-writer create/replace case joins that observation directly to the actual writer (see [T046 evidence](atomic-writer-slot-identity.md)).
+
+The missing in-operation basename-change case reuses `GuardedNativeStoreStateWriterTests`' native fixture and forwarding hooks. The real native name observer runs first. A deterministic callback then moves the actual state file to `renamed-state.json` before canonical reopen. `PhysicalStoreIdentity.ObserveStateSlot` must refuse with `UnknownAuthority`. The original basename is absent, the renamed entry retains the original physical file identity and exact bytes, and the captured original handle refuses inspection with `ExpiredScope` after unwinding. The callback changes the actual directory entry; it does not substitute an observed identity or an exception.
+
+The strict `guarded-native-state-writer.json` manifest retains all previous 20 cases and adds this one test. The existing workflow selects the whole fixture on all five native lanes, so no new CI step or adapter abstraction is needed. Production source is unchanged.
+
+A compiled negative control omitting the canonical basename reopen, and inspecting the held original file instead, makes the new regression fail with `Assert.Throws() Failure: No exception was thrown`. Production source was restored byte-for-byte before the successful 21-case rerun. Local macOS results establish the test's bite; hosted Windows and Linux qualification remains required before T041 acceptance.

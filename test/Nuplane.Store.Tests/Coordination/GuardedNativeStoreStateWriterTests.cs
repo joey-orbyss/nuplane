@@ -47,6 +47,31 @@ public sealed class GuardedNativeStoreStateWriterTests
     }
 
     [SupportedPhysicalStoreFact]
+    public async Task ObserveStateSlot_RefusesBasenameChangedAfterNativeNameObservationAndDisposesFile()
+    {
+        using var context = CreateContext();
+        await SeedAsync(context, State("1.0.0", 1));
+        var originalBytes = File.ReadAllBytes(context.StatePath);
+        var originalIdentity = context.NativeFiles.InspectChildNoFollow(context.Parent, StateName)!.Identity;
+        const string renamedName = "renamed-state.json";
+        var renamedPath = Path.Combine(context.StateDirectory, renamedName);
+        PhysicalStoreFileHandle? opened = null;
+        context.Files.AfterOpenFile = file => opened = file;
+        context.Files.AfterCanonicalNameObservation = () => File.Move(context.StatePath, renamedPath);
+
+        var error = Assert.Throws<PackageStoreAdmissionException>(
+            () => new PhysicalStoreIdentity(context.Files).ObserveStateSlot(context.Parent, StateName));
+
+        Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, error.Reason);
+        Assert.Null(context.NativeFiles.InspectChildNoFollow(context.Parent, StateName));
+        Assert.Equal(originalIdentity, context.NativeFiles.InspectChildNoFollow(context.Parent, renamedName)!.Identity);
+        Assert.Equal(originalBytes, File.ReadAllBytes(renamedPath));
+        Assert.NotNull(opened);
+        var disposed = Assert.Throws<PackageStoreAdmissionException>(() => context.NativeFiles.InspectHandle(opened));
+        Assert.Equal(PackageStoreAdmissionReason.ExpiredScope, disposed.Reason);
+    }
+
+    [SupportedPhysicalStoreFact]
     public async Task WriteAsync_UsesUnboundedHeldParentStreamsForPayloadsLargerThanFourMiB()
     {
         using var context = CreateContext();
@@ -724,6 +749,8 @@ public sealed class GuardedNativeStoreStateWriterTests
         internal Action<PhysicalStoreDirectoryHandle, string, PhysicalFileIdentity>? BeforeRemove { get; set; }
         internal Action<PhysicalStoreDirectoryHandle, string, PhysicalStoreFileHandle>? AfterCreateFile { get; set; }
         internal Action<PhysicalStoreDirectoryHandle, string>? BeforeWriteStream { get; set; }
+        internal Action<PhysicalStoreFileHandle>? AfterOpenFile { get; set; }
+        internal Action? AfterCanonicalNameObservation { get; set; }
         internal PhysicalStoreHandle? FailInspectFor { get; set; }
         internal bool FailNextLockRelease { get; set; }
         internal long MaximumReadBytes { get; private set; }
@@ -737,7 +764,11 @@ public sealed class GuardedNativeStoreStateWriterTests
         public PhysicalStoreDirectoryHandle OpenParentDirectory(PhysicalStoreDirectoryHandle directory)
             => _files.OpenParentDirectory(directory);
         public PhysicalStoreFileHandle OpenFileChildNoFollow(PhysicalStoreDirectoryHandle parent, string singleName, FileAccess access)
-            => _files.OpenFileChildNoFollow(parent, singleName, access);
+        {
+            var file = _files.OpenFileChildNoFollow(parent, singleName, access);
+            AfterOpenFile?.Invoke(file);
+            return file;
+        }
         public string ReadLinkTargetNoFollow(PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedLinkIdentity)
             => _files.ReadLinkTargetNoFollow(parent, singleName, expectedLinkIdentity);
         public PhysicalStoreEntryInfo InspectHandle(PhysicalStoreHandle handle)
@@ -774,7 +805,11 @@ public sealed class GuardedNativeStoreStateWriterTests
             => _names.ObserveDirectoryNameSemantics(parent);
         public PhysicalStoreCanonicalName ObserveCanonicalFileNameNoFollow(PhysicalStoreDirectoryHandle parent, string singleName,
             PhysicalFileIdentity expectedFileIdentity)
-            => _names.ObserveCanonicalFileNameNoFollow(parent, singleName, expectedFileIdentity);
+        {
+            var observed = _names.ObserveCanonicalFileNameNoFollow(parent, singleName, expectedFileIdentity);
+            AfterCanonicalNameObservation?.Invoke();
+            return observed;
+        }
         public PhysicalStoreCanonicalName ObserveCanonicalDirectoryNameNoFollow(PhysicalStoreDirectoryHandle parent, string singleName,
             PhysicalFileIdentity expectedDirectoryIdentity)
             => _directoryNames.ObserveCanonicalDirectoryNameNoFollow(parent, singleName, expectedDirectoryIdentity);
