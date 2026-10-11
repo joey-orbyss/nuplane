@@ -1,0 +1,9 @@
+# Held-directory writer slot and file identity
+
+Status: root source review and local required native writer20/20 pass without skips. Exact-head hosted qualification remains pending. T046 remains unchecked until the complete requirement and native evidence are accepted; T041 stays open.
+
+The actual `GuardedNativeStoreStateWriter.WriteAsync` create/replace test now takes native `PhysicalStoreStateSlotObservation` snapshots immediately before and after replacement through the same held parent. Before replacement, the observed slot equals the supplied slot and the observed file equals the writer's created identity. After replacement, the slot remains equal, the observed file equals the writer's replaced identity, and the file identities differ. The existing delete-sharing reader still reads the exact prior bytes, while a fresh reader decodes the new state.
+
+The same required 20-case native suite preserves failure-atomic coverage: serialization failure and cancellation retain readable prior bytes, remove temporary/backup artifacts and release the guard; pre-transition failure preserves exact original backup bytes and prior state, then cleans artifacts. Additional cases retain recovery evidence on ambiguous identity/transition and preserve verified committed outcomes on post-transition cleanup failures. No production writer or admission implementation changed.
+
+The planned T046 test path is aligned with the existing implementation at `test/Nuplane.Store.Tests/Coordination/GuardedNativeStoreStateWriterTests.cs`; no duplicate test fixture or new abstraction is added. The unchanged `guarded-native-state-writer.json` manifest already requires the strengthened create/replace case and the failure-atomic cases. A local strict TRX name/multiplicity/outcome check passes all 20 requirements without skips. Cross-platform native acceptance must come from the next exact-head run, rather than from separate identity tests or the earlier unmodified writer case.

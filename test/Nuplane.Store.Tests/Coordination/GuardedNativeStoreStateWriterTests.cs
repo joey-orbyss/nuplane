@@ -23,6 +23,10 @@ public sealed class GuardedNativeStoreStateWriterTests
 
         var created = await writer.WriteAsync(context.Parent, context.Slot, prior, NoReplay, CancellationToken.None);
         Assert.Equal(created.StateIdentity, context.NativeFiles.InspectChildNoFollow(context.Parent, StateName)!.Identity);
+        var identity = new PhysicalStoreIdentity(context.NativeFiles);
+        var beforeReplacement = identity.ObserveStateSlot(context.Parent, StateName);
+        Assert.Equal(context.Slot, beforeReplacement.Slot);
+        Assert.Equal(created.StateIdentity, beforeReplacement.FileIdentity);
         var oldBytes = File.ReadAllBytes(context.StatePath);
         using var oldReader = new FileStream(
             context.StatePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
@@ -30,7 +34,10 @@ public sealed class GuardedNativeStoreStateWriterTests
         var next = State("2.0.0", 2);
         var replaced = await writer.WriteAsync(context.Parent, context.Slot, next, NoReplay, CancellationToken.None);
 
-        Assert.NotEqual(created.StateIdentity, replaced.StateIdentity);
+        var afterReplacement = identity.ObserveStateSlot(context.Parent, StateName);
+        Assert.Equal(beforeReplacement.Slot, afterReplacement.Slot);
+        Assert.Equal(replaced.StateIdentity, afterReplacement.FileIdentity);
+        Assert.NotEqual(beforeReplacement.FileIdentity, afterReplacement.FileIdentity);
         using var observedOldRecord = new MemoryStream();
         oldReader.CopyTo(observedOldRecord);
         Assert.Equal(oldBytes, observedOldRecord.ToArray());
