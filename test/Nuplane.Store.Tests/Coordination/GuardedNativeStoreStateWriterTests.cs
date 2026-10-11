@@ -47,7 +47,7 @@ public sealed class GuardedNativeStoreStateWriterTests
     }
 
     [SupportedPhysicalStoreFact]
-    public async Task ObserveStateSlot_RefusesBasenameChangedAfterNativeNameObservationAndDisposesFile()
+    public async Task ObserveStateSlot_ProtectsBasenameDuringNativeNameObservationAndDisposesFile()
     {
         using var context = CreateContext();
         await SeedAsync(context, State("1.0.0", 1));
@@ -56,16 +56,43 @@ public sealed class GuardedNativeStoreStateWriterTests
         const string renamedName = "renamed-state.json";
         var renamedPath = Path.Combine(context.StateDirectory, renamedName);
         PhysicalStoreFileHandle? opened = null;
-        context.Files.AfterOpenFile = file => opened = file;
-        context.Files.AfterCanonicalNameObservation = () => File.Move(context.StatePath, renamedPath);
+        context.Files.AfterOpenFile = file => opened ??= file;
+        var renameAttempted = false;
+        Exception? renameError = null;
+        context.Files.AfterCanonicalNameObservation = () =>
+        {
+            renameAttempted = true;
+            if (OperatingSystem.IsWindows())
+                renameError = Record.Exception(() => File.Move(context.StatePath, renamedPath));
+            else
+                File.Move(context.StatePath, renamedPath);
+        };
 
-        var error = Assert.Throws<PackageStoreAdmissionException>(
-            () => new PhysicalStoreIdentity(context.Files).ObserveStateSlot(context.Parent, StateName));
+        var identity = new PhysicalStoreIdentity(context.Files);
+        if (OperatingSystem.IsWindows())
+        {
+            var observed = identity.ObserveStateSlot(context.Parent, StateName);
 
-        Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, error.Reason);
-        Assert.Null(context.NativeFiles.InspectChildNoFollow(context.Parent, StateName));
-        Assert.Equal(originalIdentity, context.NativeFiles.InspectChildNoFollow(context.Parent, renamedName)!.Identity);
-        Assert.Equal(originalBytes, File.ReadAllBytes(renamedPath));
+            Assert.True(renameError is IOException or UnauthorizedAccessException,
+                $"The held native file must prevent rename; observed {renameError?.GetType().Name ?? "success"}.");
+            Assert.Equal(context.Slot, observed.Slot);
+            Assert.Equal(originalIdentity, observed.FileIdentity);
+            Assert.Equal(originalIdentity, context.NativeFiles.InspectChildNoFollow(context.Parent, StateName)!.Identity);
+            Assert.Equal(originalBytes, File.ReadAllBytes(context.StatePath));
+            Assert.Null(context.NativeFiles.InspectChildNoFollow(context.Parent, renamedName));
+        }
+        else
+        {
+            var error = Assert.Throws<PackageStoreAdmissionException>(
+                () => identity.ObserveStateSlot(context.Parent, StateName));
+
+            Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, error.Reason);
+            Assert.Null(context.NativeFiles.InspectChildNoFollow(context.Parent, StateName));
+            Assert.Equal(originalIdentity, context.NativeFiles.InspectChildNoFollow(context.Parent, renamedName)!.Identity);
+            Assert.Equal(originalBytes, File.ReadAllBytes(renamedPath));
+        }
+
+        Assert.True(renameAttempted);
         Assert.NotNull(opened);
         var disposed = Assert.Throws<PackageStoreAdmissionException>(() => context.NativeFiles.InspectHandle(opened));
         Assert.Equal(PackageStoreAdmissionReason.ExpiredScope, disposed.Reason);
