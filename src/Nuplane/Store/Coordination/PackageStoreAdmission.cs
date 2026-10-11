@@ -80,7 +80,7 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                 ?? throw Refusal("The configured root has no retained membership candidate.");
             if (_trustedCatalog is not null)
             {
-                var session = await AcquireCatalogRuntimeSessionAsync(cancellationToken).ConfigureAwait(false);
+                var session = await AcquireCatalogRuntimeSessionAsync(kind, cancellationToken).ConfigureAwait(false);
                 NativeCatalogRuntimeProjection? projection = null;
                 try
                 {
@@ -253,7 +253,7 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
             owners.EnsureCapacity(orderedGroups.Length);
             if (_trustedCatalog is not null && orderedGroups.Length > 0)
             {
-                catalogSession = await AcquireCatalogRuntimeSessionAsync(cancellationToken).ConfigureAwait(false);
+                catalogSession = await AcquireCatalogRuntimeSessionAsync(kind, cancellationToken).ConfigureAwait(false);
                 catalogSession.RevalidateRequestObservations(observations.Select(static observation => observation.Resolved));
 
                 foreach (var group in orderedGroups)
@@ -493,6 +493,7 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
     }
 
     private async Task<CatalogRuntimeOperationSession> AcquireCatalogRuntimeSessionAsync(
+        PackageStoreAdmissionKind kind,
         CancellationToken cancellationToken)
     {
         var catalog = _trustedCatalog
@@ -505,7 +506,8 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
             borrow = await owner.BorrowAsync(cancellationToken).ConfigureAwait(false);
             session = new CatalogRuntimeOperationSession(_registry, owner, borrow);
             borrow = null;
-            await RecoverCatalogPendingAsync(session, cancellationToken).ConfigureAwait(false);
+            if (kind != PackageStoreAdmissionKind.Maintenance)
+                await RecoverCatalogPendingAsync(session, cancellationToken).ConfigureAwait(false);
             owner.RevalidateRetainedEvidence();
             _ = await _registry.VerifyCatalogMemberProtectionAsync(session.Borrow, cancellationToken)
                 .ConfigureAwait(false);
