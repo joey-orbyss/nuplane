@@ -45,14 +45,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             var first = await Task.WhenAny(barrierWait, cycleA);
             Assert.Same(barrierWait, first);
             await barrierWait;
-            Assert.Equal(PackageInstallStore.CompletionMarkerFileName, packageOpenBarrier.Basename);
-            Assert.Equal(1, packageOpenBarrier.RootLockCountAtPause);
-            Assert.Equal(2, packageOpenBarrier.MemberLockCountAtPause);
-            var rootPackage = Assert.Single(fixture.Graphs["member-a"].Packages,
-                static package => package.Id == "Root.First");
-            using (var rootPackageDirectory = OwnedProcessDirectory.Open(fixture.Files, rootPackage.InstallPath!))
-                Assert.Equal(fixture.Files.InspectHandle(rootPackageDirectory).Identity,
-                    packageOpenBarrier.ParentIdentity);
+            AssertFirstPackageOpenHeldByReconciliation(fixture, packageOpenBarrier);
             Assert.False(cycleA.IsCompleted);
 
             var busy = await Assert.ThrowsAsync<PackageStoreAdmissionException>(async () =>
@@ -135,6 +128,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         PackageGraphUseLeaseOwner? oldGraphOwner = null;
         PackageLoadResult? oldGraphLoad = null;
         AssemblyLoadContext? oldGraphContext = null;
+        PackageFileOpenBarrier? packageOpenBarrier = null;
         MetadataReadBarrier? loadingReadBarrier = null;
         Task<ReconciliationRunResult>? cycleA = null;
         Exception? primaryFailure = null;
@@ -158,19 +152,51 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             Assert.Equal(GraphUseRecordOwnershipState.Live, retainedOldUse.OwnershipState);
             Assert.Equal(oldGraphOwner.Lease.Snapshot.GenerationId, retainedOldUse.Record.GraphSnapshot.GenerationId);
 
-            // Ignore earlier package-metadata reads under Phase A's root lock. The fixture barrier
-            // claims the first metadata file opened only after the real root/member owner is released,
-            // which is PackageMetadataLoadModeAdvisor's read in deferred Loading with the published
-            // graph-use lease and exact-path read pins already in place.
+            var inventoryProbe = new CountingPackageStoreInventory(new PackageStoreInventory(fixture.Files));
+            var inspectionService = CreateInspectionService(providerB, fixture.Files, inventoryProbe);
+            var nativeBeforeFirstOpen = CaptureFixtureNativeEvidence(fixture);
+            using var cycleDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            packageOpenBarrier = fixture.Files.BlockNextPackageFileOpen();
             loadingReadBarrier = fixture.Files.BlockNextMetadataReadAfterRootUnlock();
             cycleA = Task.Run(() => providerA.GetRequiredService<IReconciliationService>()
-                .TriggerAsync(ReconciliationTrigger.Manual("maintenance-overlap-a"), CancellationToken.None));
+                .TriggerAsync(ReconciliationTrigger.Manual("maintenance-overlap-a"), cycleDeadline.Token));
+
+            var firstPackageOpenWait = packageOpenBarrier.WaitUntilBlockedAsync();
+            var firstBoundary = await Task.WhenAny(firstPackageOpenWait, cycleA);
+            Assert.Same(firstPackageOpenWait, firstBoundary);
+            await firstPackageOpenWait;
+            AssertFirstPackageOpenHeldByReconciliation(fixture, packageOpenBarrier);
+            Assert.False(cycleA.IsCompleted);
+
+            var busyInspection = await Assert.ThrowsAsync<PackageStoreAdmissionException>(async () =>
+                await inspectionService.InspectAsync(0, cycleDeadline.Token).WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, busyInspection.Reason);
+            Assert.Contains("root.lock", busyInspection.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("busy", busyInspection.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.Equal(0, inventoryProbe.ReadCount);
+            Assert.Equal(nativeBeforeFirstOpen.OrderBy(static pair => pair.Key, StringComparer.Ordinal),
+                CaptureFixtureNativeEvidence(fixture).OrderBy(static pair => pair.Key, StringComparer.Ordinal));
+
+            packageOpenBarrier.Release();
             await loadingReadBarrier.WaitUntilBlockedAsync();
             Assert.Equal(0, loadingReadBarrier.RootLockCountAtPause);
             Assert.Equal(0, loadingReadBarrier.MemberLockCountAtPause);
             Assert.True(fixture.Files.SuccessfulRootLockAcquisitions > 0);
             Assert.True(fixture.Files.SuccessfulMemberLockAcquisitions > 0);
             Assert.False(cycleA.IsCompleted);
+
+            var activeGraphA = await ReadVerifiedActiveGraphUnderRootOwnershipAsync(providerA, cycleDeadline.Token);
+            var entriesAtRetainedRead = (await InspectGraphUseRecordsAsync(
+                providerA.GetRequiredService<IPackageStoreAdmission>(), fixture)).Entries;
+            var matchingUses = entriesAtRetainedRead.Where(entry =>
+                    entry.OwnershipState == GraphUseRecordOwnershipState.Live &&
+                    HasSameSelectedGraphProjection(entry.Record.GraphSnapshot, activeGraphA))
+                .ToArray();
+            Assert.True(matchingUses.Length == 1,
+                $"Expected one live use matching A's persisted active graph ({DescribeGraph(activeGraphA)}); " +
+                $"observed {string.Join(" | ", entriesAtRetainedRead.Select(entry => DescribeGraph(entry.Record.GraphSnapshot)))}.");
+            var useAtRetainedRead = matchingUses[0];
+            Assert.Equal(activeGraphA.GenerationId, useAtRetainedRead.Record.GraphSnapshot.GenerationId);
 
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             var resultB = await providerB.GetRequiredService<IReconciliationService>()
@@ -196,7 +222,8 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                                StringComparison.Ordinal));
 
             var nativeBefore = CaptureFixtureNativeEvidence(fixture);
-            var inspectionService = CreateInspectionService(providerB, fixture.Files);
+            Assert.Equal(nativeBeforeFirstOpen.OrderBy(static pair => pair.Key, StringComparer.Ordinal),
+                nativeBefore.OrderBy(static pair => pair.Key, StringComparer.Ordinal));
             var inspection = await inspectionService.InspectAsync(0, deadline.Token)
                 .WaitAsync(TimeSpan.FromSeconds(30));
             var nativeAfter = CaptureFixtureNativeEvidence(fixture);
@@ -212,6 +239,8 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             Assert.Equal(inspection.EnrollmentEpoch, inventory.Epoch);
             Assert.Equal(2, inspection.Members.Count);
             Assert.Equal(3, inspection.Uses.Count);
+            Assert.Contains(inspection.Uses, use => use.OwnershipState == GraphUseRecordOwnershipState.Live &&
+                                                   use.Graph.GenerationId == activeGraphA.GenerationId);
             Assert.All(inspection.Uses,
                 static use => Assert.Equal(GraphUseRecordOwnershipState.Live, use.OwnershipState));
             Assert.NotNull(inspection.RetentionPlan);
@@ -281,6 +310,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             Assert.Equal(unrelatedIdentity, Assert.Single(eligibleEntries).Install);
 
             await AssertInspectionMatchesRereadMemberStatesAsync(inspection, providerA, providerB, deadline.Token);
+            Assert.Equal(1, inventoryProbe.ReadCount);
 
             loadingReadBarrier.Release();
             var resultA = await cycleA.WaitAsync(TimeSpan.FromSeconds(30));
@@ -297,6 +327,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         }
 
         var cleanupFailures = new List<Exception>();
+        packageOpenBarrier?.Release();
         loadingReadBarrier?.Release();
         if (cycleA is not null)
         {
@@ -361,6 +392,19 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         return entry;
     }
 
+    private static void AssertFirstPackageOpenHeldByReconciliation(
+        GraphUseFixture fixture,
+        PackageFileOpenBarrier packageOpenBarrier)
+    {
+        Assert.Equal(PackageInstallStore.CompletionMarkerFileName, packageOpenBarrier.Basename);
+        Assert.Equal(1, packageOpenBarrier.RootLockCountAtPause);
+        Assert.Equal(2, packageOpenBarrier.MemberLockCountAtPause);
+        var rootPackage = Assert.Single(fixture.Graphs["member-a"].Packages,
+            static package => package.Id == "Root.First");
+        using var rootPackageDirectory = OwnedProcessDirectory.Open(fixture.Files, rootPackage.InstallPath!);
+        Assert.Equal(fixture.Files.InspectHandle(rootPackageDirectory).Identity, packageOpenBarrier.ParentIdentity);
+    }
+
     private static async Task AssertInspectionMatchesRereadMemberStatesAsync(
         PackageStoreInspectionSnapshot inspection,
         IServiceProvider providerA,
@@ -382,6 +426,73 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             Assert.Equal(protection.ProtectionDigest, member.ProtectionDigest);
         }
     }
+
+    private static async Task<ProtectedGraphSnapshot> ReadVerifiedActiveGraphUnderRootOwnershipAsync(
+        IServiceProvider provider,
+        CancellationToken cancellationToken)
+    {
+        var admission = provider.GetRequiredService<IPackageStoreAdmission>();
+        await using var operation = await admission.AcquireConfiguredRootOperationAsync(
+            PackageStoreAdmissionKind.Maintenance, cancellationToken);
+        var borrow = operation.Owner!.Borrow();
+        try
+        {
+            var registry = Assert.IsAssignableFrom<ICoordinatedStoreRegistry>(
+                provider.GetRequiredService<IStoreRegistry>());
+            var state = await registry.ReadCoordinatedStateAsync(borrow, cancellationToken);
+            return Assert.Single(PersistedStoreStateGraphVerifier.Verify(state).ActiveGraphs);
+        }
+        finally
+        {
+            borrow.Dispose();
+        }
+    }
+
+    private static bool HasSameSelectedGraphProjection(
+        ProtectedGraphSnapshot candidate,
+        ProtectedGraphSnapshot authoritative)
+    {
+        if (candidate.Roots.Count != authoritative.Roots.Count ||
+            !candidate.Roots.ToHashSet().SetEquals(authoritative.Roots))
+            return false;
+
+        var candidateNodes = candidate.Nodes.ToDictionary(static node => node.NodeId, static node => node.Install);
+        var authoritativeNodes = authoritative.Nodes.ToDictionary(static node => node.NodeId, static node => node.Install);
+        var candidateSelections = candidate.RequestedRoots
+            .Select(root => (root.Request, SelectedInstall: candidateNodes[root.SelectedNodeId])).ToHashSet();
+        var authoritativeSelections = authoritative.RequestedRoots
+            .Select(root => (root.Request, SelectedInstall: authoritativeNodes[root.SelectedNodeId])).ToHashSet();
+        if (candidateSelections.Count != authoritativeSelections.Count ||
+            !candidateSelections.SetEquals(authoritativeSelections))
+            return false;
+
+        var candidateInstalls = candidateNodes.Values.ToHashSet();
+        var authoritativeInstalls = authoritativeNodes.Values.ToHashSet();
+        if (candidateInstalls.Count != authoritativeInstalls.Count ||
+            !candidateInstalls.SetEquals(authoritativeInstalls))
+            return false;
+
+        var candidateEdges = candidate.Edges.Select(edge => (
+            From: candidateNodes[edge.FromNodeId],
+            To: candidateNodes[edge.ToNodeId],
+            edge.RequestedPackageId,
+            edge.RequestedVersionRange,
+            edge.TargetFramework,
+            edge.IsOptional)).ToHashSet();
+        var authoritativeEdges = authoritative.Edges.Select(edge => (
+            From: authoritativeNodes[edge.FromNodeId],
+            To: authoritativeNodes[edge.ToNodeId],
+            edge.RequestedPackageId,
+            edge.RequestedVersionRange,
+            edge.TargetFramework,
+            edge.IsOptional)).ToHashSet();
+        return candidateEdges.Count == authoritativeEdges.Count && candidateEdges.SetEquals(authoritativeEdges);
+    }
+
+    private static string DescribeGraph(ProtectedGraphSnapshot graph)
+        => $"generation={graph.GenerationId};roots={string.Join(',', graph.Roots)};" +
+           $"requests={string.Join(',', graph.RequestedRoots.Select(static root => root.Request.Id))};" +
+           $"nodes={string.Join(',', graph.Nodes.Select(static node => $"{node.Install.PackageId}@{node.Install.Version}:{node.Install.RootRelativeInstallPath}"))}";
 
     private static Dictionary<string, NativeInstallEvidence> CaptureFixtureNativeEvidence(GraphUseFixture fixture)
     {
