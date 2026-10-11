@@ -55,6 +55,18 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
     {
         if (keepNewestInactiveVersionsPerPackage < 0)
             throw new ArgumentOutOfRangeException(nameof(keepNewestInactiveVersionsPerPackage));
+        return await RunUnderCatalogOwnershipAsync(rootLabel,
+            (owner, borrow, configuredRoot) => InspectUnderCatalogOwnershipAsync(owner, borrow, configuredRoot,
+                keepNewestInactiveVersionsPerPackage, cancellationToken), cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<TResult> RunUnderCatalogOwnershipAsync<TResult>(
+        string? rootLabel,
+        Func<RootMembershipRegistry.NativeCatalogOwner, RootMembershipRegistry.NativeCatalogOwnerBorrow,
+            TrustedPackageStoreRoot, Task<TResult>> action,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(action);
         cancellationToken.ThrowIfCancellationRequested();
 
         if (!_rootResolver.TryResolve(rootLabel, out var configuredRoot) || configuredRoot is null)
@@ -67,13 +79,12 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
         var owner = await _catalogRegistry.AcquireNativeCatalogOwnerAsync(_rootCatalog, cancellationToken)
             .ConfigureAwait(false);
         RootMembershipRegistry.NativeCatalogOwnerBorrow? borrow = null;
-        PackageStoreInspectionSnapshot? snapshot = null;
+        TResult result = default!;
         Exception? operationFailure = null;
         try
         {
             borrow = await owner.BorrowAsync(cancellationToken).ConfigureAwait(false);
-            snapshot = await InspectUnderCatalogOwnershipAsync(owner, borrow, configuredRoot,
-                keepNewestInactiveVersionsPerPackage, cancellationToken).ConfigureAwait(false);
+            result = await action(owner, borrow, configuredRoot).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -90,30 +101,33 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
         catch (Exception exception) { cleanupFailures.Add(exception); }
 
         if (operationFailure is not null && cleanupFailures.Count > 0)
-            throw new AggregateException("Selected-root inspection failed and catalog ownership cleanup also failed.",
+            throw new AggregateException("Selected-root operation failed and catalog ownership cleanup also failed.",
                 [operationFailure, .. cleanupFailures]);
         if (operationFailure is not null)
             ExceptionDispatchInfo.Capture(operationFailure).Throw();
         if (cleanupFailures.Count == 1)
             ExceptionDispatchInfo.Capture(cleanupFailures[0]).Throw();
         if (cleanupFailures.Count > 1)
-            throw new AggregateException("Catalog ownership cleanup failed after selected-root inspection.", cleanupFailures);
+            throw new AggregateException("Catalog ownership cleanup failed after the selected-root operation.", cleanupFailures);
 
-        return snapshot ?? throw new InvalidOperationException("Catalog inspection completed without a snapshot.");
+        return result;
     }
 
-    private async Task<PackageStoreInspectionSnapshot> InspectUnderCatalogOwnershipAsync(
+    internal async Task<PackageStoreInspectionSnapshot> InspectUnderCatalogOwnershipAsync(
         RootMembershipRegistry.NativeCatalogOwner owner,
         RootMembershipRegistry.NativeCatalogOwnerBorrow borrow,
         TrustedPackageStoreRoot configuredRoot,
         int? keepNewestInactiveVersionsPerPackage,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        RootMembershipRegistry.NativeCatalogOwnerBorrow.Operation? operation = null)
     {
+        if (operation is not null)
+            borrow.RequireOperation(operation, _catalogRegistry);
         var selectedRoot = owner.ResolveConfiguredRoot(borrow, configuredRoot);
         var retainedRoots = owner.SnapshotRetainedRoots();
         var verification = retainedRoots.Length == 0
             ? Array.Empty<NativeCatalogMemberVerification>()
-            : await _catalogRegistry.VerifyCatalogMemberProtectionAsync(borrow, cancellationToken)
+            : await VerifyAsync()
                 .ConfigureAwait(false);
 
         if (selectedRoot is null)
@@ -133,7 +147,7 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
             owner.RevalidateRetainedEvidence();
             if (verification.Count > 0)
             {
-                var peerReplay = await _catalogRegistry.VerifyCatalogMemberProtectionAsync(borrow, cancellationToken)
+                var peerReplay = await VerifyAsync()
                     .ConfigureAwait(false);
                 if (!NativeCatalogMemberVerificationComparer.Same(verification, peerReplay))
                     throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
@@ -204,7 +218,7 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
 
         cancellationToken.ThrowIfCancellationRequested();
         owner.RevalidateRetainedEvidence();
-        var replay = await _catalogRegistry.VerifyCatalogMemberProtectionAsync(borrow, cancellationToken)
+        var replay = await VerifyAsync()
             .ConfigureAwait(false);
         if (!NativeCatalogMemberVerificationComparer.Same(verification, replay))
             throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
@@ -223,6 +237,11 @@ internal sealed class PackageStoreInspectionService : IPackageStoreInspectionSer
             retentionPlan,
             uses,
             staleUses ? [PackageStoreInspectionDiagnostic.StaleGraphUseRequiresRecovery] : []);
+
+        Task<IReadOnlyList<NativeCatalogMemberVerification>> VerifyAsync()
+            => operation is null
+                ? _catalogRegistry.VerifyCatalogMemberProtectionAsync(borrow, cancellationToken)
+                : _catalogRegistry.VerifyCatalogMemberProtectionUnderOperationAsync(borrow, operation, cancellationToken);
     }
 
     private static void ValidateCompleteBoundary(

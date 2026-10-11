@@ -120,3 +120,8 @@ This companion has no registration or public Execute caller. The executor must l
 ### Quarantine and recovery implementation contract (2026-10-11)
 
 [Exact quarantine and recovery](contracts/quarantine-recovery.md) records the source-grounded T106–T113/T118 engineering contract. A full bounded exact-entry manifest is durable in Prepared before the first quarantine move; every later phase retains it. Marker-last deletion and exact surviving-subset checks preserve partial facts while fresh complete owner/planner admission decides every resume. Detached journal data is never mutation authority. This contract supersedes the earlier count-only recovery draft; implementation and native/process qualification remain required. No public activation or new owner-policy choice is introduced.
+
+
+### Internal fresh execution planning
+
+The [bounded planning increment](evidence/fresh-execution-planning.md) factors inspection ownership/cleanup and projection for internal execution reuse. An exact operation token spans full-catalog verification, graph-use inventory, native install inventory, fresh retention planning, replay and the awaited candidate callback. It requires current enrollment/epoch and explicit retention, and refuses uncertain plans before candidate work. Ordinary inspection preserves its wrapper semantics. This boundary has no public caller or deletion implementation; exact Eligible-row/native binding and the verified quarantine-journal/inventory join remain required before recursive execution or recovery acceptance.
