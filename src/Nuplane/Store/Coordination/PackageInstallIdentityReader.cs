@@ -440,6 +440,7 @@ internal sealed class PackageInstallIdentityReader
                 var observed = ObserveCanonicalDeletionLocationLocked();
                 RequireSameDeletionLocation(expectedLocation, observed);
                 RevalidateLocked();
+                RequireCanonicalCompletionMarker();
                 _completionMarker.Dispose();
                 _installDirectory.Dispose();
                 _preparedForMove = true;
@@ -602,6 +603,7 @@ internal sealed class PackageInstallIdentityReader
             if (parentInfo.Kind != PhysicalStoreEntryKind.Directory || parentInfo.Identity != _edges[^1].ParentIdentity)
                 throw Unknown("The exact package parent changed during canonical name observation.", _expectedRoot);
             RequireSameSemantics(parent, _edges[^1].ParentSemantics);
+            RequireCanonicalCompletionMarker();
             return new PackageInstallDeletionLocation(
                 _root,
                 _rootIdentity,
@@ -626,6 +628,21 @@ internal sealed class PackageInstallIdentityReader
                 canonical.Semantics != edge.ParentSemantics || canonical.FileIdentity != edge.ChildIdentity)
             {
                 throw Unknown("An install path component is not the exact canonical native directory entry.", _expectedRoot);
+            }
+        }
+
+        private void RequireCanonicalCompletionMarker()
+        {
+            var canonical = _names.ObserveCanonicalFileNameNoFollow(
+                _installDirectory,
+                PackageInstallStore.CompletionMarkerFileName,
+                _completionMarkerIdentity);
+            if (canonical.Basename != PackageInstallStore.CompletionMarkerFileName ||
+                canonical.ParentIdentity != _installDirectoryIdentity ||
+                canonical.FileIdentity != _completionMarkerIdentity ||
+                canonical.Semantics != _installDirectorySemantics)
+            {
+                throw Unknown("The completion marker is not the exact canonical native file entry.", _expectedRoot);
             }
         }
 

@@ -263,6 +263,63 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
         AssertExecutionLocksReleased(fixture.Context);
     }
 
+    [LinuxExt4CasefoldFact]
+    public async Task ExecutionBinding_RefusesCompletionMarkerAliasAfterBindingAndBeforeLeafClosure()
+    {
+        using var fixture = await ExecutionFixture.CreateAsync(context =>
+        {
+            var installPath = Path.Combine(context.RootAPath, "feed", "inactive", "1.0.0");
+            Directory.CreateDirectory(installPath);
+            UnixPhysicalStoreIdentityTests.EnableExt4Casefold(installPath);
+            File.WriteAllBytes(Path.Combine(installPath, PackageInstallStore.CompletionMarkerFileName), []);
+            return Task.FromResult(Array.Empty<string>());
+        }, withCrossRootGraph: false);
+        var installPath = Path.Combine(fixture.Context.RootAPath, "feed", "inactive", "1.0.0");
+        var markerName = PackageInstallStore.CompletionMarkerFileName;
+        var temporaryName = markerName + ".renaming";
+        var aliasName = markerName.ToUpperInvariant();
+
+        await fixture.Service.PlanAndRunAsync("root-0", 1, 0, (scope, token) =>
+        {
+            var row = Assert.Single(scope.Snapshot.RetentionPlan!.Entries,
+                entry => entry.Install.PackageId == "inactive");
+            var candidate = scope.BindEligibleCandidate(row, token);
+            Assert.Equal("linux-ext4-casefold-v1", candidate.Manifest.InstallDirectorySemantics.ProfileId);
+            var marker = Assert.Single(candidate.Manifest.Entries,
+                entry => entry.RelativeComponents.Length == 1 && entry.RelativeComponents[0] == markerName);
+
+            File.Move(Path.Combine(installPath, markerName), Path.Combine(installPath, temporaryName));
+            File.Move(Path.Combine(installPath, temporaryName), Path.Combine(installPath, aliasName));
+
+            var files = fixture.Context.Files;
+            using var feed = files.OpenDirectoryChildNoFollow(scope.RootHandle, "feed");
+            using var package = files.OpenDirectoryChildNoFollow(feed, "inactive");
+            using var install = files.OpenDirectoryChildNoFollow(package, "1.0.0");
+            var requested = Assert.IsType<PhysicalStoreEntryInfo>(files.InspectChildNoFollow(install, markerName));
+            var alias = Assert.IsType<PhysicalStoreEntryInfo>(files.InspectChildNoFollow(install, aliasName));
+            var canonical = Assert.IsAssignableFrom<IPhysicalStoreNameFileSystem>(files)
+                .ObserveCanonicalFileNameNoFollow(install, markerName, marker.Identity);
+            Assert.Equal(marker.Identity, requested.Identity);
+            Assert.Equal(marker.Identity, alias.Identity);
+            Assert.Equal(aliasName, canonical.Basename);
+            Assert.Equal(0, requested.Length);
+
+            var revalidate = Assert.Throws<PackageStoreAdmissionException>(() => candidate.Revalidate(token));
+            Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, revalidate.Reason);
+            var prepare = Assert.Throws<PackageStoreAdmissionException>(() => candidate.PrepareForMove(token));
+            Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, prepare.Reason);
+
+            var remains = Assert.IsType<PhysicalStoreEntryInfo>(files.InspectChildNoFollow(install, aliasName));
+            Assert.Equal(marker.Identity, remains.Identity);
+            Assert.Equal(0, remains.Length);
+            return Task.FromResult(true);
+        });
+
+        Assert.True(File.Exists(Path.Combine(installPath, aliasName)));
+        Assert.Equal(aliasName, Path.GetFileName(Assert.Single(Directory.EnumerateFileSystemEntries(installPath))));
+        AssertExecutionLocksReleased(fixture.Context);
+    }
+
     [SupportedPhysicalStoreFact]
     public async Task ExecutionBinding_FreshProtectionRetainsEarlierPreviewCandidate()
     {

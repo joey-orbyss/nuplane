@@ -122,8 +122,9 @@ internal sealed class PackageStoreDeletionCandidate : IDisposable
         EnsureLive(cancellationToken);
         if (_preparedForMove)
             _observation.RevalidateDeletionParent();
-        else
-            _observation.Revalidate();
+        else if (_observation.ObserveCanonicalDeletionLocation() != _location)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnknownAuthority,
+                "The deletion candidate's canonical install location changed.", InstallIdentity.Root);
     }
 
     /// <summary>Closes the install leaf and marker, retaining a revalidatable exact package-parent binding.</summary>
