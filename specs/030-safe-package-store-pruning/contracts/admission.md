@@ -6,6 +6,8 @@ Names below are the selected public contract shapes; implementation must supply 
 
 Ordinary Nuplane retains its existing compatibility. Coordinated enrollment and pruning require verified native filesystem capabilities and participation by every client sharing the store, including clients that do not enable maintenance locally. The operator establishes that participation during the quiescent cutover; runtime cannot discover arbitrary legacy or external users. Unsupported native observation never proves that a root or state slot is unenrolled, and a participating client cannot silently fall back to an unguarded write. See the [maintainer's compatibility decision](../evidence/pruning-support-policy.md) for implementation and acceptance limits.
 
+Use one explicit immutable composition boundary: ordinary hosts default to legacy, uncoordinated behavior; coordinated participants opt in with the complete operator-declared roster and exact member/root bindings. A root locator or local maintenance flag does not select participation. Legacy behavior does not require a successful native probe and must not be represented as verified Unenrolled. Within participant mode every refusal remains fail-closed, with no retry through legacy readers, installers or state writers. Participation and public routing remain implementation gates.
+
 ## Core capability surface
 
 | Contract | Operation / ownership |
@@ -38,28 +40,30 @@ Short ownership covers transient resolve/install/metadata work before a graph is
 
 ## Driver obligations
 
-Every row receives its own implementation task and meaningful before-read proof. Passing one row's tests does not accept another.
+These obligations apply to coordinated participants. Ordinary legacy operations retain their released behavior and cannot supply enrollment or pruning evidence. Every row requires meaningful before-read proof; passing one row's tests does not accept another.
 
 | Driver | Required boundary |
 |---|---|
 | ReconciliationService.TriggerAsync | Root admission before per-state lock, disk refresh, local feed scan/contributor/resolver. Store owner on ReconciliationCycleContext explicitly; keep through awaited callbacks. |
 | PackageResolutionMiddleware / MultiFeedPackageResolver | Consume explicit borrow; propagate through cache probes, local metadata/hash and remote acquisition; no recursive admission. |
-| NuGetRemotePackageAcquirer / PackageInstallStore | Verify scoped root before completion/hash probes, staging/extraction/publication; no completion-marker or trust-policy bypass. Existing unscoped static calls deny Enrolled/Unknown. |
+| NuGetRemotePackageAcquirer / PackageInstallStore | Verify scoped root before completion/hash probes, staging/extraction/publication; no completion-marker or trust-policy bypass. Participant drivers must use scoped forms and cannot retry through legacy calls. |
 | Desired-state contributors / activation participants | Scope-aware companion or explicit path independence; selected graph lease before loading advisors and gates. |
 | CleanupMiddleware / StoreRegistry | Atomically commit active/LKG/protection and root pending/ack transition under existing owner; preserve new property in every copy/serializer. |
 | ObserverEventDispatcher | Pass exact owner to every awaited scoped observer, reject unsupported participants; finish/drain before owner close. |
 | LastKnownGoodStartupRecoveryService | Root before state; recover complete exact LKG snapshot and lease before callback/metadata/load; unknown fallback denied. |
 | PackageAutoLoadingObserver / PackageLoadModeSelector | Lease published before first metadata advisor/gate/candidate scan; transfer release owner into actual Loading lifetime. |
 | PackageLoader / PackageGraphLoadContext | Protect complete graph including partial failures and lazy managed/native loads; weak death or noncollectible process exit controls release. |
-| NuplanePackageMetadataReader / PackageContent | Physical metadata-only authority probe for legacy path calls; scoped reader validates capabilities and uses no-follow admitted core. |
-| NuplaneRestore / RestoreComposition | Standalone admission before resolve/install/metadata; ordinary Unenrolled use stays compatible. |
+| NuplanePackageMetadataReader / PackageContent | Scoped reader validates capabilities and uses no-follow admitted core. Released legacy public signatures retain ordinary compatibility outside participation. |
+| NuplaneRestore / RestoreComposition | Participant admission before resolve/install/metadata; ordinary legacy use stays compatible without mandatory native admission. |
 | Direct loading catalogs/scanners | Independent admission or valid explicit owner/lease before directory/content enumeration; no assumption observer initiated them. |
 | NuplaneStore | Pure state/descriptor reads remain observational. New OpenActivePackageSnapshotAsync reads descriptors, acquires sorted roots, rereads stable state and validates membership before exposing admitted snapshot. Raw paths are not leases. |
-| NuplaneHostIntegratedLoader | New scoped snapshot/path-admission overloads protect every graph before load and retain noncollectible leases until process exit. Legacy overloads classify the complete request and refuse Enrolled/Unknown before any partial load. |
+| NuplaneHostIntegratedLoader | Scoped snapshot/path-admission overloads protect every graph before load and retain noncollectible leases until process exit. Participating compositions require these forms; legacy loading remains outside coordinated protection. |
 
 ## Static reader compatibility
 
-Keep existing two-argument `PackageContent.TryReadFile` / `TryFindByExtension`: return null on Enrolled/Unknown before payload I/O. Preserve support for extracted directories and `.nupkg` archives. Authority discovery traverses original path components using metadata-only held handles, records any enrolled ancestor before an alias, and refuses an enrolled-to-outside/different-authority transition as Unknown. A resolved target/parent walk alone is not enough. Validated configured-root aliases converging to the same physical identity are supported; final install/member/content links are refused. For an archive, validate its physical parent and final file without following links; hardlink ambiguity is Unknown, and no archive payload opens before admission. Missing or ambiguous targets are Unknown. Add overloads accepting either a live operation borrow or a graph-lease view. Scoped overloads return null for ordinary missing content and throw typed admission refusal for invalid scope/authority. Validate a relative member path and open relative to verified handles; no arbitrary traversal.
+Keep existing two-argument `PackageContent.TryReadFile` / `TryFindByExtension` signatures and their ordinary extracted-directory/archive capability without requiring native admission. Likewise preserve ordinary `NuplanePackageMetadataReader.Read` behavior in the default legacy composition. Nuplane0.0.11 is the released compatibility baseline; the guarded unscoped implementation in this unfinished work unit is not a reason to require a newly named legacy API. These legacy calls do not enroll the caller or prove an unenrolled store and are outside coordinated protection. Participating application and built-in driver code must use explicit protected forms.
+
+Protected authority discovery traverses original path components using metadata-only held handles, records any enrolled ancestor before an alias, and refuses an enrolled-to-outside/different-authority transition as Unknown. A resolved target/parent walk alone is not enough. Validated configured-root aliases converging to the same physical identity are supported; final install/member/content links are refused. For an archive, validate its physical parent and final file without following links; hardlink ambiguity is Unknown, and no archive payload opens before admission. Missing or ambiguous targets are Unknown. Overloads accepting either a live operation borrow or a graph-lease view return null for ordinary missing content and throw typed admission refusal for invalid scope/authority. Validate a relative member path and open relative to verified handles; no arbitrary traversal or fallback to legacy reads.
 
 Keep `NuplanePackageMetadataReadResult`'s four-field constructor/deconstruction. Add an init-only refusal discriminator/factory; do not relabel refusal as Missing. `NuplaneStore` state observation is not a package scan and may run without root ownership. Loading from its result is a separate admitted operation.
 
