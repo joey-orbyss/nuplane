@@ -12,7 +12,8 @@ namespace Nuplane.Store.Coordination;
 /// <remarks>
 /// The initial provider boundary is Windows x64 on local NTFS volumes. Child operations use one exact component
 /// relative to an already held directory handle. Separate publication companions handle single control files
-/// and prepared directories; the provider does not delete package trees or reopen remembered absolute paths.
+/// and prepared directories. A separate deletion companion removes only exact regular files and empty
+/// directories; it grants no maintenance authority, walks no package tree and reopens no remembered absolute path.
 /// </remarks>
 internal sealed partial class WindowsPhysicalStoreFileSystem : IPhysicalStoreFileSystem, IPhysicalStoreNameFileSystem, IPhysicalStoreDirectoryCandidateProbeFileSystem
 {

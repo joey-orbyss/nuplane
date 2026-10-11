@@ -1,4 +1,5 @@
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Store.Coordination.PhysicalFiles;
 using Nuplane.Store.Coordination.PhysicalFiles.Unix;
 
 namespace Nuplane.Store.Coordination;
@@ -38,14 +39,14 @@ internal sealed partial class UnixPhysicalStoreFileSystem : IPhysicalStoreDeleti
             expectedIdentity);
 
         PhysicalStoreDeletionChecks.RevalidateDirectoryRemoval(this, this, parent, singleName, prepared);
-        RequireNameProfile(platform, parentFd, prepared.Semantics, "coordinated namespace mutation");
+        RequirePublicationNameProfile(platform, parentFd, prepared.Semantics, "coordinated namespace mutation");
         PhysicalStorePublicationChecks.RequireParent(this, parent, prepared.ParentIdentity);
 
         InvokeNative(
             "remove an exactly identified empty directory",
             () => UnixNative.UnlinkEmptyDirectoryAt(platform, parentFd, singleName));
 
-        RequireNameProfile(platform, parentFd, prepared.Semantics, "coordinated namespace mutation");
+        RequirePublicationNameProfile(platform, parentFd, prepared.Semantics, "coordinated namespace mutation");
         PhysicalStoreDeletionChecks.VerifyRemoved(this, this, parent, singleName, prepared);
     }
 }

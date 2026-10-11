@@ -30,7 +30,7 @@ internal sealed partial class UnixPhysicalStoreFileSystem : IPhysicalStorePublic
             expectedStagedIdentity,
             destinationName,
             expectedDestinationIdentity);
-        RequireNameProfile(platform, parentFd, prepared.Semantics);
+        RequirePublicationNameProfile(platform, parentFd, prepared.Semantics);
         PhysicalStorePublicationChecks.RequireParent(this, parent, prepared.ParentIdentity);
 
         // Repeat identity/type/link checks immediately before the namespace transition. The
@@ -42,7 +42,7 @@ internal sealed partial class UnixPhysicalStoreFileSystem : IPhysicalStorePublic
         PhysicalStorePublicationChecks.RequireExpectedEntry(
             InspectChildNoFollow(parent, destinationName),
             expectedDestinationIdentity);
-        RequireNameProfile(platform, parentFd, prepared.Semantics);
+        RequirePublicationNameProfile(platform, parentFd, prepared.Semantics);
 
         InvokeNative(
             expectedDestinationIdentity is null ? "atomically publish a new control file" : "atomically replace a control file",
@@ -50,7 +50,7 @@ internal sealed partial class UnixPhysicalStoreFileSystem : IPhysicalStorePublic
                 ? UnixNative.PublishNoReplaceAt(platform, parentFd, stagedName, destinationName)
                 : UnixNative.PublishReplaceAt(platform, parentFd, stagedName, destinationName));
 
-        RequireNameProfile(platform, parentFd, prepared.Semantics);
+        RequirePublicationNameProfile(platform, parentFd, prepared.Semantics);
         return PhysicalStorePublicationChecks.VerifyPublished(
             this,
             this,
@@ -96,7 +96,7 @@ internal sealed partial class UnixPhysicalStoreFileSystem : IPhysicalStorePublic
             PhysicalStoreDeletionChecks.RequireSameVolume(prepared.ParentIdentity, prepared.FileIdentity);
 
         var profileOperation = requireSameVolume ? "coordinated namespace mutation" : "publication";
-        RequireNameProfile(platform, parentFd, prepared.Semantics, profileOperation);
+        RequirePublicationNameProfile(platform, parentFd, prepared.Semantics, profileOperation);
         PhysicalStorePublicationChecks.RequireParent(this, parent, prepared.ParentIdentity);
 
         // Removal is limited to the exact regular single-link artifact observed above. The
@@ -104,20 +104,20 @@ internal sealed partial class UnixPhysicalStoreFileSystem : IPhysicalStorePublic
         PhysicalStorePublicationChecks.RequireExpectedEntry(
             InspectChildNoFollow(parent, singleName),
             expectedIdentity);
-        RequireNameProfile(platform, parentFd, prepared.Semantics, profileOperation);
+        RequirePublicationNameProfile(platform, parentFd, prepared.Semantics, profileOperation);
 
         InvokeNative(
             $"remove an exactly identified {objectDescription}",
             () => UnixNative.UnlinkFileAt(platform, parentFd, singleName, $"a held-parent {objectDescription}"));
 
-        RequireNameProfile(platform, parentFd, prepared.Semantics, profileOperation);
+        RequirePublicationNameProfile(platform, parentFd, prepared.Semantics, profileOperation);
         if (requireSameVolume)
             PhysicalStoreDeletionChecks.VerifyRemoved(this, this, parent, singleName, prepared);
         else
             PhysicalStorePublicationChecks.VerifyRemoved(this, parent, singleName, prepared);
     }
 
-    private static void RequireNameProfile(
+    private static void RequirePublicationNameProfile(
         UnixPlatform platform,
         int parentFd,
         PhysicalStoreNameSemantics expected,

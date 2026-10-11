@@ -10,7 +10,8 @@ namespace Nuplane.Store.Coordination;
 /// <summary>Performs bounded no-follow metadata, control-file, and prepared-directory operations on supported Unix systems.</summary>
 /// <remarks>
 /// The adapter intentionally supports only Darwin x64/arm64 and Linux x64/arm64. It does not resolve arbitrary
-/// paths or delete package content.
+/// paths. A separate deletion companion removes only exact regular files and empty directories; it
+/// grants no maintenance authority and performs no recursive package-tree walk.
 /// All child operations are relative to handles created by
 /// this provider, and all native calls use a scoped SafeHandle reference. Publication companions provide
 /// single-file state updates and same-parent no-replace moves of verified prepared directories.

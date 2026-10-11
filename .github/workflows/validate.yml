@@ -43,7 +43,7 @@ jobs:
   state-persistence-platform:
     name: State persistence (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: ${{ (matrix.os == 'windows-latest' || matrix.os == 'macos-15-intel') && 30 || 20 }}
+    timeout-minutes: ${{ matrix.os == 'macos-15-intel' && 45 || matrix.os == 'windows-latest' && 30 || 20 }}
     strategy:
       fail-fast: false
       matrix:
@@ -1169,6 +1169,19 @@ jobs:
             --logger "trx;LogFileName=state-slot-write-guard.trx" \
             --results-directory "$RUNNER_TEMP/state-slot-write-guard"
           python3 build/verify-required-trx.py "$RUNNER_TEMP/state-slot-write-guard/state-slot-write-guard.trx" "$manifest"
+
+      - name: Qualify exact native file and empty-directory removal
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet test test/Nuplane.Store.Tests/Nuplane.Store.Tests.csproj \
+            --configuration Release --framework net10.0 \
+            --filter "FullyQualifiedName~PhysicalStoreDeletionTests" \
+            --blame-hang-timeout 3m \
+            --logger "trx;LogFileName=native-entry-removal.trx" \
+            --results-directory "$RUNNER_TEMP/native-entry-removal"
+          python3 build/verify-required-trx.py "$RUNNER_TEMP/native-entry-removal/native-entry-removal.trx" \
+            build/test-cases/native-entry-removal.json
 
       - name: Qualify ext4 casefold aliases on an owned loopback filesystem
         if: startsWith(matrix.os, 'ubuntu-')

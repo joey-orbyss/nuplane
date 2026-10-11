@@ -64,12 +64,21 @@ internal static partial class WindowsNative
     }
 
     internal static void RemoveControlFile(IntPtr file)
+        => RemoveEntry(file, "remove a transaction-control file");
+
+    internal static void RemoveRegularFile(IntPtr file)
+        => RemoveEntry(file, "remove an exact regular file");
+
+    internal static void RemoveEmptyDirectory(IntPtr directory)
+        => RemoveEntry(directory, "remove an empty directory");
+
+    private static void RemoveEntry(IntPtr entry, string operation)
     {
         var buffer = Marshal.AllocHGlobal(1);
         try
         {
             Marshal.WriteByte(buffer, 1); // FILE_DISPOSITION_INFORMATION.DeleteFile.
-            SetPublicationInformation(file, buffer, 1, informationClass: 13, "remove a transaction-control file");
+            SetPublicationInformation(entry, buffer, 1, informationClass: 13, operation);
         }
         finally
         {

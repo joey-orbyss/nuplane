@@ -70,6 +70,12 @@ internal sealed partial class WindowsPhysicalStoreFileSystem : IPhysicalStorePub
         PhysicalStoreDirectoryHandle parent,
         string singleName,
         PhysicalFileIdentity expectedIdentity)
+        => RemoveRegularFileAtCore(parent, singleName, expectedIdentity);
+
+    private void RemoveRegularFileAtCore(
+        PhysicalStoreDirectoryHandle parent,
+        string singleName,
+        PhysicalFileIdentity expectedIdentity)
     {
         RequireSupportedPlatform();
         ArgumentNullException.ThrowIfNull(parent);
@@ -85,7 +91,7 @@ internal sealed partial class WindowsPhysicalStoreFileSystem : IPhysicalStorePub
                     QueryEntry(file.DangerousGetHandle(), "inspect the transaction-control removal handle"), expectedIdentity);
                 RecheckPublicationEntry(parentRaw, singleName, expectedIdentity);
                 RequirePublicationParent(parent, parentRaw, prepared);
-                WindowsNative.RemoveControlFile(file.DangerousGetHandle());
+                WindowsNative.RemoveRegularFile(file.DangerousGetHandle());
             }
 
             // A successful disposition is not reported as removal until close and positive absence.
