@@ -173,7 +173,7 @@ public sealed class WindowsPhysicalStoreIdentityTests
         }
     }
 
-    private static string GetShortPathName(string path)
+    internal static string GetShortPathName(string path)
     {
         var buffer = new StringBuilder(32768);
         var length = GetShortPathNameW(path, buffer, checked((uint)buffer.Capacity));
@@ -206,7 +206,7 @@ public sealed class WindowsPhysicalStoreIdentityTests
         }
     }
 
-    private static void SetDirectoryCaseSensitive(string path)
+    internal static void SetDirectoryCaseSensitive(string path)
     {
         using var handle = CreateFileW(
             path,

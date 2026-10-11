@@ -213,7 +213,7 @@ public sealed class WindowsPhysicalStoreFileSystemTests
         }
     }
 
-    private static void CreateJunction(string junctionPath, string targetPath)
+    internal static void CreateJunction(string junctionPath, string targetPath)
     {
         Directory.CreateDirectory(junctionPath);
         using var handle = CreateFileW(

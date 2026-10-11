@@ -244,7 +244,7 @@ public sealed class WindowsPhysicalStorePublicationTests
         return context.FileSystem.InspectHandle(file).Identity;
     }
 
-    private static void CreateHardLink(string existingPath, string newPath)
+    internal static void CreateHardLink(string existingPath, string newPath)
     {
         if (!CreateHardLinkW(newPath, existingPath, IntPtr.Zero))
             throw new IOException($"The owned hard-link fixture could not be created (native error {Marshal.GetLastPInvokeError()}).");
