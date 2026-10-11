@@ -870,6 +870,7 @@ public sealed partial class PackageStoreAuthorityResolverTests
         private string? _orderedLinkName;
 
         internal int PackagePayloadReadCount { get; private set; }
+        internal int FileOpenCount { get; private set; }
         internal int CreateCount { get; private set; }
         internal int WriteCount { get; private set; }
         internal int LockAttemptCount { get; private set; }
@@ -897,6 +898,7 @@ public sealed partial class PackageStoreAuthorityResolverTests
             _openedHandles.Clear();
             _events.Clear();
             PackagePayloadReadCount = 0;
+            FileOpenCount = 0;
             CreateCount = 0;
             WriteCount = 0;
             LockAttemptCount = 0;
@@ -944,7 +946,10 @@ public sealed partial class PackageStoreAuthorityResolverTests
         }
 
         public PhysicalStoreFileHandle OpenFileChildNoFollow(PhysicalStoreDirectoryHandle parent, string singleName, FileAccess access)
-            => Track(inner.OpenFileChildNoFollow(parent, singleName, access));
+        {
+            FileOpenCount++;
+            return Track(inner.OpenFileChildNoFollow(parent, singleName, access));
+        }
 
         public string ReadLinkTargetNoFollow(PhysicalStoreDirectoryHandle parent, string singleName, PhysicalFileIdentity expectedLinkIdentity)
         {

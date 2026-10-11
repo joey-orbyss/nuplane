@@ -163,6 +163,129 @@ internal sealed class PackageStoreAuthorityResolver
         }
     }
 
+    /// <summary>Resolves state-payload referents as retained no-follow metadata without opening payload files.</summary>
+    /// <remarks>
+    /// This descriptive result follows final symbolic links using the same bounded component walker as other
+    /// authority resolutions. It retains ancestry, authority, and alias evidence, but deliberately does not pin a
+    /// replaceable regular-file identity. Callers must perform the final leaf check under their selected slot guards.
+    /// </remarks>
+    internal ResolvedStatePayloadReferent ResolveStatePayloadReferentMetadata(
+        string exactAbsoluteStatePath,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(exactAbsoluteStatePath);
+        cancellationToken.ThrowIfCancellationRequested();
+        var path = ParseRequest(exactAbsoluteStatePath, exactBaseLocator: null);
+        if (path.Anchor is null || path.Components.Length == 0)
+            throw Unknown("A state-payload path must be fully qualified and name a final file slot.");
+
+        var capture = new StatePayloadResolutionCapture();
+        ResolvedPackageStorePath? resolution = null;
+        ResolvedStatePayloadReferent? result = null;
+        try
+        {
+            resolution = ResolveParsed(path, PhysicalStorePathTarget.ConfiguredRootDirectory,
+                requiredRoot: null, memberLocatorScope: null, cancellationToken: cancellationToken,
+                statePayloadCapture: capture);
+            cancellationToken.ThrowIfCancellationRequested();
+            var payloadSlot = capture.FinalPayloadSlot;
+            if (payloadSlot is null || resolution.Target is not PhysicalStoreDirectoryHandle)
+            {
+                throw Unknown("The state-payload path does not end at a regular file or one positively absent file slot.",
+                    resolution.RootIdentity);
+            }
+
+            result = new ResolvedStatePayloadReferent(
+                resolution,
+                capture.TerminalLinkSlots,
+                payloadSlot,
+                RevalidateAbsentStatePayloadSlot);
+            resolution = null;
+            result.Revalidate(cancellationToken);
+            var transferred = result;
+            result = null;
+            return transferred;
+        }
+        catch (Exception primaryFailure)
+        {
+            try
+            {
+                if (result is not null)
+                    result.Dispose();
+                else
+                    resolution?.Dispose();
+            }
+            catch (Exception cleanupFailure)
+            {
+                throw new AggregateException(
+                    "State-payload metadata resolution failed and retained path evidence could not be fully released.",
+                    primaryFailure,
+                    cleanupFailure);
+            }
+
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+            throw;
+        }
+    }
+
+    private void RevalidateAbsentStatePayloadSlot(StatePayloadSlotMetadata slot)
+    {
+        if (slot.Entry is not null)
+            return;
+
+        var parentBefore = _files.InspectHandle(slot.Parent);
+        var semanticsBefore = _names.ObserveDirectoryNameSemantics(slot.Parent);
+        var first = _files.InspectChildNoFollow(slot.Parent, slot.Name);
+        var second = _files.InspectChildNoFollow(slot.Parent, slot.Name);
+        var parentAfter = _files.InspectHandle(slot.Parent);
+        var semanticsAfter = _names.ObserveDirectoryNameSemantics(slot.Parent);
+        if (parentBefore.Kind != PhysicalStoreEntryKind.Directory ||
+            parentAfter.Kind != PhysicalStoreEntryKind.Directory ||
+            parentBefore.Identity != slot.ParentIdentity || parentAfter.Identity != slot.ParentIdentity ||
+            semanticsBefore != slot.NameSemantics || semanticsAfter != slot.NameSemantics ||
+            first is not null || second is not null)
+        {
+            throw Unknown("The positively absent state-payload slot changed after metadata resolution.");
+        }
+    }
+
+    private StatePayloadSlotMetadata CaptureStatePayloadSlot(
+        PhysicalStoreDirectoryHandle parent,
+        string name,
+        PhysicalStoreEntryInfo? expectedEntry,
+        string? linkTargetText)
+    {
+        var before = _files.InspectHandle(parent);
+        if (before.Kind != PhysicalStoreEntryKind.Directory)
+            throw Unknown("A state-payload slot has no held directory parent.");
+        var semantics = _names.ObserveDirectoryNameSemantics(parent);
+        var first = _files.InspectChildNoFollow(parent, name);
+        var afterFirst = _files.InspectHandle(parent);
+        var second = _files.InspectChildNoFollow(parent, name);
+        var after = _files.InspectHandle(parent);
+        var semanticsAfter = _names.ObserveDirectoryNameSemantics(parent);
+        if (before.Identity != afterFirst.Identity || before.Identity != after.Identity ||
+            afterFirst.Kind != PhysicalStoreEntryKind.Directory || after.Kind != PhysicalStoreEntryKind.Directory ||
+            semanticsAfter != semantics || !SameEntryObservation(first, expectedEntry) ||
+            !SameEntryObservation(second, expectedEntry))
+        {
+            throw Unknown("A state-payload slot or its native parent profile changed during metadata observation.");
+        }
+
+        if (expectedEntry?.Kind == PhysicalStoreEntryKind.SymbolicLink && string.IsNullOrEmpty(linkTargetText))
+            throw Unknown("A state-payload symbolic-link slot has no captured target text.");
+        if (expectedEntry?.Kind != PhysicalStoreEntryKind.SymbolicLink && linkTargetText is not null)
+            throw new ArgumentException("Only a symbolic-link slot can carry target text.", nameof(linkTargetText));
+
+        return new StatePayloadSlotMetadata(parent, before.Identity, semantics, name, expectedEntry, linkTargetText);
+    }
+
+    private static bool SameEntryObservation(PhysicalStoreEntryInfo? left, PhysicalStoreEntryInfo? right)
+        => left is null
+            ? right is null
+            : right is not null && left.Kind == right.Kind && left.Identity == right.Identity &&
+              left.LinkCount == right.LinkCount && left.Length == right.Length && left.ReparseTag == right.ReparseTag;
+
     private PhysicalStoreDirectoryHandle RequireStateParent(ResolvedPackageStorePath resolution)
         => resolution.Target as PhysicalStoreDirectoryHandle
            ?? throw Unknown("A native state-slot path did not resolve to a held parent directory.");
@@ -385,7 +508,8 @@ internal sealed class PackageStoreAuthorityResolver
         bool allowStableMissingDirectoryRetry = false,
         bool allowCatalogCandidate = false,
         bool createMissingParentDirectories = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        StatePayloadResolutionCapture? statePayloadCapture = null)
     {
         if (!Enum.IsDefined(target))
             throw new ArgumentOutOfRangeException(nameof(target));
@@ -395,6 +519,13 @@ internal sealed class PackageStoreAuthorityResolver
              allowCatalogCandidate))
         {
             throw new ArgumentException("Missing-parent creation is available only to the isolated unscoped state-slot resolver.");
+        }
+        if (statePayloadCapture is not null &&
+            (target != PhysicalStorePathTarget.ConfiguredRootDirectory || requiredRoot is not null ||
+             memberLocatorScope is not null || retainedInstall is not null || allowStableMissingDirectoryRetry ||
+             allowCatalogCandidate || createMissingParentDirectories))
+        {
+            throw new ArgumentException("State-payload metadata resolution is available only to the isolated descriptive path resolver.");
         }
 
         memberLocatorScope?.EnsureActive();
@@ -457,6 +588,13 @@ internal sealed class PackageStoreAuthorityResolver
                 var entry = _files.InspectChildNoFollow(current, component);
                 if (entry is null)
                 {
+                    if (statePayloadCapture is not null && !HasMeaningfulRemainingComponents(frames))
+                    {
+                        statePayloadCapture.RecordPayloadSlot(CaptureStatePayloadSlot(
+                            current, component, expectedEntry: null, linkTargetText: null));
+                        continue;
+                    }
+
                     if (createMissingParentDirectories)
                     {
                         if (target != PhysicalStorePathTarget.ConfiguredRootDirectory ||
@@ -502,6 +640,12 @@ internal sealed class PackageStoreAuthorityResolver
                     }
 
                     var alias = state.ReadAlias(current, component, entry.Identity);
+                    if (terminalLink && statePayloadCapture is not null)
+                    {
+                        statePayloadCapture.RecordTerminalLink(CaptureStatePayloadSlot(
+                            current, component, entry, alias.Target));
+                    }
+
                     if (!state.ActiveAliases.Add(alias.Identity) || ++state.AliasExpansions > MaximumAliasExpansions)
                         throw Unknown("The configured path contains a symbolic-link cycle or exceeds the bounded expansion limit.", state.RootIdentity);
 
@@ -524,8 +668,19 @@ internal sealed class PackageStoreAuthorityResolver
                 }
 
                 var hasAnyRemaining = HasAnyRemainingComponents(frames);
+                if (statePayloadCapture is not null && entry.Kind == PhysicalStoreEntryKind.RegularFile &&
+                    !HasMeaningfulRemainingComponents(frames))
+                {
+                    statePayloadCapture.RecordPayloadSlot(CaptureStatePayloadSlot(
+                        current, component, entry, linkTargetText: null));
+                    continue;
+                }
+
                 if (entry.Kind == PhysicalStoreEntryKind.Directory)
                 {
+                    if (statePayloadCapture is not null && !HasMeaningfulRemainingComponents(frames))
+                        throw Unknown("A state-payload path cannot end at a directory.", state.RootIdentity);
+
                     var child = _files.OpenDirectoryChildNoFollow(current, component);
                     state.Track(child);
                     var opened = _files.InspectHandle(child);
@@ -928,6 +1083,26 @@ internal sealed class PackageStoreAuthorityResolver
         string Name,
         PhysicalFileIdentity Identity,
         string Target);
+
+    private sealed class StatePayloadResolutionCapture
+    {
+        private readonly List<StatePayloadSlotMetadata> _terminalLinkSlots = [];
+
+        internal IReadOnlyList<StatePayloadSlotMetadata> TerminalLinkSlots => _terminalLinkSlots;
+        internal StatePayloadSlotMetadata? FinalPayloadSlot { get; private set; }
+
+        internal void RecordTerminalLink(StatePayloadSlotMetadata slot)
+            => _terminalLinkSlots.Add(slot);
+
+        internal void RecordPayloadSlot(StatePayloadSlotMetadata slot)
+        {
+            if (FinalPayloadSlot is not null)
+                throw Unknown("The state-payload path resolved more than one final payload slot.");
+            if (slot.Entry is not null && slot.Entry.Kind != PhysicalStoreEntryKind.RegularFile)
+                throw Unknown("The state-payload referent is not a regular file.");
+            FinalPayloadSlot = slot;
+        }
+    }
 
     private sealed class ResolutionState(
         PackageStoreAuthorityResolver resolver,
