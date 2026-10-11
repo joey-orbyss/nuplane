@@ -1,6 +1,6 @@
 # Earliest-read and overlapping-generation protection proof
 
-Status: strengthened test integrated locally; focused and compiled negative-control checks pass their required outcomes. Restored full Integration passes all 241 cases without skips; exact-head native qualification remains pending.
+Status: T105 accepted at exact `ac70d64798255d6fca85d12b4781981688845dc5` after root and independent source, local-result and native-log review. [Validate 38153227809](https://github.com/valence-works/nuplane/actions/runs/38153227809) passed all seven jobs and five native lanes. Each native retained-Loading gate passed the exact 25-case manifest without skips, including both before-read and overlapping-generation tests. Full CI passed 2,396 cases with zero failures and 68 explicit platform skips; restored local Integration passed all 241 cases without skips.
 
 `MaintenanceInspection_OverlapsActualLoadingAndRetainsLiveOnlyOldGraph` now arms two existing native barriers in the same actual composition A reconciliation. At the first completion-marker open, it verifies the exact Root.First parent identity and ownership of one root and both member locks. A competing real Maintenance inspection refuses with root.lock busy before inventory. Captured native install identities and payload bytes remain unchanged.
 
@@ -10,4 +10,4 @@ Composition B then commits and loads a newer generation while A remains paused. 
 
 The two-test focused run passes without skips. Root's compiled negative control omits only the live-use contribution to retention protection: first-open contention still passes, while the strengthened overlap test fails at the old live-only install, Expected Retained / Actual Eligible. Production source is restored byte-for-byte (SHA-256 `0230701ce41dcf84435e50634ff8b52ad261d3f931e14ffc386f3a25cbb2e00d`). Independent source review found no actionable blocker.
 
-No production behavior or native manifest changes are introduced. The existing 25-case retained-Loading manifest already names both tests. This proof does not accept every T100/T101 driver, public maintenance/enrollment, schema-2 runtime activation or physical pruning. Recursive deletion remains unstarted pending accepted native qualification and evidence review of this required two-composition sequence.
+No production behavior or native manifest changes are introduced. The existing 25-case retained-Loading manifest already names both tests. This proof does not accept every T100/T101 driver, public maintenance/enrollment, schema-2 runtime activation or physical pruning. The required actual two-composition/before-read proof has passed and its evidence is reviewed. Recursive deletion remains unimplemented; its own admission, revalidation and deletion gates still apply.
