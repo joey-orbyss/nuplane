@@ -133,7 +133,7 @@ internal sealed class PackageStoreDeletionJournalStore
             VerifyPublishedInControl(heldRoot, expectedRoot, rootSemantics,
                 control, controlIdentity, controlSemantics, canonicalName, stagedName,
                 stagedIdentity, payload, journal);
-            return new PublishedJournal(journal, canonicalName, stagedName, stagedIdentity, payload, payload.Length,
+            return new PublishedJournal(journal, canonicalName, stagedName, stagedIdentity, payload,
                 rootSemantics, controlIdentity, controlSemantics);
         }
         catch (Exception publicationFailure)
@@ -143,7 +143,7 @@ internal sealed class PackageStoreDeletionJournalStore
                 VerifyPublishedInControl(heldRoot, expectedRoot, rootSemantics,
                     control, controlIdentity, controlSemantics, canonicalName, stagedName,
                     stagedIdentity, payload, journal);
-                return new PublishedJournal(journal, canonicalName, stagedName, stagedIdentity, payload, payload.Length,
+                return new PublishedJournal(journal, canonicalName, stagedName, stagedIdentity, payload,
                     rootSemantics, controlIdentity, controlSemantics);
             }
             catch (Exception publishedStateFailure)
@@ -593,7 +593,6 @@ internal sealed class PackageStoreDeletionJournalStore
         string StagedName,
         PhysicalFileIdentity FileIdentity,
         byte[] Payload,
-        long Length,
         PhysicalStoreNameSemantics RootSemantics,
         PhysicalFileIdentity ControlDirectoryIdentity,
         PhysicalStoreNameSemantics ControlDirectorySemantics);
