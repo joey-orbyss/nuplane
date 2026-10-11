@@ -1,6 +1,6 @@
 # Complete/v1 stale-use recovery at production admission
 
-Status: independently reviewed source and root-qualified local runtime evidence, 2026-10-11. Actual native qualification for this increment is pending. This does not accept full T115, T116, T117, pruning execution or release readiness. Checklist remains44/128; T104 was separately accepted at `046b8d0`.
+Status: T115 accepted at exact `4bb166efad5f3309d9a2a38db87fafd388844fb8`, 2026-10-11, after root and independent source/local/native audits. T116, T117, physical pruning and release readiness remain unaccepted. Checklist 45/128; T104 was separately accepted at `046b8d0`.
 
 ## Production behavior
 
@@ -34,4 +34,10 @@ Initial compilation caught a missing test import. Initial Store runs exposed mis
 
 ## Remaining acceptance
 
-Actual exact-head Windows/Linux/macOS x64/ARM64 qualification is still required. Full T114/T117 crash/read checkpoint coverage, T116 pending/incomplete/schema-2 integration, the unanswered public standalone-writer support contract and explicit maintenance/deletion application services remain separate requirements. No physical package deletion or public SaveAsync activation is implemented here. The original extraction, upstream releases and Foundation adoption remain independently shipped.
+Actual exact-head Windows/Linux/macOS x64/ARM64 qualification is accepted as recorded below. Full T114/T117 crash/read checkpoint coverage, T116 pending/incomplete/schema-2 integration, the unanswered public standalone-writer support contract and explicit maintenance/deletion application services remain separate requirements. No physical package deletion or public SaveAsync activation is implemented here. The original extraction, upstream releases and Foundation adoption remain independently shipped.
+
+## Exact-head native acceptance
+
+[Validate 38143776558](https://github.com/valence-works/nuplane/actions/runs/38143776558) completed successfully at `4bb166efad5f3309d9a2a38db87fafd388844fb8`: all seven jobs and all five native lanes (Windows x64, Linux x64/ARM64, macOS Intel/ARM64). Root and independent raw-log audits reconciled all 68 source pins. Every native lane passed strict retained Loading 25/25, graph-use recovery 26/26 and same-handle control recovery 11/11 without skips. The member/install verifier passed all 80 selected rows per lane, including four exact cleanup cases: Unix/macOS 77 passed plus three expected platform skips; Windows 76 passed plus four expected platform skips. Existing state-file, authority, writer, startup, catalog, restore and net8/net9/net10 serialization/group gates passed. Universal Darwin shim and Linux package asset verification passed.
+
+The actual full six-suite CI run totaled 2378 passed, zero failed, 68 explicit platform skips, 2446 total. Together with the restored-source local runtime/protection proof and compiled caller-omission control above, this accepts T115. The bounded stale-use admission claim is released. The separate Complete/schema-1 pending-publication caller tests are not included in this source snapshot; their own native qualification remains pending. No complete T114/T116/T117 or physical deletion acceptance is implied.
