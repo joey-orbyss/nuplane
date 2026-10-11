@@ -15,8 +15,8 @@ public sealed class UnixPhysicalStoreStateFileTests
     [SupportedUnixFact] public void Publish_SymlinkReplacesOnlyLexicalEntry() => PhysicalStoreStateFileTestCases.PublishSymlink(static () => UnixPhysicalStorePublicationTests.CreateContext());
     [SupportedUnixFact] public void Publish_RefusesWrongPriorAndOccupiedAbsentSlot() => PhysicalStoreStateFileTestCases.PublicationRefusals(static () => UnixPhysicalStorePublicationTests.CreateContext());
     [SupportedUnixFact] public Task LegacySave_HardlinkReplacesOnlySelectedEntry() => PhysicalStoreStateFileTestCases.LegacyHardlink(static () => UnixPhysicalStorePublicationTests.CreateContext(), UnixPhysicalStorePublicationTests.CreateHardLink);
-    [SupportedUnixFact] public Task LegacySave_DirectSymbolicLinkReplacesOnlyLexicalEntry() => PhysicalStoreStateFileTestCases.LegacyDirectSymbolicLink(static () => UnixPhysicalStorePublicationTests.CreateContext(), PhysicalStoreStateFileTestCases.LegacyDirectSymbolicLinkExpectation.ReplacesLexicalEntry);
-    [SupportedUnixFact] public Task LegacySave_TwoLinkChainReplacesOnlyLexicalEntry() => PhysicalStoreStateFileTestCases.LegacyLinkChain(static () => UnixPhysicalStorePublicationTests.CreateContext(), PhysicalStoreStateFileTestCases.LegacyLinkChainExpectation.ReplacesLexicalEntry);
+    [SupportedUnixFact] public Task LegacySave_DirectSymbolicLinkReplacesOnlyLexicalEntry() => PhysicalStoreStateFileTestCases.LegacySymbolicLink(static () => UnixPhysicalStorePublicationTests.CreateContext(), PhysicalStoreStateFileTestCases.LegacySymbolicLinkExpectation.ReplacesLexicalEntry);
+    [SupportedUnixFact] public Task LegacySave_TwoLinkChainReplacesOnlyLexicalEntry() => PhysicalStoreStateFileTestCases.LegacySymbolicLink(static () => UnixPhysicalStorePublicationTests.CreateContext(), PhysicalStoreStateFileTestCases.LegacySymbolicLinkExpectation.ReplacesLexicalEntry, includeIntermediateLink: true);
     [SupportedUnixFact] public Task LegacySave_InvalidReferentsPreserveOriginalEntries() => PhysicalStoreStateFileTestCases.LegacyInvalidReferents(static () => UnixPhysicalStorePublicationTests.CreateContext());
 }
 
@@ -29,8 +29,8 @@ public sealed class WindowsPhysicalStoreStateFileTests
     [SupportedWindowsFact] public void Publish_SymlinkReplacesOnlyLexicalEntry() => PhysicalStoreStateFileTestCases.PublishSymlink(WindowsPhysicalStorePublicationTests.CreateContext);
     [SupportedWindowsFact] public void Publish_RefusesWrongPriorAndOccupiedAbsentSlot() => PhysicalStoreStateFileTestCases.PublicationRefusals(WindowsPhysicalStorePublicationTests.CreateContext);
     [SupportedWindowsFact] public Task LegacySave_HardlinkReplacesOnlySelectedEntry() => PhysicalStoreStateFileTestCases.LegacyHardlink(WindowsPhysicalStorePublicationTests.CreateContext, WindowsPhysicalStorePublicationTests.CreateHardLink);
-    [SupportedWindowsFact] public Task LegacySave_DirectSymbolicLinkRefusesReplacementAndPreservesEntries() => PhysicalStoreStateFileTestCases.LegacyDirectSymbolicLink(WindowsPhysicalStorePublicationTests.CreateContext, PhysicalStoreStateFileTestCases.LegacyDirectSymbolicLinkExpectation.RefusesReplacementAndPreservesEntries);
-    [SupportedWindowsFact] public Task LegacySave_TwoLinkChainRefusesUnsupportedSymbolicLinkReplacement() => PhysicalStoreStateFileTestCases.LegacyLinkChain(WindowsPhysicalStorePublicationTests.CreateContext, PhysicalStoreStateFileTestCases.LegacyLinkChainExpectation.RefusesUnsupportedSymbolicLinkReplacement);
+    [SupportedWindowsFact] public Task LegacySave_DirectSymbolicLinkRefusesReplacementAndPreservesEntries() => PhysicalStoreStateFileTestCases.LegacySymbolicLink(WindowsPhysicalStorePublicationTests.CreateContext, PhysicalStoreStateFileTestCases.LegacySymbolicLinkExpectation.RefusesReplacementAndPreservesEntries);
+    [SupportedWindowsFact] public Task LegacySave_TwoLinkChainRefusesUnsupportedSymbolicLinkReplacement() => PhysicalStoreStateFileTestCases.LegacySymbolicLink(WindowsPhysicalStorePublicationTests.CreateContext, PhysicalStoreStateFileTestCases.LegacySymbolicLinkExpectation.RefusesReplacementAndPreservesEntries, includeIntermediateLink: true);
     [SupportedWindowsFact] public Task LegacySave_InvalidReferentsPreserveOriginalEntries() => PhysicalStoreStateFileTestCases.LegacyInvalidReferents(WindowsPhysicalStorePublicationTests.CreateContext);
 }
 
@@ -39,13 +39,7 @@ internal static class PhysicalStoreStateFileTestCases
     private static readonly byte[] Prior = "old-state"u8.ToArray();
     private static readonly byte[] Next = "new-state"u8.ToArray();
 
-    internal enum LegacyLinkChainExpectation
-    {
-        ReplacesLexicalEntry,
-        RefusesUnsupportedSymbolicLinkReplacement
-    }
-
-    internal enum LegacyDirectSymbolicLinkExpectation
+    internal enum LegacySymbolicLinkExpectation
     {
         ReplacesLexicalEntry,
         RefusesReplacementAndPreservesEntries
@@ -178,52 +172,8 @@ internal static class PhysicalStoreStateFileTestCases
         Assert.NotEqual(priorIdentity, Entry(c, "state.json").Identity);
     }
 
-    internal static async Task LegacyDirectSymbolicLink(Func<PhysicalStorePublicationTestContext> create,
-        LegacyDirectSymbolicLinkExpectation expectation)
-    {
-        using var c = create();
-        var serializer = new StoreStateSerializer();
-        var target = Path.Combine(c.ParentPath, "target.json");
-        var statePath = Path.Combine(c.ParentPath, "state.json");
-        await serializer.SaveAsync(target, LegacyState("1.0.0"), CancellationToken.None);
-        var targetBefore = Entry(c, "target.json");
-        var targetBytesBefore = File.ReadAllBytes(target);
-        File.CreateSymbolicLink(statePath, "target.json");
-        var linkBefore = Entry(c, "state.json");
-        var linkTextBefore = new FileInfo(statePath).LinkTarget;
-        Assert.Equal("target.json", linkTextBefore);
-        Assert.Null(new FileInfo(target).LinkTarget);
-        Assert.Equal("1.0.0", (await serializer.LoadAsync(statePath, CancellationToken.None)).ActiveVersionById["pkg"]);
-
-        if (expectation == LegacyDirectSymbolicLinkExpectation.RefusesReplacementAndPreservesEntries)
-        {
-            await Assert.ThrowsAsync<IOException>(() =>
-                serializer.SaveAsync(statePath, LegacyState("2.0.0"), CancellationToken.None));
-
-            Assert.Equal(linkBefore, Entry(c, "state.json"));
-            Assert.Equal(linkTextBefore, new FileInfo(statePath).LinkTarget);
-            Assert.Equal(targetBefore, Entry(c, "target.json"));
-            Assert.Equal(targetBytesBefore, File.ReadAllBytes(target));
-            Assert.Null(new FileInfo(target).LinkTarget);
-            Assert.Equal("1.0.0", (await serializer.LoadAsync(target, CancellationToken.None)).ActiveVersionById["pkg"]);
-            return;
-        }
-
-        await serializer.SaveAsync(statePath, LegacyState("2.0.0"), CancellationToken.None);
-
-        var replacement = Entry(c, "state.json");
-        Assert.Equal(PhysicalStoreEntryKind.RegularFile, replacement.Kind);
-        Assert.NotEqual(linkBefore.Identity, replacement.Identity);
-        Assert.Null(new FileInfo(statePath).LinkTarget);
-        Assert.Equal("2.0.0", (await serializer.LoadAsync(statePath, CancellationToken.None)).ActiveVersionById["pkg"]);
-        Assert.Equal(targetBefore, Entry(c, "target.json"));
-        Assert.Equal(targetBytesBefore, File.ReadAllBytes(target));
-        Assert.Null(new FileInfo(target).LinkTarget);
-        Assert.Equal("1.0.0", (await serializer.LoadAsync(target, CancellationToken.None)).ActiveVersionById["pkg"]);
-    }
-
-    internal static async Task LegacyLinkChain(Func<PhysicalStorePublicationTestContext> create,
-        LegacyLinkChainExpectation expectation)
+    internal static async Task LegacySymbolicLink(Func<PhysicalStorePublicationTestContext> create,
+        LegacySymbolicLinkExpectation expectation, bool includeIntermediateLink = false)
     {
         using var c = create();
         var serializer = new StoreStateSerializer();
@@ -233,33 +183,44 @@ internal static class PhysicalStoreStateFileTestCases
         await serializer.SaveAsync(target, LegacyState("1.0.0"), CancellationToken.None);
         var targetBefore = Entry(c, "target.json");
         var bytesBefore = File.ReadAllBytes(target);
-        File.CreateSymbolicLink(middle, "target.json");
-        File.CreateSymbolicLink(outer, "middle.json");
-        var middleBefore = Entry(c, "middle.json");
+        if (includeIntermediateLink)
+            File.CreateSymbolicLink(middle, "target.json");
+        var middleBefore = includeIntermediateLink ? Entry(c, "middle.json") : null;
+        var linkTarget = includeIntermediateLink ? "middle.json" : "target.json";
+        File.CreateSymbolicLink(outer, linkTarget);
         var outerBefore = Entry(c, "state.json");
+        Assert.Equal(PhysicalStoreEntryKind.SymbolicLink, outerBefore.Kind);
+        Assert.Equal(linkTarget, new FileInfo(outer).LinkTarget);
+        Assert.Equal("1.0.0", (await serializer.LoadAsync(outer, CancellationToken.None)).ActiveVersionById["pkg"]);
 
-        if (expectation == LegacyLinkChainExpectation.RefusesUnsupportedSymbolicLinkReplacement)
+        if (expectation == LegacySymbolicLinkExpectation.RefusesReplacementAndPreservesEntries)
         {
             await Assert.ThrowsAsync<IOException>(() =>
                 serializer.SaveAsync(outer, LegacyState("2.0.0"), CancellationToken.None));
-
             Assert.Equal(outerBefore, Entry(c, "state.json"));
-            Assert.Equal(middleBefore, Entry(c, "middle.json"));
-            Assert.Equal(targetBefore, Entry(c, "target.json"));
-            Assert.Equal("middle.json", new FileInfo(outer).LinkTarget);
-            Assert.Equal("target.json", new FileInfo(middle).LinkTarget);
-            Assert.Equal(bytesBefore, File.ReadAllBytes(target));
-            return;
+            Assert.Equal(linkTarget, new FileInfo(outer).LinkTarget);
+        }
+        else
+        {
+            await serializer.SaveAsync(outer, LegacyState("2.0.0"), CancellationToken.None);
+            var replacement = Entry(c, "state.json");
+            Assert.Equal(PhysicalStoreEntryKind.RegularFile, replacement.Kind);
+            Assert.NotEqual(outerBefore.Identity, replacement.Identity);
+            Assert.Null(new FileInfo(outer).LinkTarget);
+            Assert.Equal("2.0.0", (await serializer.LoadAsync(outer, CancellationToken.None)).ActiveVersionById["pkg"]);
         }
 
-        await serializer.SaveAsync(outer, LegacyState("2.0.0"), CancellationToken.None);
-
-        Assert.Equal(PhysicalStoreEntryKind.RegularFile, Entry(c, "state.json").Kind);
-        Assert.Equal("2.0.0", (await serializer.LoadAsync(outer, CancellationToken.None)).ActiveVersionById["pkg"]);
-        Assert.Equal(middleBefore, Entry(c, "middle.json"));
-        Assert.Equal("target.json", new FileInfo(middle).LinkTarget);
+        if (includeIntermediateLink)
+        {
+            Assert.Equal(middleBefore, Entry(c, "middle.json"));
+            Assert.Equal("target.json", new FileInfo(middle).LinkTarget);
+        }
         Assert.Equal(targetBefore, Entry(c, "target.json"));
         Assert.Equal(bytesBefore, File.ReadAllBytes(target));
+        Assert.Null(new FileInfo(target).LinkTarget);
+        Assert.Equal("1.0.0", (await serializer.LoadAsync(target, CancellationToken.None)).ActiveVersionById["pkg"]);
+        Assert.Empty(Directory.GetFiles(c.ParentPath, "*.tmp"));
+        Assert.Empty(Directory.GetFiles(c.ParentPath, "*.bak"));
     }
 
     internal static async Task LegacyInvalidReferents(Func<PhysicalStorePublicationTestContext> create)
