@@ -1,5 +1,6 @@
 using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Store.Coordination;
+using Nuplane.Store.Coordination.DeletionRecords;
 using Nuplane.Store.Coordination.PhysicalFiles;
 
 namespace Nuplane.Store.Maintenance;
@@ -12,9 +13,12 @@ namespace Nuplane.Store.Maintenance;
 /// </remarks>
 internal sealed class PackageStoreExecutionService(
     RootMembershipRegistry registry,
-    PackageStoreInspectionService inspection)
+    PackageStoreInspectionService inspection,
+    Action<PackageStoreDeletionJournalPublicationPoint, PackageStoreDeletionJournal>? journalPublicationCheckpoint = null)
 {
     private readonly PackageStoreDeletionCandidateBinder _candidateBinder = new(registry.Files);
+    private readonly Lazy<PackageStoreDeletionJournalStore> _journalStore =
+        new(() => new PackageStoreDeletionJournalStore(registry.Files, journalPublicationCheckpoint));
 
     internal async Task<TResult> PlanAndRunAsync<TResult>(
         string? rootLabel,
@@ -51,7 +55,7 @@ internal sealed class PackageStoreExecutionService(
                     "Execution requires a fresh complete retention plan with known protection and exact confirmation.",
                     selectedRoot.RootIdentity);
 
-            var context = new Context(registry, borrow, operation, configuredRoot, snapshot, _candidateBinder);
+            var context = new Context(registry, borrow, operation, configuredRoot, snapshot, _candidateBinder, _journalStore);
             TResult result;
             try
             {
@@ -89,12 +93,17 @@ internal sealed class PackageStoreExecutionService(
         RootMembershipRegistry.NativeCatalogOwnerBorrow.Operation operation,
         TrustedPackageStoreRoot configuredRoot,
         PackageStoreInspectionSnapshot snapshot,
-        PackageStoreDeletionCandidateBinder candidateBinder) : IDisposable
+        PackageStoreDeletionCandidateBinder candidateBinder,
+        Lazy<PackageStoreDeletionJournalStore> journalStore) : IDisposable
     {
         private readonly PackageStoreDeletionCandidateBinder _candidateBinder = candidateBinder;
+        private readonly Lazy<PackageStoreDeletionJournalStore> _journalStore = journalStore;
         private readonly object _gate = new();
         private readonly List<PackageStoreDeletionCandidate> _candidates = [];
         private readonly HashSet<PackageStoreRetentionPlanEntry> _boundRows = new(ReferenceEqualityComparer.Instance);
+        private readonly HashSet<PackageStoreDeletionCandidate> _journalAttempts = new(ReferenceEqualityComparer.Instance);
+        private readonly HashSet<Guid> _candidateIds = [];
+        private readonly Guid _operationId = Guid.NewGuid();
         private bool _disposed;
 
         internal PackageStoreInspectionSnapshot Snapshot { get; } = snapshot;
@@ -175,6 +184,145 @@ internal sealed class PackageStoreExecutionService(
                 _candidates.Add(candidate);
             }
             return candidate;
+        }
+
+        /// <summary>Publishes the first durable Prepared description for one exact candidate.</summary>
+        /// <remarks>The receipt proves only the exact native control-file publication; it grants no package mutation authority.</remarks>
+        internal PreparedJournalReceipt PublishPreparedJournal(
+            PackageStoreDeletionCandidate candidate,
+            CancellationToken cancellationToken)
+            => PreparedJournalReceipt.Publish(this, candidate, cancellationToken);
+
+        private PackageStoreDeletionJournalStore.PublishedJournal PublishPreparedJournalCore(
+            PackageStoreDeletionCandidate candidate,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(candidate);
+            RequireOwnedCandidate(candidate, requireUnprepared: true, cancellationToken);
+
+            Guid candidateId;
+            lock (_gate)
+            {
+                if (!_journalAttempts.Add(candidate))
+                    throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                        "A deletion candidate can attempt Prepared publication only once in one execution context.");
+                do candidateId = Guid.NewGuid();
+                while (candidateId == Guid.Empty || candidateId == _operationId || !_candidateIds.Add(candidateId));
+            }
+
+            var plan = Snapshot.RetentionPlan!;
+            var enrollmentEpoch = plan.EnrollmentEpoch;
+            var keepNewest = plan.KeepNewestInactiveVersionsPerPackage
+                ?? throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Prepared publication requires the current plan's retention policy.");
+            var journal = candidate.CreatePreparedJournal(Snapshot.Root!, enrollmentEpoch,
+                _operationId, candidateId, keepNewest, cancellationToken);
+            var root = RootHandle;
+            var journalStore = _journalStore.Value;
+            var result = journalStore.PublishPrepared(root, Snapshot.Root!, journal,
+                token => RequireOwnedCandidate(candidate, requireUnprepared: true, token),
+                token => candidate.RequireCurrentBaseline(token), cancellationToken);
+
+            RequireOwnedCandidate(candidate, requireUnprepared: false, cancellationToken);
+            return result;
+        }
+
+        private void RequireOwnedCandidate(
+            PackageStoreDeletionCandidate candidate,
+            bool requireUnprepared,
+            CancellationToken cancellationToken)
+        {
+            Revalidate(cancellationToken);
+            lock (_gate)
+            {
+                if (!_candidates.Any(item => ReferenceEquals(item, candidate)))
+                    throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                        "The deletion candidate is not owned by this exact execution context.");
+            }
+            candidate.RequireJournalScopeLive(cancellationToken);
+            if (requireUnprepared)
+                candidate.RequireUnprepared(cancellationToken);
+        }
+
+        private void RequireReceiptLive(
+            PackageStoreDeletionCandidate candidate,
+            CancellationToken cancellationToken)
+        {
+            RequireOwnedCandidate(candidate, requireUnprepared: false, cancellationToken);
+            candidate.Revalidate(cancellationToken);
+        }
+
+        /// <summary>Opaque readback evidence minted only after exact canonical bytes and stage absence were reopened.</summary>
+        internal sealed class PreparedJournalReceipt
+        {
+            private readonly Context _scope;
+            private readonly PackageStoreDeletionCandidate _candidate;
+            private readonly PackageStoreDeletionJournalStore _store;
+            private readonly PhysicalStoreDirectoryHandle _root;
+            private readonly PhysicalRootIdentity _expectedRoot;
+            private readonly PackageStoreDeletionJournalStore.PublishedJournal _published;
+
+            private PreparedJournalReceipt(Context scope, PackageStoreDeletionCandidate candidate,
+                PackageStoreDeletionJournalStore store, PhysicalStoreDirectoryHandle root,
+                PhysicalRootIdentity expectedRoot, PackageStoreDeletionJournalStore.PublishedJournal published,
+                CancellationToken cancellationToken)
+            {
+                _scope = scope;
+                _candidate = candidate;
+                _store = store;
+                _root = root;
+                _expectedRoot = expectedRoot;
+                _published = published;
+                Revalidate(cancellationToken);
+            }
+
+            internal static PreparedJournalReceipt Publish(
+                Context scope,
+                PackageStoreDeletionCandidate candidate,
+                CancellationToken cancellationToken)
+            {
+                var published = scope.PublishPreparedJournalCore(candidate, cancellationToken);
+                return new PreparedJournalReceipt(scope, candidate, scope._journalStore.Value,
+                    scope.RootHandle, scope.Snapshot.Root!, published, cancellationToken);
+            }
+
+            internal PackageStoreDeletionJournal Journal
+            {
+                get
+                {
+                    EnsureLive(CancellationToken.None);
+                    return _published.Journal;
+                }
+            }
+
+            internal PhysicalFileIdentity JournalFileIdentity
+            {
+                get
+                {
+                    EnsureLive(CancellationToken.None);
+                    return _published.FileIdentity;
+                }
+            }
+
+            internal string CanonicalBasename
+            {
+                get
+                {
+                    EnsureLive(CancellationToken.None);
+                    return _published.CanonicalName;
+                }
+            }
+
+            internal void Revalidate(CancellationToken cancellationToken)
+            {
+                EnsureLive(cancellationToken);
+                _store.VerifyPublished(_root, _expectedRoot, _published, cancellationToken);
+            }
+
+            private void EnsureLive(CancellationToken cancellationToken)
+            {
+                _scope.RequireReceiptLive(_candidate, cancellationToken);
+            }
         }
 
         public void Dispose()

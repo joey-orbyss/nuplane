@@ -2,6 +2,7 @@ using Microsoft.Extensions.Options;
 using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Feeds;
 using Nuplane.Store.Coordination;
+using Nuplane.Store.Coordination.DeletionRecords;
 using Nuplane.Store.Coordination.PhysicalFiles;
 using Nuplane.Store.Maintenance;
 using Nuplane.Tests.Shared;
@@ -234,7 +235,8 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
     private sealed class ExecutionFixture : IDisposable
     {
         private ExecutionFixture(Context context, string[] additionalRoots,
-            Func<PackageStoreInventorySnapshot, PackageStoreInventorySnapshot>? transform)
+            Func<PackageStoreInventorySnapshot, PackageStoreInventorySnapshot>? transform,
+            Action<PackageStoreDeletionJournalPublicationPoint, PackageStoreDeletionJournal>? journalPublicationCheckpoint)
         {
             Context = context;
             AdditionalRoots = additionalRoots;
@@ -245,7 +247,7 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
             Inventory = new ExecutionInventory(context.Files, AssertAllLocksHeld, transform);
             Planner = new ExecutionPlanner(AssertAllLocksHeld);
             Inspection = new PackageStoreInspectionService(context.Files, registry, catalog, resolver, Inventory, Planner);
-            Service = new PackageStoreExecutionService(registry, Inspection);
+            Service = new PackageStoreExecutionService(registry, Inspection, journalPublicationCheckpoint);
         }
 
         internal Context Context { get; }
@@ -258,7 +260,8 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
 
         internal static async Task<ExecutionFixture> CreateAsync(Func<Context, Task<string[]>>? configure = null,
             Func<PackageStoreInventorySnapshot, PackageStoreInventorySnapshot>? transform = null,
-            bool withCrossRootGraph = true)
+            bool withCrossRootGraph = true,
+            Action<PackageStoreDeletionJournalPublicationPoint, PackageStoreDeletionJournal>? journalPublicationCheckpoint = null)
         {
             var context = withCrossRootGraph
                 ? await Context.CreateWithGraphAsync()
@@ -268,7 +271,7 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
                 await context.Registry().PublishNativeGroupAsync(context.Descriptor, context.Requests,
                     context.NextState, CancellationToken.None);
                 var additional = configure is null ? [] : await configure(context);
-                return new ExecutionFixture(context, additional, transform);
+                return new ExecutionFixture(context, additional, transform, journalPublicationCheckpoint);
             }
             catch
             {

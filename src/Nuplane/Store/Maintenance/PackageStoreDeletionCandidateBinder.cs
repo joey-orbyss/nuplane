@@ -69,7 +69,7 @@ internal sealed class PackageStoreDeletionCandidateBinder
                     "The canonical install location changed during candidate binding.", expectedRoot);
 
             return new PackageStoreDeletionCandidate(planEntry, observedInstall, manifest, observation, location,
-                revalidateOperation);
+                _manifests, revalidateOperation);
         }
         catch
         {
@@ -91,6 +91,7 @@ internal sealed class PackageStoreDeletionCandidate : IDisposable
 {
     private readonly PackageInstallIdentityReader.PackageInstallIdentityObservation _observation;
     private readonly PackageInstallIdentityReader.PackageInstallDeletionLocation _location;
+    private readonly PhysicalStoreDeletionManifestReader _manifests;
     private readonly Action<CancellationToken> _revalidateOperation;
     private bool _preparedForMove;
     private bool _disposed;
@@ -101,6 +102,7 @@ internal sealed class PackageStoreDeletionCandidate : IDisposable
         PhysicalStoreDeletionManifest manifest,
         PackageInstallIdentityReader.PackageInstallIdentityObservation observation,
         PackageInstallIdentityReader.PackageInstallDeletionLocation location,
+        PhysicalStoreDeletionManifestReader manifests,
         Action<CancellationToken> revalidateOperation)
     {
         PlanEntry = planEntry;
@@ -108,6 +110,7 @@ internal sealed class PackageStoreDeletionCandidate : IDisposable
         Manifest = manifest;
         _observation = observation;
         _location = location;
+        _manifests = manifests;
         _revalidateOperation = revalidateOperation;
     }
 
@@ -116,6 +119,71 @@ internal sealed class PackageStoreDeletionCandidate : IDisposable
     internal PackageInstallIdentity InstallIdentity { get; }
 
     internal PhysicalStoreDeletionManifest Manifest { get; }
+
+    internal PackageStoreDeletionJournal CreatePreparedJournal(
+        PhysicalRootIdentity storeRoot,
+        long enrollmentEpoch,
+        Guid operationId,
+        Guid candidateId,
+        int keepNewestInactiveVersionsPerPackage,
+        CancellationToken cancellationToken)
+    {
+        RequireUnprepared(cancellationToken);
+        RequireCurrentBaseline(cancellationToken);
+        var pathComponents = PackageInstallIdentityReader.ValidateRelativeInstallPath(
+            InstallIdentity.RootRelativeInstallPath, InstallIdentity.PackageId, InstallIdentity.Version);
+        return new PackageStoreDeletionJournal(
+            PackageStoreDeletionJournal.CurrentSchemaVersion,
+            storeRoot,
+            enrollmentEpoch,
+            operationId,
+            candidateId,
+            InstallIdentity,
+            pathComponents.Take(2),
+            _location.PackageParentIdentity,
+            _location.PackageParentSemantics,
+            _location.OriginalBasename,
+            PackageStoreDeletionJournal.QuarantineBasenameFor(candidateId),
+            _location.CompletionMarkerIdentity,
+            keepNewestInactiveVersionsPerPackage,
+            PackageStoreDeletionPhase.Prepared,
+            Manifest);
+    }
+
+    internal void RequireCurrentBaseline(CancellationToken cancellationToken)
+    {
+        RequireUnprepared(cancellationToken);
+        Revalidate(cancellationToken);
+        var current = _manifests.Capture(
+            _observation.InstallDirectory,
+            InstallIdentity,
+            _location.PackageParentHandle,
+            _location.PackageParentIdentity,
+            _location.PackageParentSemantics,
+            _location.OriginalBasename,
+            _location.InstallDirectorySemantics,
+            cancellationToken);
+        if (Manifest.RequireExactSubset(current) != 0)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnknownAuthority,
+                "The current complete install manifest differs from the bound Prepared baseline.", InstallIdentity.Root);
+        Revalidate(cancellationToken);
+    }
+
+    internal void RequireJournalScopeLive(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (_disposed)
+            throw Expired("The deletion candidate has been disposed.");
+        _revalidateOperation(cancellationToken);
+    }
+
+    internal void RequireUnprepared(CancellationToken cancellationToken)
+    {
+        RequireJournalScopeLive(cancellationToken);
+        if (_preparedForMove)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnknownAuthority,
+                "Prepared publication requires the candidate's open, exact install observation.", InstallIdentity.Root);
+    }
 
     internal void Revalidate(CancellationToken cancellationToken)
     {
