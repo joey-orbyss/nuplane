@@ -1,9 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
-using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
-using Nuplane.Reconciliation;
-using Nuplane.Reconciliation.Models;
-using Nuplane.Runtime.Tests.TestSupport;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.MembershipRecords;
 using Nuplane.Store.Coordination.PhysicalFiles;
@@ -48,7 +44,8 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
             }
         });
 
-        Assert.IsAssignableFrom<PackageStoreAdmissionException>(error);
+        var refusal = Assert.IsType<PackageStoreAdmissionException>(error);
+        Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
         AssertFixtureEvidenceEqual(before, CaptureFixtureEvidence(selected).Concat(CaptureFixtureEvidence(peer))
             .ToDictionary(static item => item.Key, static item => item.Value, StringComparer.Ordinal));
         var stillPending = ReadPendingStateCommit(pending);
@@ -86,6 +83,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
             await using var drained = await admission.AcquireForInstallPathsAsync(
                 [selected.SharedInstallPath], PackageStoreAdmissionKind.Maintenance);
             using var borrow = drained.BorrowFor(selected.SharedInstallPath);
+            Assert.Equal(selected.RootIdentity, borrow.Root);
         }
         else
         {
