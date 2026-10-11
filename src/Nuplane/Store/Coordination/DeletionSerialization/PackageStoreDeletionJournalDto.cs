@@ -30,30 +30,31 @@ internal sealed class PackageStoreDeletionJournalDto
         if (SchemaVersion != PackageStoreDeletionJournal.CurrentSchemaVersion)
             throw new JsonException("The deletion-journal schema version is unsupported.");
 
-        var digest = Required(IntegrityDigest, nameof(IntegrityDigest));
+        var digest = DeletionDtoChecks.RequiredReference(IntegrityDigest, nameof(IntegrityDigest), DeletionDtoChecks.JournalOwner);
         ProtectionDigest.ValidateCanonicalDigest(digest);
         var phase = ReadEnum<PackageStoreDeletionPhase>(Phase, nameof(Phase));
-        var parentComponents = MapRequired(
+        var parentComponents = DeletionDtoChecks.MapRequired(
             PackageParentRelativeComponents,
             nameof(PackageParentRelativeComponents),
-            static component => component ?? throw new JsonException("The package-parent locator cannot contain null components."));
+            DeletionDtoChecks.JournalOwner,
+            static component => component);
 
         return new PackageStoreDeletionJournal(
             SchemaVersion.Value,
-            Required(StoreRoot, nameof(StoreRoot)).ToIdentity(),
-            Required(EnrollmentEpoch, nameof(EnrollmentEpoch)),
-            Required(OperationId, nameof(OperationId)),
-            Required(CandidateId, nameof(CandidateId)),
-            Required(OriginalInstall, nameof(OriginalInstall)).ToInstallIdentity(),
+            DeletionDtoChecks.RequiredReference(StoreRoot, nameof(StoreRoot), DeletionDtoChecks.JournalOwner).ToIdentity(),
+            DeletionDtoChecks.RequiredValue(EnrollmentEpoch, nameof(EnrollmentEpoch), DeletionDtoChecks.JournalOwner),
+            DeletionDtoChecks.RequiredValue(OperationId, nameof(OperationId), DeletionDtoChecks.JournalOwner),
+            DeletionDtoChecks.RequiredValue(CandidateId, nameof(CandidateId), DeletionDtoChecks.JournalOwner),
+            DeletionDtoChecks.RequiredReference(OriginalInstall, nameof(OriginalInstall), DeletionDtoChecks.JournalOwner).ToInstallIdentity(),
             parentComponents,
-            Required(PackageParentIdentity, nameof(PackageParentIdentity)).ToIdentity(),
-            Required(PackageParentSemantics, nameof(PackageParentSemantics)).ToSemantics(),
-            Required(OriginalBasename, nameof(OriginalBasename)),
-            Required(QuarantineBasename, nameof(QuarantineBasename)),
-            Required(CompletionMarkerIdentity, nameof(CompletionMarkerIdentity)).ToIdentity(),
-            Required(KeepNewestInactiveVersionsPerPackage, nameof(KeepNewestInactiveVersionsPerPackage)),
+            DeletionDtoChecks.RequiredReference(PackageParentIdentity, nameof(PackageParentIdentity), DeletionDtoChecks.JournalOwner).ToIdentity(),
+            DeletionDtoChecks.RequiredReference(PackageParentSemantics, nameof(PackageParentSemantics), DeletionDtoChecks.JournalOwner).ToSemantics(),
+            DeletionDtoChecks.RequiredReference(OriginalBasename, nameof(OriginalBasename), DeletionDtoChecks.JournalOwner),
+            DeletionDtoChecks.RequiredReference(QuarantineBasename, nameof(QuarantineBasename), DeletionDtoChecks.JournalOwner),
+            DeletionDtoChecks.RequiredReference(CompletionMarkerIdentity, nameof(CompletionMarkerIdentity), DeletionDtoChecks.JournalOwner).ToIdentity(),
+            DeletionDtoChecks.RequiredValue(KeepNewestInactiveVersionsPerPackage, nameof(KeepNewestInactiveVersionsPerPackage), DeletionDtoChecks.JournalOwner),
             phase,
-            Required(Manifest, nameof(Manifest)).ToManifest(),
+            DeletionDtoChecks.RequiredReference(Manifest, nameof(Manifest), DeletionDtoChecks.JournalOwner).ToManifest(),
             digest);
     }
 
@@ -78,38 +79,12 @@ internal sealed class PackageStoreDeletionJournalDto
             IntegrityDigest = journal.IntegrityDigest
         };
 
-    private static T Required<T>(T? value, string name) where T : struct
-        => value ?? throw Missing(name);
-
-    private static T Required<T>(T? value, string name) where T : class
-        => value ?? throw Missing(name);
-
     private static TEnum ReadEnum<TEnum>(int? raw, string name) where TEnum : struct, Enum
     {
-        var value = raw ?? throw Missing(name);
+        var value = DeletionDtoChecks.RequiredValue(raw, name, DeletionDtoChecks.JournalOwner);
         var parsed = (TEnum)Enum.ToObject(typeof(TEnum), value);
         return Enum.IsDefined(parsed) ? parsed : throw new JsonException($"The deletion journal has an unsupported '{name}'.");
     }
-
-    private static List<TResult> MapRequired<TSource, TResult>(
-        List<TSource?>? values,
-        string name,
-        Func<TSource, TResult> map)
-        where TSource : class
-    {
-        if (values is null)
-            throw Missing(name);
-        var mapped = new List<TResult>(values.Count);
-        foreach (var value in values)
-        {
-            if (value is null)
-                throw new JsonException($"The deletion journal '{name}' array cannot contain null items.");
-            mapped.Add(map(value));
-        }
-        return mapped;
-    }
-
-    private static JsonException Missing(string name) => new($"The deletion journal is missing '{name}'.");
 }
 
 internal sealed class PhysicalStoreDeletionManifestDto
@@ -120,9 +95,9 @@ internal sealed class PhysicalStoreDeletionManifestDto
 
     internal PhysicalStoreDeletionManifest ToManifest()
         => new(
-            Required(InstallDirectoryIdentity, nameof(InstallDirectoryIdentity)).ToIdentity(),
-            Required(InstallDirectorySemantics, nameof(InstallDirectorySemantics)).ToSemantics(),
-            MapRequired(Entries, nameof(Entries), static entry => entry.ToEntry()));
+            DeletionDtoChecks.RequiredReference(InstallDirectoryIdentity, nameof(InstallDirectoryIdentity), DeletionDtoChecks.ManifestOwner).ToIdentity(),
+            DeletionDtoChecks.RequiredReference(InstallDirectorySemantics, nameof(InstallDirectorySemantics), DeletionDtoChecks.ManifestOwner).ToSemantics(),
+            DeletionDtoChecks.MapRequired(Entries, nameof(Entries), DeletionDtoChecks.ManifestOwner, static entry => entry.ToEntry()));
 
     internal static PhysicalStoreDeletionManifestDto FromManifest(PhysicalStoreDeletionManifest manifest)
         => new()
@@ -132,26 +107,6 @@ internal sealed class PhysicalStoreDeletionManifestDto
             Entries = manifest.Entries.Select(static entry => (PhysicalStoreDeletionManifestEntryDto?)PhysicalStoreDeletionManifestEntryDto.FromEntry(entry)).ToList()
         };
 
-    private static T Required<T>(T? value, string name) where T : class
-        => value ?? throw new JsonException($"The deletion manifest is missing '{name}'.");
-
-    private static List<TResult> MapRequired<TSource, TResult>(
-        List<TSource?>? values,
-        string name,
-        Func<TSource, TResult> map)
-        where TSource : class
-    {
-        if (values is null)
-            throw new JsonException($"The deletion manifest is missing '{name}'.");
-        var mapped = new List<TResult>(values.Count);
-        foreach (var value in values)
-        {
-            if (value is null)
-                throw new JsonException($"The deletion manifest '{name}' array cannot contain null items.");
-            mapped.Add(map(value));
-        }
-        return mapped;
-    }
 }
 
 internal sealed class PhysicalStoreDeletionManifestEntryDto
@@ -165,11 +120,16 @@ internal sealed class PhysicalStoreDeletionManifestEntryDto
 
     internal PhysicalStoreDeletionManifestEntry ToEntry()
         => new(
-            MapRequired(RelativeComponents, nameof(RelativeComponents), static component => component),
+            DeletionDtoChecks.MapRequired(
+                RelativeComponents,
+                nameof(RelativeComponents),
+                DeletionDtoChecks.ManifestEntryOwner,
+                static component => component,
+                nullItemMessage: "A deletion manifest path cannot contain null components."),
             ReadEntryKind(Kind),
-            Required(Identity, nameof(Identity)).ToIdentity(),
-            Required(ParentIdentity, nameof(ParentIdentity)).ToIdentity(),
-            Required(ParentSemantics, nameof(ParentSemantics)).ToSemantics(),
+            DeletionDtoChecks.RequiredReference(Identity, nameof(Identity), DeletionDtoChecks.ManifestEntryOwner).ToIdentity(),
+            DeletionDtoChecks.RequiredReference(ParentIdentity, nameof(ParentIdentity), DeletionDtoChecks.ManifestEntryOwner).ToIdentity(),
+            DeletionDtoChecks.RequiredReference(ParentSemantics, nameof(ParentSemantics), DeletionDtoChecks.ManifestEntryOwner).ToSemantics(),
             DirectorySemantics?.ToSemantics());
 
     internal static PhysicalStoreDeletionManifestEntryDto FromEntry(PhysicalStoreDeletionManifestEntry entry)
@@ -187,29 +147,13 @@ internal sealed class PhysicalStoreDeletionManifestEntryDto
 
     private static PhysicalStoreEntryKind ReadEntryKind(int? raw)
     {
-        var value = raw ?? throw new JsonException("A deletion manifest entry is missing its kind.");
+        var value = DeletionDtoChecks.RequiredValue(raw, "kind", DeletionDtoChecks.ManifestEntryOwner);
         var kind = (PhysicalStoreEntryKind)Enum.ToObject(typeof(PhysicalStoreEntryKind), value);
         return kind is PhysicalStoreEntryKind.Directory or PhysicalStoreEntryKind.RegularFile
             ? kind
             : throw new JsonException("A deletion manifest entry has an unsupported kind.");
     }
 
-    private static List<string> MapRequired(List<string?>? values, string name, Func<string, string> map)
-    {
-        if (values is null)
-            throw new JsonException($"A deletion manifest entry is missing '{name}'.");
-        var mapped = new List<string>(values.Count);
-        foreach (var value in values)
-        {
-            if (value is null)
-                throw new JsonException("A deletion manifest path cannot contain null components.");
-            mapped.Add(map(value));
-        }
-        return mapped;
-    }
-
-    private static T Required<T>(T? value, string name) where T : class
-        => value ?? throw new JsonException($"A deletion manifest entry is missing '{name}'.");
 }
 
 internal sealed class PhysicalStoreNameSemanticsDto
@@ -221,15 +165,15 @@ internal sealed class PhysicalStoreNameSemanticsDto
 
     internal PhysicalStoreNameSemantics ToSemantics()
     {
-        var encodingValue = Encoding ?? throw new JsonException("A native name profile is missing its encoding.");
+        var encodingValue = DeletionDtoChecks.RequiredValue(Encoding, "encoding", DeletionDtoChecks.NameProfileOwner);
         var encoding = (PhysicalStoreNameEncoding)Enum.ToObject(typeof(PhysicalStoreNameEncoding), encodingValue);
         if (!Enum.IsDefined(encoding))
             throw new JsonException("A native name profile has an unsupported encoding.");
         return new PhysicalStoreNameSemantics(
-            ProfileId ?? throw new JsonException("A native name profile is missing its profile ID."),
+            DeletionDtoChecks.RequiredReference(ProfileId, "profile ID", DeletionDtoChecks.NameProfileOwner),
             encoding,
-            CaseSensitive ?? throw new JsonException("A native name profile is missing its case-sensitivity flag."),
-            NormalizationInsensitive ?? throw new JsonException("A native name profile is missing its normalization flag."));
+            DeletionDtoChecks.RequiredValue(CaseSensitive, "case-sensitivity flag", DeletionDtoChecks.NameProfileOwner),
+            DeletionDtoChecks.RequiredValue(NormalizationInsensitive, "normalization flag", DeletionDtoChecks.NameProfileOwner));
     }
 
     internal static PhysicalStoreNameSemanticsDto FromSemantics(PhysicalStoreNameSemantics semantics)

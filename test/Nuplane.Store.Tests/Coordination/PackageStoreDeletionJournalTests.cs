@@ -182,6 +182,74 @@ public sealed class PackageStoreDeletionJournalTests
     }
 
     [Fact]
+    public void Digest_BindsEveryVariableJournalField()
+    {
+        var baseline = DeletionTestData.CreateJournal();
+        var changedPayloadIdentity = DeletionTestData.Identity("payload-file-updated");
+        var changedEntries = DeletionTestData.Entries().Select(entry =>
+            entry.RelativeComponents.SequenceEqual(["payload.dat"])
+                ? new PhysicalStoreDeletionManifestEntry(
+                    entry.RelativeComponents,
+                    entry.Kind,
+                    changedPayloadIdentity,
+                    entry.ParentIdentity,
+                    entry.ParentSemantics,
+                    entry.DirectorySemantics)
+                : entry);
+        var changedInstallSemantics = DeletionTestData.Semantics("install-profile-updated");
+        var changedProfileEntries = DeletionTestData.Entries().Select(entry => entry.RelativeComponents.Length == 1
+            ? new PhysicalStoreDeletionManifestEntry(
+                entry.RelativeComponents,
+                entry.Kind,
+                entry.Identity,
+                entry.ParentIdentity,
+                changedInstallSemantics,
+                entry.DirectorySemantics)
+            : entry);
+        var changedProfileManifest = new PhysicalStoreDeletionManifest(
+            DeletionTestData.InstallDirectory,
+            changedInstallSemantics,
+            changedProfileEntries);
+        var changedMarkerIdentity = DeletionTestData.Identity("completion-marker-updated");
+        var changedCandidateId = Guid.Parse("0bb6f2f9-6b77-4e29-9831-0316e8ad4e0d");
+        var changedOperationId = Guid.Parse("e5676d59-45c8-4da5-8290-d99c601c5d26");
+
+        Func<string?, PackageStoreDeletionJournal>[] mutations =
+        [
+            digest => DeletionTestData.CreateJournal(
+                storeRootIdentity: DeletionTestData.Identity("store-root-updated"), expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(enrollmentEpoch: 4, expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(operationId: changedOperationId, expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(candidateId: changedCandidateId, expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(verifiedArchiveHash: new string('b', 64), expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(feedName: "feed-b", expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(packageId: "Other.Package", expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(packageParentIdentity: DeletionTestData.Identity("package-parent-updated"), expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(
+                packageParentSemantics: DeletionTestData.Semantics("package-parent-profile-updated"), expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(manifest: changedProfileManifest, expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(version: "2.0.0", expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(
+                manifest: DeletionTestData.CreateManifest(markerIdentity: changedMarkerIdentity),
+                completionMarkerIdentity: changedMarkerIdentity,
+                expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(
+                keepNewestInactiveVersionsPerPackage: 3, expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(phase: PackageStoreDeletionPhase.Quarantined, expectedIntegrityDigest: digest),
+            digest => DeletionTestData.CreateJournal(
+                manifest: DeletionTestData.CreateManifest(entries: changedEntries), expectedIntegrityDigest: digest)
+        ];
+
+        foreach (var createMutation in mutations)
+        {
+            var changed = createMutation(null);
+
+            Assert.NotEqual(baseline.IntegrityDigest, changed.IntegrityDigest);
+            Assert.Throws<ArgumentException>(() => createMutation(baseline.IntegrityDigest));
+        }
+    }
+
+    [Fact]
     public void Deserialize_RejectsMissingMarkerBaselineInvalidPhaseAndPayloadOutsideBound()
     {
         var payload = _serializer.Serialize(DeletionTestData.CreateJournal());
@@ -229,11 +297,21 @@ internal static class DeletionTestData
         => new(profileId, PhysicalStoreNameEncoding.Utf8, caseSensitive: true, normalizationInsensitive: false);
 
     internal static IEnumerable<PhysicalStoreDeletionManifestEntry> Entries(bool includeMarker = true)
+        => Entries(includeMarker, markerIdentity: null);
+
+    internal static IEnumerable<PhysicalStoreDeletionManifestEntry> Entries(
+        bool includeMarker,
+        PhysicalFileIdentity? markerIdentity)
     {
         if (includeMarker)
         {
-            yield return Entry([PackageStoreDeletionJournal.CompletionMarkerName], PhysicalStoreEntryKind.RegularFile,
-                "completion-marker", InstallDirectory, InstallSemantics);
+            yield return new PhysicalStoreDeletionManifestEntry(
+                [PackageStoreDeletionJournal.CompletionMarkerName],
+                PhysicalStoreEntryKind.RegularFile,
+                markerIdentity ?? MarkerIdentity,
+                InstallDirectory,
+                InstallSemantics,
+                directorySemantics: null);
         }
 
         yield return Entry(["payload.dat"], PhysicalStoreEntryKind.RegularFile, "payload-file", InstallDirectory, InstallSemantics);
@@ -254,38 +332,54 @@ internal static class DeletionTestData
 
     internal static PhysicalStoreDeletionManifest CreateManifest(
         bool includeMarker = true,
-        IEnumerable<PhysicalStoreDeletionManifestEntry>? entries = null)
-        => new(InstallDirectory, InstallSemantics, entries ?? Entries(includeMarker));
+        IEnumerable<PhysicalStoreDeletionManifestEntry>? entries = null,
+        PhysicalFileIdentity? markerIdentity = null)
+        => new(InstallDirectory, InstallSemantics, entries ?? Entries(includeMarker, markerIdentity));
 
     internal static PackageStoreDeletionJournal CreateJournal(
         PhysicalStoreDeletionManifest? manifest = null,
         PhysicalFileIdentity? completionMarkerIdentity = null,
-        PhysicalFileIdentity? packageParentIdentity = null)
+        PhysicalFileIdentity? packageParentIdentity = null,
+        PhysicalFileIdentity? storeRootIdentity = null,
+        long enrollmentEpoch = 3,
+        Guid? operationId = null,
+        Guid? candidateId = null,
+        string feedName = "feed-a",
+        string packageId = "Sample.Package",
+        string version = "1.0.0",
+        string? verifiedArchiveHash = null,
+        PhysicalStoreNameSemantics? packageParentSemantics = null,
+        int keepNewestInactiveVersionsPerPackage = 2,
+        PackageStoreDeletionPhase phase = PackageStoreDeletionPhase.Prepared,
+        string? expectedIntegrityDigest = null)
     {
-        var storeRoot = new PhysicalRootIdentity(StoreRootIdentity);
+        var storeRoot = new PhysicalRootIdentity(storeRootIdentity ?? StoreRootIdentity);
         var markerIdentity = completionMarkerIdentity ?? MarkerIdentity;
         var install = new PackageInstallIdentity(
             storeRoot,
-            "Sample.Package",
-            "1.0.0",
-            "feed-a/Sample.Package/1.0.0",
+            packageId,
+            version,
+            $"{feedName}/{packageId}/{version}",
             InstallDirectory,
-            ProtectionDigest.PackageInstallCompletionIdentity(markerIdentity));
+            ProtectionDigest.PackageInstallCompletionIdentity(markerIdentity),
+            verifiedArchiveHash);
+        var resolvedCandidateId = candidateId ?? Candidate;
         return new PackageStoreDeletionJournal(
             PackageStoreDeletionJournal.CurrentSchemaVersion,
             storeRoot,
-            enrollmentEpoch: 3,
-            Operation,
-            Candidate,
+            enrollmentEpoch,
+            operationId ?? Operation,
+            resolvedCandidateId,
             install,
-            ["feed-a", "Sample.Package"],
+            [feedName, packageId],
             packageParentIdentity ?? PackageParentIdentity,
-            ParentSemantics,
-            "1.0.0",
-            PackageStoreDeletionJournal.QuarantineBasenameFor(Candidate),
+            packageParentSemantics ?? ParentSemantics,
+            version,
+            PackageStoreDeletionJournal.QuarantineBasenameFor(resolvedCandidateId),
             markerIdentity,
-            keepNewestInactiveVersionsPerPackage: 2,
-            PackageStoreDeletionPhase.Prepared,
-            manifest ?? CreateManifest());
+            keepNewestInactiveVersionsPerPackage,
+            phase,
+            manifest ?? CreateManifest(markerIdentity: markerIdentity),
+            expectedIntegrityDigest);
     }
 }
