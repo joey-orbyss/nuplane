@@ -123,7 +123,7 @@ public sealed class LegacyActiveGraphCandidateProducerTests
     }
 
     [SupportedPhysicalStoreFact]
-    public async Task RevalidateSourceStateAsync_RefusesNativeTreeReplacementBeforeAnyPublication()
+    public async Task RevalidateSourceStateAsync_RefusesInstallNamespaceMutationBeforeAnyPublication()
     {
         using var fixture = await CandidateFixture.CreateAsync();
         var stateBytes = File.ReadAllBytes(fixture.StatePath);
@@ -149,6 +149,170 @@ public sealed class LegacyActiveGraphCandidateProducerTests
         Assert.Equal(stateBytes, File.ReadAllBytes(fixture.StatePath));
         Assert.Equal(ledgerBefore.LedgerDigest, fixture.Registry.ReadCandidate(fixture.Root).LedgerDigest);
         Assert.Equal(installsBefore, fixture.CaptureInstallIdentities());
+    }
+
+    [SupportedUnixFact]
+    public async Task RevalidateSourceStateAsync_RefusesSamePathInstallDirectoryReplacementBeforeAnyPublication()
+    {
+        using var fixture = await CandidateFixture.CreateAsync();
+        var stateBytes = File.ReadAllBytes(fixture.StatePath);
+        var ledgerBefore = fixture.Registry.ReadCandidate(fixture.Root);
+        var installsBefore = fixture.CaptureInstallIdentities();
+
+        await fixture.Registry.WithQuiescentBoundIncompleteMemberLocationsAsync(
+            fixture.Root, fixture.RootIdentity, EnrollmentEpoch, true,
+            async (locked, token) =>
+            {
+                using var result = await LegacyActiveGraphCandidateProducer.CreateAsync(
+                    fixture.Files, fixture.Registry, fixture.Serializer, locked, MemberId, fixture.Feeds, token);
+                Assert.True(result.IsVerified, result.UnknownReasonCode);
+
+                var replacedPath = fixture.InstallPaths["Root.First"];
+                var displacedPath = replacedPath + ".displaced-" + Guid.NewGuid().ToString("N");
+                Directory.Move(replacedPath, displacedPath);
+                Directory.CreateDirectory(replacedPath);
+                foreach (var file in Directory.EnumerateFiles(displacedPath))
+                    File.Copy(file, Path.Combine(replacedPath, Path.GetFileName(file)));
+
+                var installsAfterReplacement = fixture.CaptureInstallIdentities();
+                Assert.NotEqual(installsBefore["Root.First"].DirectoryIdentity,
+                    installsAfterReplacement["Root.First"].DirectoryIdentity);
+                foreach (var packageId in new[] { "Root.Second", "Shared.Dependency" })
+                    Assert.Equal(installsBefore[packageId], installsAfterReplacement[packageId]);
+
+                var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
+                    result.RevalidateSourceStateAsync(locked, fixture.Serializer, token));
+                Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
+                return true;
+            }, CancellationToken.None);
+
+        Assert.Equal(stateBytes, File.ReadAllBytes(fixture.StatePath));
+        Assert.Equal(ledgerBefore.LedgerDigest, fixture.Registry.ReadCandidate(fixture.Root).LedgerDigest);
+        var installsAfterRefusal = fixture.CaptureInstallIdentities();
+        Assert.NotEqual(installsBefore["Root.First"].DirectoryIdentity,
+            installsAfterRefusal["Root.First"].DirectoryIdentity);
+        foreach (var packageId in new[] { "Root.Second", "Shared.Dependency" })
+            Assert.Equal(installsBefore[packageId], installsAfterRefusal[packageId]);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task WithBoundIncompleteRootAsync_DisposesReturnedResultWhenFinalCancellationPreventsTransfer()
+    {
+        using var fixture = await CandidateFixture.CreateAsync();
+
+        await fixture.Registry.WithQuiescentBoundIncompleteMemberLocationsAsync(
+            fixture.Root, fixture.RootIdentity, EnrollmentEpoch, true,
+            async (locked, _) =>
+            {
+                using var cancellation = new CancellationTokenSource();
+                var probe = CreateNativeHandleProbe(fixture);
+                var refusal = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                    locked.WithBoundIncompleteRootAsync(
+                        MemberId, fixture.RootIdentity, EnrollmentEpoch,
+                        (_, _, _, _) =>
+                        {
+                            cancellation.Cancel();
+                            return Task.FromResult<IDisposable>(probe);
+                        }, cancellation.Token));
+
+                Assert.Equal(cancellation.Token, refusal.CancellationToken);
+                Assert.Equal(1, probe.DisposeCount);
+                AssertProbeHandleClosed(fixture, probe);
+                return true;
+            }, CancellationToken.None);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task WithBoundIncompleteRootAsync_DisposesReturnedResultWhenFinalLocatorReplayRefuses()
+    {
+        using var fixture = await CandidateFixture.CreateAsync();
+        var stateBytes = File.ReadAllBytes(fixture.StatePath);
+        var originalIdentity = fixture.CaptureStateFileIdentity();
+        var ledgerBefore = fixture.Registry.ReadCandidate(fixture.Root);
+
+        await fixture.Registry.WithQuiescentBoundIncompleteMemberLocationsAsync(
+            fixture.Root, fixture.RootIdentity, EnrollmentEpoch, true,
+            async (locked, token) =>
+            {
+                var probe = CreateNativeHandleProbe(fixture);
+                var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
+                    locked.WithBoundIncompleteRootAsync(
+                        MemberId, fixture.RootIdentity, EnrollmentEpoch,
+                        (_, _, _, _) =>
+                        {
+                            ReplaceStateFileIdentity(fixture.StatePath, stateBytes);
+                            return Task.FromResult<IDisposable>(probe);
+                        }, token));
+
+                Assert.NotEqual(originalIdentity, fixture.CaptureStateFileIdentity());
+                Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
+                Assert.Equal(1, probe.DisposeCount);
+                AssertProbeHandleClosed(fixture, probe);
+                return true;
+            }, CancellationToken.None);
+
+        Assert.Equal(stateBytes, File.ReadAllBytes(fixture.StatePath));
+        Assert.Equal(ledgerBefore.LedgerDigest, fixture.Registry.ReadCandidate(fixture.Root).LedgerDigest);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task WithBoundIncompleteRootAsync_PreservesCancellationAndDisposeFailures()
+    {
+        using var fixture = await CandidateFixture.CreateAsync();
+        var cleanupFailure = new IOException("probe cleanup failure");
+
+        await fixture.Registry.WithQuiescentBoundIncompleteMemberLocationsAsync(
+            fixture.Root, fixture.RootIdentity, EnrollmentEpoch, true,
+            async (locked, _) =>
+            {
+                using var cancellation = new CancellationTokenSource();
+                var probe = CreateNativeHandleProbe(fixture, cleanupFailure);
+                var failure = await Assert.ThrowsAsync<AggregateException>(() =>
+                    locked.WithBoundIncompleteRootAsync(
+                        MemberId, fixture.RootIdentity, EnrollmentEpoch,
+                        (_, _, _, _) =>
+                        {
+                            cancellation.Cancel();
+                            return Task.FromResult<IDisposable>(probe);
+                        }, cancellation.Token));
+
+                var failures = failure.Flatten().InnerExceptions;
+                Assert.Contains(failures, static exception => exception is OperationCanceledException);
+                Assert.Contains(failures, exception => ReferenceEquals(exception, cleanupFailure));
+                Assert.Equal(1, probe.DisposeCount);
+                AssertProbeHandleClosed(fixture, probe);
+                return true;
+            }, CancellationToken.None);
+    }
+
+    private static void ReplaceStateFileIdentity(string path, byte[] contents)
+    {
+        var replacement = path + ".replacement-" + Guid.NewGuid().ToString("N");
+        File.WriteAllBytes(replacement, contents);
+        File.Move(replacement, path, overwrite: true);
+    }
+
+    private static DisposableProbe CreateNativeHandleProbe(CandidateFixture fixture, Exception? disposeFailure = null) =>
+        new(fixture.Files.OpenDirectoryChildNoFollow(fixture.Root, "fixture-feed"), disposeFailure);
+
+    private static void AssertProbeHandleClosed(CandidateFixture fixture, DisposableProbe probe)
+    {
+        var refusal = Assert.Throws<PackageStoreAdmissionException>(() => fixture.Files.InspectHandle(probe.OwnedHandle));
+        Assert.Equal(PackageStoreAdmissionReason.ExpiredScope, refusal.Reason);
+    }
+
+    private sealed class DisposableProbe(PhysicalStoreDirectoryHandle ownedHandle, Exception? disposeFailure = null) : IDisposable
+    {
+        internal int DisposeCount { get; private set; }
+        internal PhysicalStoreDirectoryHandle OwnedHandle { get; } = ownedHandle;
+
+        public void Dispose()
+        {
+            DisposeCount++;
+            OwnedHandle.Dispose();
+            if (disposeFailure is not null)
+                throw disposeFailure;
+        }
     }
 
     private sealed class CandidateFixture : IDisposable
@@ -181,6 +345,13 @@ public sealed class LegacyActiveGraphCandidateProducerTests
         internal string StatePath => Fixture.StateFilePath;
         internal string SharedInstallPath => InstallPaths["Shared.Dependency"];
         internal StoreStateRecord State { get; private set; } = null!;
+
+        internal PhysicalFileIdentity CaptureStateFileIdentity()
+        {
+            using var parent = PhysicalStoreTestDirectory.Open(Files, Path.GetDirectoryName(StatePath)!);
+            return (Files.InspectChildNoFollow(parent, Path.GetFileName(StatePath))
+                    ?? throw new InvalidOperationException("The fixture state file is missing.")).Identity;
+        }
 
         internal static async Task<CandidateFixture> CreateAsync(string? refusalScenario = null)
         {

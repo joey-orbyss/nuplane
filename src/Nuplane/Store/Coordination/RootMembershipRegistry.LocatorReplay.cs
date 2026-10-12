@@ -1141,6 +1141,8 @@ internal sealed partial class RootMembershipRegistry
         /// This is deliberately narrower than Complete root access: it exposes no general store operation and
         /// performs the same exact locator/ledger replay on both callback success and failure. The caller must
         /// not reenter this context from the callback; the callback lifetime remains inside the serialized gate.
+        /// A callback transfers ownership of its disposable result only when it returns successfully. If final
+        /// replay or cancellation prevents returning that result, this method disposes it before releasing the gate.
         /// </remarks>
         internal async Task<TResult> WithBoundIncompleteRootAsync<TResult>(
             string memberId,
@@ -1148,6 +1150,7 @@ internal sealed partial class RootMembershipRegistry
             long expectedEnrollmentEpoch,
             Func<IPhysicalStoreFileSystem, PhysicalStoreDirectoryHandle, StoreStateRecord?, CancellationToken, Task<TResult>> callback,
             CancellationToken cancellationToken)
+            where TResult : IDisposable
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(memberId);
             ArgumentNullException.ThrowIfNull(expectedRoot);
@@ -1157,6 +1160,8 @@ internal sealed partial class RootMembershipRegistry
                 throw Refused("Held-root graph reconstruction requires exact bound Incomplete member ownership.");
 
             var operationGateAcquired = false;
+            TResult result = default!;
+            var ownsResult = false;
             try
             {
                 await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -1171,7 +1176,6 @@ internal sealed partial class RootMembershipRegistry
                     throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.RootMismatch,
                         "The retained Incomplete package-store root changed identity.", expectedRoot);
 
-                TResult result;
                 try
                 {
                     var member = ledger.Members.SingleOrDefault(candidate =>
@@ -1188,6 +1192,7 @@ internal sealed partial class RootMembershipRegistry
                     var state = await _readState(memberId, location.Parent, cancellationToken).ConfigureAwait(false);
                     EnsureValidMap();
                     result = await callback(_files, _root, state, cancellationToken).ConfigureAwait(false);
+                    ownsResult = true;
                 }
                 catch
                 {
@@ -1198,6 +1203,22 @@ internal sealed partial class RootMembershipRegistry
                 EnsureValidMap();
                 cancellationToken.ThrowIfCancellationRequested();
                 return result;
+            }
+            catch (Exception primary) when (ownsResult)
+            {
+                try
+                {
+                    result.Dispose();
+                }
+                catch (Exception cleanup)
+                {
+                    throw new AggregateException(
+                        "Bound Incomplete root replay failed and its callback result did not close cleanly.",
+                        primary,
+                        cleanup);
+                }
+
+                throw;
             }
             finally
             {
