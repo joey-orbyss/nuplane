@@ -1,6 +1,8 @@
+using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Store.Coordination.MembershipRecords;
 using Nuplane.Store.Coordination.PhysicalFiles;
+using Nuplane.Store.State;
 
 namespace Nuplane.Store.Coordination;
 
@@ -16,13 +18,15 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
     private readonly string? _configuredRootBaseLocator;
 
     internal RootMembershipRegistry Registry => _registry;
+    internal IStoreRegistry? SelectedStoreRegistry { get; }
 
     internal PackageStoreAdmission(
         IPhysicalStoreFileSystem files,
         RootMembershipRegistry registry,
         string configuredRootLocator,
         string? configuredRootBaseLocator = null,
-        ITrustedPackageStoreRootCatalog? trustedCatalog = null)
+        ITrustedPackageStoreRootCatalog? trustedCatalog = null,
+        IStoreRegistry? selectedStoreRegistry = null)
     {
         ArgumentNullException.ThrowIfNull(files);
         ArgumentNullException.ThrowIfNull(registry);
@@ -33,6 +37,7 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
         _trustedCatalog = trustedCatalog;
         _configuredRootLocator = configuredRootLocator;
         _configuredRootBaseLocator = configuredRootBaseLocator;
+        SelectedStoreRegistry = selectedStoreRegistry;
     }
 
     public async ValueTask<PackageStoreRootOperationAdmission> AcquireConfiguredRootOperationAsync(

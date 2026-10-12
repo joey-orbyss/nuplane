@@ -22,11 +22,27 @@ internal static class PackageStoreRuntimeAdmission
         IStoreRegistry selectedRegistry,
         IStoreStateSerializer serializer,
         string? configuredInstallRoot,
-        ITrustedPackageStoreRootCatalog? trustedCatalog = null)
+        ITrustedPackageStoreRootCatalog? trustedCatalog = null,
+        PackageStoreCompositionSnapshot? composition = null,
+        ITrustedPackageStoreMemberDeclarationCatalog? memberCatalog = null)
     {
         ArgumentNullException.ThrowIfNull(files);
         ArgumentNullException.ThrowIfNull(selectedRegistry);
         ArgumentNullException.ThrowIfNull(serializer);
+
+        if (composition?.IsParticipant == true)
+        {
+            RequireCompleteParticipantRoster(composition);
+            if (files is not UnixPhysicalStoreFileSystem and not WindowsPhysicalStoreFileSystem ||
+                selectedRegistry is not StoreRegistry participantRegistry ||
+                serializer is not StoreStateSerializer ||
+                !ReferenceEquals(participantRegistry.PayloadSerializer, serializer))
+            {
+                throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                    "Coordinated participation requires the built-in native provider, registry, and protection-aware state serializer selected as one composition.");
+            }
+        }
+
         if (selectedRegistry is not StoreRegistry builtIn ||
             !ReferenceEquals(builtIn.PayloadSerializer, serializer) ||
             serializer is not IPackageProtectionStatePayloadSerializer)
@@ -37,7 +53,45 @@ internal static class PackageStoreRuntimeAdmission
             ? Path.Combine(AppContext.BaseDirectory, ".nuplane", "packages")
             : configuredInstallRoot;
         var baseLocator = Path.IsPathFullyQualified(rootLocator) ? null : Directory.GetCurrentDirectory();
-        return new PackageStoreAdmission(files, registry, rootLocator, baseLocator, trustedCatalog);
+        var admission = new PackageStoreAdmission(files, registry, rootLocator, baseLocator, trustedCatalog,
+            selectedStoreRegistry: selectedRegistry);
+        if (composition?.IsParticipant == true)
+        {
+            PackageStoreCompositionValidator.RequireSupportedParticipantSelection(
+                composition,
+                files,
+                selectedRegistry,
+                serializer,
+                admission,
+                trustedCatalog ?? throw new PackageStoreAdmissionException(
+                    PackageStoreAdmissionReason.UnsupportedParticipant,
+                    "Coordinated participation requires the frozen trusted root catalog."),
+                memberCatalog ?? throw new PackageStoreAdmissionException(
+                    PackageStoreAdmissionReason.UnsupportedParticipant,
+                    "Coordinated participation requires the frozen complete member catalog."),
+                new FeedResolutionOptions { PackageInstallRoot = configuredInstallRoot });
+        }
+
+        return admission;
+    }
+
+    internal static void RequireCompleteParticipantRoster(PackageStoreCompositionSnapshot composition)
+    {
+        ArgumentNullException.ThrowIfNull(composition);
+        if (!composition.IsParticipant || !composition.AllClientsParticipate || composition.Members.Count == 0)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "Coordinated participation requires a frozen, nonempty roster with an explicit all-clients acknowledgement.");
+
+        var rootLabels = composition.Roots.Select(static root => root.Label)
+            .Append("default")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (composition.Members.Any(member => !rootLabels.Contains(member.RootLabel)) ||
+            rootLabels.Any(label => !composition.Members.Any(member =>
+                string.Equals(member.RootLabel, label, StringComparison.OrdinalIgnoreCase))))
+        {
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.IncompleteEnrollment,
+                "The frozen coordinated participant roster must include every configured root and cannot reference an undeclared root.");
+        }
     }
 
     internal static IPackageStoreAdmission CreateManual(IStoreRegistry storeRegistry, FeedResolutionOptions feedOptions)

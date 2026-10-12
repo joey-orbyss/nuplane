@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Capabilities;
 using Nuplane.Events;
 using Nuplane.Feeds.Configuration;
 using Nuplane.Health;
@@ -65,26 +66,51 @@ public static class NuplaneRuntimeRegistrationServices
         // constructor the container prefers, and a future constructor added to this type could
         // silently change which one that is. Naming the store-lock-aware constructor here means a
         // registration-order change can never drop the lock unnoticed.
-        services.TryAddSingleton<ILastKnownGoodStartupRecoveryService>(sp => new LastKnownGoodStartupRecoveryService(
-            sp.GetRequiredService<IStoreRegistry>(),
-            sp.GetRequiredService<IObserverEventDispatcher>(),
-            sp.GetRequiredService<StartupRecoveryState>(),
-            sp.GetServices<ICycleFailureContributor>(),
-            sp.GetRequiredService<IOptions<ReconciliationOptions>>(),
-            sp.GetService<IStoreLock>(),
-            sp.GetRequiredService<IPackageStoreAdmission>()));
+        services.TryAddSingleton<ILastKnownGoodStartupRecoveryService>(sp =>
+        {
+            var composition = sp.GetRequiredService<PackageStoreCompositionSnapshot>();
+            return new LastKnownGoodStartupRecoveryService(
+                sp.GetRequiredService<IStoreRegistry>(),
+                sp.GetRequiredService<IObserverEventDispatcher>(),
+                sp.GetRequiredService<StartupRecoveryState>(),
+                sp.GetServices<ICycleFailureContributor>(),
+                sp.GetRequiredService<IOptions<ReconciliationOptions>>(),
+                sp.GetService<IStoreLock>(),
+                composition.IsParticipant ? sp.GetRequiredService<IPackageStoreAdmission>() : null,
+                coordinatedParticipantMode: composition.IsParticipant);
+        });
         services.AddSingleton<ActivePackageCatalog>();
         services.AddSingleton<IActivePackageCatalog>(sp => sp.GetRequiredService<ActivePackageCatalog>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IOperationalStateContributor, PackageCatalogOperationalStateContributor>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IOperationalStateContributor, StartupRecoveryOperationalStateContributor>());
         services.AddSingleton(sp =>
         {
+            var composition = sp.GetRequiredService<PackageStoreCompositionSnapshot>();
             var loadingObserver = sp.GetService<ILeasedPackageGraphLoadingObserver>();
+            var admission = composition.IsParticipant ? sp.GetRequiredService<IPackageStoreAdmission>() : null;
+            var packageResolver = sp.GetRequiredService<IPackageResolver>();
+            var capabilityContributor = sp.GetRequiredService<CapabilityDesiredStateContributor>();
+            if (composition.IsParticipant)
+            {
+                PackageStoreCompositionValidator.RequireSupportedParticipantSelection(
+                    composition,
+                    sp.GetRequiredService<IPhysicalStoreFileSystem>(),
+                    sp.GetRequiredService<IStoreRegistry>(),
+                    sp.GetRequiredService<IStoreStateSerializer>(),
+                    admission!,
+                    sp.GetRequiredService<Nuplane.Store.Coordination.ITrustedPackageStoreRootCatalog>(),
+                    sp.GetRequiredService<Nuplane.Store.Coordination.ITrustedPackageStoreMemberDeclarationCatalog>(),
+                    sp.GetRequiredService<IOptions<FeedResolutionOptions>>().Value);
+                PackageStoreCompositionValidator.RequireSupportedParticipantExecutionRoute(
+                    composition,
+                    packageResolver,
+                    capabilityContributor.MetadataReader);
+            }
             return new ReconciliationService(
             sp.GetServices<IDesiredPackageSource>(),
             sp.GetRequiredService<IDesiredStateAggregator>(),
             sp.GetRequiredService<IDesiredActualDiffEngine>(),
-            sp.GetRequiredService<IPackageResolver>(),
+            packageResolver,
             sp.GetRequiredService<IStoreRegistry>(),
             sp.GetRequiredService<IOptions<ReconciliationOptions>>(),
             sp.GetRequiredService<IObserverEventDispatcher>(),
@@ -104,9 +130,12 @@ public static class NuplaneRuntimeRegistrationServices
             sp.GetService<IStoreLock>(),
             sp.GetServices<IDesiredStateContributor>(),
             sp.GetRequiredService<IOptions<HostProvidedPackagesOptions>>(),
-            sp.GetRequiredService<IPackageStoreAdmission>(),
-            loadingObserver is null ? null : sp.GetService<IResolvedPackageGraphUseLeaseAcquisition>(),
-            loadingObserver);
+            admission,
+            composition.IsParticipant && loadingObserver is not null
+                ? sp.GetService<IResolvedPackageGraphUseLeaseAcquisition>()
+                : null,
+            composition.IsParticipant ? loadingObserver : null,
+            composition);
         });
         services.AddSingleton<IReconciliationService>(sp => sp.GetRequiredService<ReconciliationService>());
     }

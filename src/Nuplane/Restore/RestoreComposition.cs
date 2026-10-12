@@ -12,6 +12,7 @@ using Nuplane.Reconciliation.Configuration;
 using Nuplane.Reconciliation.LockFile;
 using Nuplane.Reconciliation.Models;
 using Nuplane.Reconciliation;
+using Nuplane.Registration;
 using Nuplane.Sources;
 using Nuplane.Store.State;
 using Nuplane.Versioning;
@@ -138,6 +139,14 @@ internal sealed class RestoreComposition : IAsyncDisposable
             _ = provider.GetRequiredService<IOptions<LockFileOptions>>().Value;
             var feedOptions = provider.GetRequiredService<IOptions<FeedResolutionOptions>>().Value;
 
+            if (provider.GetRequiredService<PackageStoreCompositionSnapshot>().IsParticipant)
+            {
+                // Resolve the selected participant service graph before resolving credentials or
+                // invoking a desired-source callback. The reconciliation factory validates the
+                // final provider, registry, serializer, root catalog and complete member roster.
+                _ = provider.GetRequiredService<ReconciliationService>();
+            }
+
             // Built here even when no feed references a secret, so that an ambiguous provider
             // registration — two providers claiming one provider name — refuses the restore while it
             // is still composing, rather than at whichever later moment something first needed a
@@ -197,29 +206,35 @@ internal sealed class RestoreComposition : IAsyncDisposable
     /// </summary>
     public async Task<NuplaneDesiredDescription> DescribeDesiredAsync(CancellationToken cancellationToken)
     {
-        await using var admission = await _provider.GetRequiredService<IPackageStoreAdmission>()
-            .AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Restore, cancellationToken)
-            .ConfigureAwait(false);
-
-        var sources = _provider.GetServices<IDesiredPackageSource>()
-            .Where(static source => source is not DesiredManifestPackageSource { IsEnabled: false })
-            .ToArray();
-        var aggregator = _provider.GetRequiredService<IDesiredStateAggregator>();
-
-        DesiredAggregateResult aggregate;
-        switch (admission.Status)
+        var composition = _provider.GetRequiredService<PackageStoreCompositionSnapshot>();
+        PackageStoreRootOperationAdmission? admission = null;
+        if (composition.IsParticipant)
         {
-            case PackageStoreAdmissionStatus.Unenrolled:
-                // Preserve the host-free compatibility path where no enrolled authority exists.
-                aggregate = await aggregator.AggregateAsync(sources, cancellationToken).ConfigureAwait(false);
-                break;
+            admission = await _provider.GetRequiredService<IPackageStoreAdmission>()
+                .AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Restore, cancellationToken)
+                .ConfigureAwait(false);
+        }
 
-            case PackageStoreAdmissionStatus.Enrolled:
+        await using (admission)
+        {
+            var sources = _provider.GetServices<IDesiredPackageSource>()
+                .Where(static source => source is not DesiredManifestPackageSource { IsEnabled: false })
+                .ToArray();
+            var aggregator = _provider.GetRequiredService<IDesiredStateAggregator>();
+
+            DesiredAggregateResult aggregate;
+            if (!composition.IsParticipant)
+            {
+                aggregate = await aggregator.AggregateAsync(sources, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                if (admission!.Status != PackageStoreAdmissionStatus.Enrolled)
+                    throw Refuse(PackageStoreAdmissionReason.UnsupportedParticipant,
+                        "The selected coordinated participant root is not enrolled; restore cannot fall back to the ordinary route.", admission.Root);
                 if (aggregator is not IScopedDesiredStateAggregator scopedAggregator)
-                {
                     throw Refuse(PackageStoreAdmissionReason.UnsupportedParticipant,
                         "The configured desired-state aggregator has no scoped package-store contract.");
-                }
 
                 CoordinatedReconciliationAdapters.ValidateDesiredPackageSources(sources);
 
@@ -227,40 +242,34 @@ internal sealed class RestoreComposition : IAsyncDisposable
                     ?? throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
                         "Enrolled configured-root admission did not retain an operation owner.");
                 if (admission.Root is null || owner.Root != admission.Root)
-                {
                     throw Refuse(PackageStoreAdmissionReason.RootMismatch,
                         "Configured-root admission and its operation owner identify different roots.", admission.Root);
-                }
 
                 aggregate = await scopedAggregator.AggregateAsync(sources, owner, cancellationToken)
                     .ConfigureAwait(false);
-                break;
+            }
 
-            default:
-                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
-                    "Configured-root admission returned an unknown status.", admission.Root);
+            // A custom scoped aggregator can return source failures itself. Do not turn a typed
+            // authority refusal into an ordinary display string at this host-free boundary.
+            foreach (var sourceError in aggregate.SourceErrors.Values)
+            {
+                if (sourceError is PackageStoreAdmissionException admissionRefusal)
+                    throw admissionRefusal;
+            }
+
+            return new(
+                aggregate.Requests.Select(Describe).ToArray(),
+                CredentialRefusedFeeds,
+                aggregate.SourceErrors.ToDictionary(
+                    static error => error.Key,
+                    static error => error.Value.Message,
+                    StringComparer.Ordinal),
+                StateFilePath,
+                InstallRoot,
+                new Dictionary<string, CapabilitySelection>(
+                    _provider.GetRequiredService<IOptions<CapabilityOptions>>().Value.Selections,
+                    StringComparer.OrdinalIgnoreCase));
         }
-
-        // A custom scoped aggregator can return source failures itself. Do not turn a typed
-        // authority refusal into an ordinary display string at this host-free boundary.
-        foreach (var sourceError in aggregate.SourceErrors.Values)
-        {
-            if (sourceError is PackageStoreAdmissionException admissionRefusal)
-                throw admissionRefusal;
-        }
-
-        return new(
-            aggregate.Requests.Select(Describe).ToArray(),
-            CredentialRefusedFeeds,
-            aggregate.SourceErrors.ToDictionary(
-                static error => error.Key,
-                static error => error.Value.Message,
-                StringComparer.Ordinal),
-            StateFilePath,
-            InstallRoot,
-            new Dictionary<string, CapabilitySelection>(
-                _provider.GetRequiredService<IOptions<CapabilityOptions>>().Value.Selections,
-                StringComparer.OrdinalIgnoreCase));
     }
 
     private static PackageStoreAdmissionException Refuse(
@@ -300,7 +309,26 @@ internal sealed class RestoreComposition : IAsyncDisposable
             return [];
         }
 
-        var state = await _provider.GetRequiredService<IStoreRegistry>().GetStateAsync(cancellationToken).ConfigureAwait(false);
+        var composition = _provider.GetRequiredService<PackageStoreCompositionSnapshot>();
+        StoreStateRecord state;
+        if (!composition.IsParticipant)
+        {
+            state = await _provider.GetRequiredService<IStoreRegistry>().GetStateAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            await using var admission = await _provider.GetRequiredService<IPackageStoreAdmission>()
+                .AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Restore, cancellationToken)
+                .ConfigureAwait(false);
+            if (admission.Status != PackageStoreAdmissionStatus.Enrolled || admission.Owner is null)
+                throw Refuse(PackageStoreAdmissionReason.UnsupportedParticipant,
+                    "The coordinated participant root is no longer admitted for refusal-state reading.", admission.Root);
+            if (_provider.GetRequiredService<IStoreRegistry>() is not ICoordinatedStoreRegistry coordinated)
+                throw Refuse(PackageStoreAdmissionReason.UnsupportedParticipant,
+                    "The participant registry does not expose coordinated state reads.", admission.Root);
+            using var borrow = admission.Owner.Borrow();
+            state = await coordinated.ReadCoordinatedStateAsync(borrow, cancellationToken).ConfigureAwait(false);
+        }
 
         return run.FailedPackages
             .Select(state.LastFailureById.GetValueOrDefault)

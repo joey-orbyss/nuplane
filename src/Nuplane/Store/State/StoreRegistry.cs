@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Store.Coordination.ProtectionRecords;
+using Nuplane.Registration;
 
 namespace Nuplane.Store.State;
 
@@ -19,6 +20,8 @@ public sealed partial class StoreRegistry : ICoordinatedStoreRegistry, IStoreSta
     private readonly string? _coordinatedStateFileLocator;
     private readonly ILogger<StoreRegistry> _logger;
     private readonly EffectiveStorePersistenceSettings? _effectiveSettings;
+    private readonly bool _refuseUnscopedStateAccess;
+    internal bool IsParticipantGuarded => _refuseUnscopedStateAccess;
     private StoreStateRecord _currentState = StoreStateRecord.Empty();
     private bool _loaded;
     private bool _activationLogged;
@@ -53,6 +56,16 @@ public sealed partial class StoreRegistry : ICoordinatedStoreRegistry, IStoreSta
         _coordinatedStateFileLocator = effectiveSettings.CoordinatedStateFileLocator;
     }
 
+    internal StoreRegistry(
+        IStoreStateSerializer serializer,
+        EffectiveStorePersistenceSettings effectiveSettings,
+        ILogger<StoreRegistry> logger,
+        PackageStoreCompositionSnapshot composition)
+        : this(serializer, effectiveSettings, logger)
+    {
+        _refuseUnscopedStateAccess = (composition ?? throw new ArgumentNullException(nameof(composition))).IsParticipant;
+    }
+
     internal IStoreStateSerializer PayloadSerializer => _serializer;
 
     internal string? CoordinatedStateFileLocator => _coordinatedStateFileLocator;
@@ -70,6 +83,7 @@ public sealed partial class StoreRegistry : ICoordinatedStoreRegistry, IStoreSta
     /// <inheritdoc />
     public async Task<IReadOnlyDictionary<string, string>> GetActiveVersionsAsync(CancellationToken cancellationToken)
     {
+        RefuseUnscopedStateAccess();
         await _gate.WaitAsync(cancellationToken);
         try
         {
@@ -86,6 +100,7 @@ public sealed partial class StoreRegistry : ICoordinatedStoreRegistry, IStoreSta
     /// <inheritdoc />
     public async Task<StoreStateRecord> GetStateAsync(CancellationToken cancellationToken)
     {
+        RefuseUnscopedStateAccess();
         await _gate.WaitAsync(cancellationToken);
         try
         {
@@ -112,6 +127,7 @@ public sealed partial class StoreRegistry : ICoordinatedStoreRegistry, IStoreSta
     /// <inheritdoc />
     public async Task<IReadOnlyDictionary<string, ActivePackageDescriptor>> GetActivePackageDescriptorsAsync(CancellationToken cancellationToken)
     {
+        RefuseUnscopedStateAccess();
         await _gate.WaitAsync(cancellationToken);
         try
         {
@@ -127,6 +143,7 @@ public sealed partial class StoreRegistry : ICoordinatedStoreRegistry, IStoreSta
 
     async Task<bool> IStoreStateCycleRefresher.RefreshFromDiskAsync(CancellationToken cancellationToken)
     {
+        RefuseUnscopedStateAccess();
         await _gate.WaitAsync(cancellationToken);
         try
         {
@@ -179,6 +196,7 @@ public sealed partial class StoreRegistry : ICoordinatedStoreRegistry, IStoreSta
         IReadOnlyDictionary<string, ActivePackageDescriptor>? activePackageDescriptors,
         IReadOnlyDictionary<string, GraphActivationRecord>? activeGraphs)
     {
+        RefuseUnscopedStateAccess();
         ArgumentNullException.ThrowIfNull(activeVersions);
         ArgumentNullException.ThrowIfNull(successfullyApplied);
         ArgumentException.ThrowIfNullOrWhiteSpace(correlationId);
@@ -236,6 +254,7 @@ public sealed partial class StoreRegistry : ICoordinatedStoreRegistry, IStoreSta
         string correlationId,
         CancellationToken cancellationToken)
     {
+        RefuseUnscopedStateAccess();
         ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
         ArgumentException.ThrowIfNullOrWhiteSpace(stage);
         ArgumentException.ThrowIfNullOrWhiteSpace(message);
@@ -271,6 +290,7 @@ public sealed partial class StoreRegistry : ICoordinatedStoreRegistry, IStoreSta
         SourceSnapshotRef snapshot,
         CancellationToken cancellationToken)
     {
+        RefuseUnscopedStateAccess();
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceName);
         ArgumentNullException.ThrowIfNull(snapshot);
 
@@ -309,6 +329,13 @@ public sealed partial class StoreRegistry : ICoordinatedStoreRegistry, IStoreSta
 
         _currentState = await _serializer.LoadAsync(_stateFilePath, cancellationToken);
         _loaded = true;
+    }
+
+    private void RefuseUnscopedStateAccess()
+    {
+        if (_refuseUnscopedStateAccess)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "Unscoped registry state access is unavailable in coordinated participant composition; use a live operation borrow.");
     }
 
     private async Task<StoreStateRecord> LoadLatestStateForMutationUnderLockAsync(CancellationToken cancellationToken)

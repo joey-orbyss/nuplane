@@ -26,6 +26,8 @@ public sealed class NuplanePackageMetadataReader : IPackageMetadataReader, IScop
     private const int MaxBoundedTextLength = 512;
     private const int MinSchemaVersion = 1;
     private const int MaxSchemaVersion = 2;
+    private readonly PackageStoreCompositionSnapshot _composition;
+    internal bool IsParticipantGuarded => _composition.IsParticipant;
 
     // Mirrors the member names of Nuplane.Loading.PackageLoadMode (src/Nuplane.Loading.Abstractions/PackageLoadMode.cs).
     // Duplicated, rather than referenced, because core Nuplane must not depend on the optional
@@ -56,7 +58,13 @@ public sealed class NuplanePackageMetadataReader : IPackageMetadataReader, IScop
 
     /// <summary>Creates a package metadata reader.</summary>
     public NuplanePackageMetadataReader()
+        : this(PackageStoreCompositionSnapshot.Ordinary)
     {
+    }
+
+    internal NuplanePackageMetadataReader(PackageStoreCompositionSnapshot composition)
+    {
+        _composition = composition ?? throw new ArgumentNullException(nameof(composition));
     }
 
     /// <summary>
@@ -70,6 +78,9 @@ public sealed class NuplanePackageMetadataReader : IPackageMetadataReader, IScop
     public NuplanePackageMetadataReadResult Read(string packageId, string version, string installPath)
     {
         ValidateReadArguments(packageId, version, installPath);
+
+        if (_composition.IsParticipant)
+            return NuplanePackageMetadataReadResult.Refused(PackageStoreAdmissionReason.UnsupportedParticipant);
 
         var metadataPath = Path.Combine(installPath, MetadataFileName);
         if (!File.Exists(metadataPath))

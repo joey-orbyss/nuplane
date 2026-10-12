@@ -42,8 +42,9 @@ internal sealed class LastKnownGoodStartupRecoveryService : ILastKnownGoodStartu
     private readonly StartupRecoveryState _startupRecoveryState;
     private readonly IReadOnlyList<ICycleFailureContributor> _cycleFailureContributors;
     private readonly IStoreLock? _storeLock;
-    private readonly IPackageStoreAdmission _installPathAdmission;
+    private readonly IPackageStoreAdmission? _installPathAdmission;
     private readonly IPackageStoreAdmission? _configuredRootAdmission;
+    private readonly bool _coordinatedParticipantMode;
     private readonly TimeSpan _storeLockTimeout;
 
     /// <summary>
@@ -100,9 +101,10 @@ internal sealed class LastKnownGoodStartupRecoveryService : ILastKnownGoodStartu
     /// </param>
     /// <param name="packageStoreAdmission">
     /// Configured-root membership admission acquired before state reads by dependency injection.
-    /// When omitted, the public manual composition classifies exact active install paths after its
-    /// selected registry supplies descriptive state.
+    /// Explicitly supplied admissions also enable protected install-path classification in a
+    /// low-level composition.
     /// </param>
+    /// <param name="coordinatedParticipantMode">Whether this composition requires coordinated participant admission and must refuse the unscoped recovery path.</param>
     internal LastKnownGoodStartupRecoveryService(
         IStoreRegistry storeRegistry,
         IObserverEventDispatcher observerEventDispatcher,
@@ -110,7 +112,8 @@ internal sealed class LastKnownGoodStartupRecoveryService : ILastKnownGoodStartu
         IEnumerable<ICycleFailureContributor>? cycleFailureContributors,
         IOptions<ReconciliationOptions>? reconciliationOptions,
         IStoreLock? storeLock,
-        IPackageStoreAdmission? packageStoreAdmission = null)
+        IPackageStoreAdmission? packageStoreAdmission = null,
+        bool coordinatedParticipantMode = false)
     {
         _storeRegistry = storeRegistry ?? throw new ArgumentNullException(nameof(storeRegistry));
         _observerEventDispatcher = observerEventDispatcher ?? throw new ArgumentNullException(nameof(observerEventDispatcher));
@@ -119,8 +122,8 @@ internal sealed class LastKnownGoodStartupRecoveryService : ILastKnownGoodStartu
         _storeLockTimeout = (reconciliationOptions?.Value ?? new ReconciliationOptions()).StartupRecoveryStoreLockTimeout;
         _storeLock = storeLock;
         _configuredRootAdmission = packageStoreAdmission;
-        _installPathAdmission = packageStoreAdmission ??
-            PackageStoreRuntimeAdmission.CreateManualInstallPathClassifier();
+        _installPathAdmission = packageStoreAdmission;
+        _coordinatedParticipantMode = coordinatedParticipantMode;
     }
 
     public async Task<LastKnownGoodStartupRecoveryResult> TryRecoverAsync(
@@ -128,6 +131,9 @@ internal sealed class LastKnownGoodStartupRecoveryService : ILastKnownGoodStartu
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(correlationId);
+
+        if (_coordinatedParticipantMode)
+            throw RefuseEnrolled(root: null);
 
         if (_configuredRootAdmission is null)
             return await TryRecoverAfterRootAdmissionAsync(correlationId, cancellationToken).ConfigureAwait(false);
@@ -169,13 +175,16 @@ internal sealed class LastKnownGoodStartupRecoveryService : ILastKnownGoodStartu
         // Manual compositions have no configured root to classify. Their selected registry is
         // allowed to provide descriptive state, after which every exact active descriptor path is
         // checked through the ledger-only metadata path before Directory.Exists or an observer.
-        await using var pathAdmission = await _installPathAdmission.AcquireForInstallPathsAsync(
-            activeDescriptors.Select(static descriptor => descriptor.InstallPath).ToArray(),
-            PackageStoreAdmissionKind.StartupRecovery, cancellationToken).ConfigureAwait(false);
-        var enrolledPath = pathAdmission.Entries.FirstOrDefault(static entry =>
-            entry.Status == PackageStoreAdmissionStatus.Enrolled);
-        if (enrolledPath is not null)
-            throw RefuseEnrolled(enrolledPath.Root);
+        if (_installPathAdmission is not null)
+        {
+            await using var pathAdmission = await _installPathAdmission.AcquireForInstallPathsAsync(
+                activeDescriptors.Select(static descriptor => descriptor.InstallPath).ToArray(),
+                PackageStoreAdmissionKind.StartupRecovery, cancellationToken).ConfigureAwait(false);
+            var enrolledPath = pathAdmission.Entries.FirstOrDefault(static entry =>
+                entry.Status == PackageStoreAdmissionStatus.Enrolled);
+            if (enrolledPath is not null)
+                throw RefuseEnrolled(enrolledPath.Root);
+        }
 
         var validation = Validate(state);
         if (!validation.Succeeded)

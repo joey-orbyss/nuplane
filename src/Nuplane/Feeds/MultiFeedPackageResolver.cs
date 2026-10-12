@@ -9,6 +9,7 @@ using Nuplane.Feeds.Policy;
 using Nuplane.Feeds.Versioning;
 using Nuplane.Observability;
 using Nuplane.Reconciliation.Models;
+using Nuplane.Registration;
 using Nuplane.Store.Coordination;
 using Nuplane.Versioning;
 using NuGet.Versioning;
@@ -28,6 +29,9 @@ public sealed class MultiFeedPackageResolver : IScopedPackageResolver
     private readonly IVersionRangeEvaluator _versionRangeEvaluator;
     private readonly ILogger<MultiFeedPackageResolver> _logger;
     private readonly ReconciliationMetrics? _metrics;
+    private readonly bool _refuseUnscopedResolution;
+    internal bool IsParticipantGuarded => _refuseUnscopedResolution;
+    internal IRemotePackageAcquirer RemotePackageAcquirer => _remotePackageAcquirer;
     private readonly ConcurrentDictionary<string, FeedResolutionDecision> _decisions = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, int> _attempts = new(StringComparer.OrdinalIgnoreCase);
 
@@ -49,6 +53,20 @@ public sealed class MultiFeedPackageResolver : IScopedPackageResolver
         IVersionRangeEvaluator versionRangeEvaluator,
         ILogger<MultiFeedPackageResolver> logger,
         ReconciliationMetrics? metrics = null)
+        : this(options, policy, remotePackageAcquirer, versionEnumerator, versionRangeEvaluator, logger, metrics,
+            PackageStoreCompositionSnapshot.Ordinary)
+    {
+    }
+
+    internal MultiFeedPackageResolver(
+        IOptions<FeedResolutionOptions> options,
+        FeedResolutionPolicy policy,
+        IRemotePackageAcquirer remotePackageAcquirer,
+        IFeedVersionEnumerator versionEnumerator,
+        IVersionRangeEvaluator versionRangeEvaluator,
+        ILogger<MultiFeedPackageResolver> logger,
+        ReconciliationMetrics? metrics,
+        PackageStoreCompositionSnapshot composition)
     {
         ArgumentNullException.ThrowIfNull(options);
         _options = options.Value;
@@ -58,11 +76,16 @@ public sealed class MultiFeedPackageResolver : IScopedPackageResolver
         _versionRangeEvaluator = versionRangeEvaluator ?? throw new ArgumentNullException(nameof(versionRangeEvaluator));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _metrics = metrics;
+        _refuseUnscopedResolution = (composition ?? throw new ArgumentNullException(nameof(composition))).IsParticipant;
     }
 
     /// <inheritdoc />
     public Task<ResolvedPackage> ResolveAsync(PackageRequest request, CancellationToken cancellationToken)
-        => ResolveCoreAsync(request, borrow: null, cancellationToken);
+        => _refuseUnscopedResolution
+            ? Task.FromException<ResolvedPackage>(new PackageStoreAdmissionException(
+                PackageStoreAdmissionReason.UnsupportedParticipant,
+                "Unscoped package resolution is unavailable in coordinated participant composition; use a live operation borrow."))
+            : ResolveCoreAsync(request, borrow: null, cancellationToken);
 
     /// <inheritdoc />
     public Task<ResolvedPackage> ResolveAsync(

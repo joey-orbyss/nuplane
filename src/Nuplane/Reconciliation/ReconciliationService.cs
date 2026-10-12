@@ -9,6 +9,7 @@ using Nuplane.Observability;
 using Nuplane.Reconciliation.Configuration;
 using Nuplane.Reconciliation.Middleware;
 using Nuplane.Reconciliation.Models;
+using Nuplane.Registration;
 using Nuplane.Reconciliation.LockFile;
 using Nuplane.Sources;
 using Nuplane.Store.Activation;
@@ -17,7 +18,6 @@ using Nuplane.Store.Coordination;
 using Nuplane.Store.State;
 using Nuplane.Store.Transactions;
 using Nuplane.Abstractions.PackageStoreProtection;
-using Nuplane.Registration;
 
 namespace Nuplane.Reconciliation;
 
@@ -33,7 +33,8 @@ public sealed class ReconciliationService : IReconciliationService
     private readonly IStoreLock? _storeLock;
     private readonly IStoreRegistry _storeRegistry;
     private readonly DesiredSourceSnapshotCache _sourceSnapshotCache;
-    private readonly IPackageStoreAdmission _packageStoreAdmission;
+    private readonly IPackageStoreAdmission? _packageStoreAdmission;
+    private readonly bool _coordinatedParticipantRoute;
     private readonly IResolvedPackageGraphUseLeaseAcquisition? _graphUseLeaseAcquisition;
     private readonly ILeasedPackageGraphLoadingObserver? _leasedPackageGraphLoadingObserver;
     private readonly IReconciliationLogger _reconciliationLogger;
@@ -176,6 +177,7 @@ public sealed class ReconciliationService : IReconciliationService
     /// <param name="packageStoreAdmission">The package-store membership admission acquired before state reads.</param>
     /// <param name="graphUseLeaseAcquisition">Publishes graph-use owners before deferred loading begins.</param>
     /// <param name="leasedPackageGraphLoadingObserver">Performs lease-bound loading after short admission locks are released.</param>
+    /// <param name="composition">The frozen composition route selected by host registration.</param>
     internal ReconciliationService(
         IEnumerable<IDesiredPackageSource> sources,
         IDesiredStateAggregator desiredStateAggregator,
@@ -202,7 +204,8 @@ public sealed class ReconciliationService : IReconciliationService
         IOptions<HostProvidedPackagesOptions>? hostProvidedPackagesOptions = null,
         IPackageStoreAdmission? packageStoreAdmission = null,
         IResolvedPackageGraphUseLeaseAcquisition? graphUseLeaseAcquisition = null,
-        ILeasedPackageGraphLoadingObserver? leasedPackageGraphLoadingObserver = null)
+        ILeasedPackageGraphLoadingObserver? leasedPackageGraphLoadingObserver = null,
+        PackageStoreCompositionSnapshot? composition = null)
     {
         _storeLock = storeLock;
 
@@ -231,7 +234,8 @@ public sealed class ReconciliationService : IReconciliationService
         var retry = retryPolicy ?? throw new ArgumentNullException(nameof(retryPolicy));
         var dryRun = dryRunPlanner ?? throw new ArgumentNullException(nameof(dryRunPlanner));
         var cleanupService = packageCleanupService ?? throw new ArgumentNullException(nameof(packageCleanupService));
-        _packageStoreAdmission = packageStoreAdmission ?? PackageStoreRuntimeAdmission.CreateManual(storeReg, feedResOpts);
+        _packageStoreAdmission = packageStoreAdmission;
+        _coordinatedParticipantRoute = composition?.IsParticipant == true || packageStoreAdmission is not null;
         var transitionDriver = _packageStoreAdmission is PackageStoreAdmission builtInAdmission &&
                                storeReg is ICoordinatedStoreRegistry coordinatedStore
             ? new CoordinatedActiveStateTransitionDriver(
@@ -307,13 +311,23 @@ public sealed class ReconciliationService : IReconciliationService
 
             // Phase A owns root admission and StoreLock only while reading, resolving, applying,
             // publishing state and publishing graph-use owners. Both scopes end before phase B.
-            await using (var rootAdmission = await _packageStoreAdmission.AcquireConfiguredRootOperationAsync(
-                             PackageStoreAdmissionKind.Reconciliation, cancellationToken).ConfigureAwait(false))
+            var rootAdmission = _coordinatedParticipantRoute
+                ? await (_packageStoreAdmission ?? throw new PackageStoreAdmissionException(
+                    PackageStoreAdmissionReason.UnsupportedParticipant,
+                    "Coordinated participant composition has no configured-root admission service."))
+                    .AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Reconciliation, cancellationToken)
+                    .ConfigureAwait(false)
+                : null;
+            await using (rootAdmission)
             {
-                var owner = rootAdmission.Status == PackageStoreAdmissionStatus.Enrolled
+                var owner = rootAdmission?.Status == PackageStoreAdmissionStatus.Enrolled
                     ? rootAdmission.Owner ?? throw new PackageStoreAdmissionException(
                         PackageStoreAdmissionReason.UnknownAuthority, "Enrolled reconciliation has no live operation owner.")
                     : null;
+
+                if (_coordinatedParticipantRoute && owner is null)
+                    throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                        "The selected coordinated participant root did not pass complete member admission.", rootAdmission?.Root);
 
                 if (owner is not null)
                 {
@@ -531,7 +545,10 @@ public sealed class ReconciliationService : IReconciliationService
     private async Task<IReadOnlyDictionary<string, string>?> ReadCurrentActiveVersionsForLoadingAsync(
         CancellationToken cancellationToken)
     {
-        await using var admission = await _packageStoreAdmission.AcquireConfiguredRootOperationAsync(
+        var packageStoreAdmission = _packageStoreAdmission
+            ?? throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "Deferred package loading has no configured-root admission service.");
+        await using var admission = await packageStoreAdmission.AcquireConfiguredRootOperationAsync(
             PackageStoreAdmissionKind.Reconciliation, cancellationToken).ConfigureAwait(false);
         if (admission.Status != PackageStoreAdmissionStatus.Enrolled || admission.Owner is null)
             return null;
@@ -553,7 +570,10 @@ public sealed class ReconciliationService : IReconciliationService
         if (failures.Count == 0)
             return;
 
-        await using var admission = await _packageStoreAdmission.AcquireConfiguredRootOperationAsync(
+        var packageStoreAdmission = _packageStoreAdmission
+            ?? throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "Deferred package failure publication has no configured-root admission service.");
+        await using var admission = await packageStoreAdmission.AcquireConfiguredRootOperationAsync(
             PackageStoreAdmissionKind.Reconciliation, cancellationToken).ConfigureAwait(false);
         if (admission.Status != PackageStoreAdmissionStatus.Enrolled || admission.Owner is null)
         {

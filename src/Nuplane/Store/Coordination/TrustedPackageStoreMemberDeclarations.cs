@@ -60,6 +60,11 @@ internal sealed class TrustedPackageStoreMemberDeclarationDefinition : ITrustedP
 
     public bool IsComplete { get; }
     public IReadOnlyList<TrustedPackageStoreMemberDeclaration> Declarations { get; }
+
+    internal static TrustedPackageStoreMemberDeclarationDefinition? From(IServiceCollection services)
+        => services.LastOrDefault(static descriptor =>
+                descriptor.ServiceType == typeof(ITrustedPackageStoreMemberDeclarationDefinition))
+            ?.ImplementationInstance as TrustedPackageStoreMemberDeclarationDefinition;
 }
 
 /// <summary>Resolves the host's explicitly frozen declaration snapshot from dependency injection.</summary>

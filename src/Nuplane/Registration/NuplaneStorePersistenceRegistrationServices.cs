@@ -38,14 +38,16 @@ internal static class NuplaneStorePersistenceRegistrationServices
         services.TryAddSingleton<PackageStoreRootResolver>();
         services.TryAddSingleton<IPackageStoreRootResolver>(sp => sp.GetRequiredService<PackageStoreRootResolver>());
         TrustedPackageStoreMemberDeclarationRegistration.RegisterDefault(services);
-        services.AddSingleton<StoreStateSerializer>();
+        services.AddSingleton(sp => new StoreStateSerializer(
+            sp.GetRequiredService<PackageStoreCompositionSnapshot>()));
         services.AddSingleton<IStoreStateSerializer>(sp => sp.GetRequiredService<StoreStateSerializer>());
         services.AddSingleton<EffectiveStorePersistenceSettings>(sp => EffectiveStorePersistenceSettings.Resolve(sp.GetRequiredService<IOptions<StoreRegistryOptions>>().Value));
         services.AddSingleton<StoreRegistry>(sp =>
             new(
                 sp.GetRequiredService<IStoreStateSerializer>(),
                 sp.GetRequiredService<EffectiveStorePersistenceSettings>(),
-                sp.GetRequiredService<ILogger<StoreRegistry>>()));
+                sp.GetRequiredService<ILogger<StoreRegistry>>(),
+                sp.GetRequiredService<PackageStoreCompositionSnapshot>()));
         services.AddSingleton<IStoreRegistry>(sp => sp.GetRequiredService<StoreRegistry>());
         services.AddSingleton<IPhysicalStoreFileSystem>(_ => PackageStoreRuntimeAdmission.CreatePhysicalFileSystem());
         services.AddSingleton<IPackageStoreAdmission>(sp =>
@@ -56,7 +58,9 @@ internal static class NuplaneStorePersistenceRegistrationServices
                 sp.GetRequiredService<IStoreRegistry>(),
                 sp.GetRequiredService<IStoreStateSerializer>(),
                 feedOptions.PackageInstallRoot,
-                sp.GetRequiredService<ITrustedPackageStoreRootCatalog>());
+                sp.GetRequiredService<ITrustedPackageStoreRootCatalog>(),
+                sp.GetRequiredService<PackageStoreCompositionSnapshot>(),
+                sp.GetRequiredService<ITrustedPackageStoreMemberDeclarationCatalog>());
         });
         services.TryAddSingleton<PackageStoreEnrollmentPreviewService>(sp =>
         {

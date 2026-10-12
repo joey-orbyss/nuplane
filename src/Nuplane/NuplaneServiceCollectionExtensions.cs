@@ -94,7 +94,13 @@ public static class NuplaneServiceCollectionExtensions
 
         var builder = new NuplaneBuilder(services);
         configure(builder);
-        TrustedPackageStoreRootCatalogRegistration.Register(services, builder.FreezePackageStoreRoots());
+        var roots = builder.FreezePackageStoreRoots();
+        TrustedPackageStoreRootCatalogRegistration.Register(services, roots);
+        var members = builder.FreezePackageStoreMembers();
+        var composition = builder.FreezeComposition(roots);
+        if (composition.IsParticipant)
+            TrustedPackageStoreMemberDeclarationRegistration.Register(services, members);
+        PackageStoreCompositionSnapshot.Register(services, composition);
 
         return services;
     }

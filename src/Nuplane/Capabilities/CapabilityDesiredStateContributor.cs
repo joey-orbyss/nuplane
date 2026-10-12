@@ -51,6 +51,7 @@ internal sealed class CapabilityDesiredStateContributor(
     private readonly IReconciliationLogger _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     private readonly IPackageMetadataReader _metadataReader = metadataReader ?? throw new ArgumentNullException(nameof(metadataReader));
     private readonly CycleMemo _cycle = new();
+    internal IPackageMetadataReader MetadataReader => _metadataReader;
 
     /// <inheritdoc />
     public Task<DesiredStateContribution> ContributeAsync(DesiredStateContributionContext context, CancellationToken ct)

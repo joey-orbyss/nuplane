@@ -7,6 +7,7 @@ using Nuplane.Feeds.Builder;
 using Nuplane.Feeds.Registration;
 using Nuplane.Hosting;
 using Nuplane.Reconciliation.Configuration;
+using Nuplane.Registration;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.State;
 
@@ -19,6 +20,9 @@ namespace Nuplane.Builder;
 public sealed class NuplaneBuilder
 {
     private readonly List<TrustedPackageStoreRootRegistration> _packageStoreRoots;
+    private TrustedPackageStoreMemberDeclarationDefinition? _packageStoreMembers;
+    private bool _allPackageStoreClientsParticipate;
+    private bool _hasFrozenPackageStoreParticipation;
 
     /// <summary>Gets the underlying <see cref="IServiceCollection"/>.</summary>
     public IServiceCollection Services { get; }
@@ -48,6 +52,12 @@ public sealed class NuplaneBuilder
     {
         Services = services;
         _packageStoreRoots = TrustedPackageStoreRootCatalogDefinition.From(services)?.AdditionalRoots.ToList() ?? [];
+        var previousComposition = PackageStoreCompositionSnapshot.From(services);
+        _hasFrozenPackageStoreParticipation = previousComposition?.IsParticipant == true;
+        _allPackageStoreClientsParticipate = previousComposition?.AllClientsParticipate == true;
+        _packageStoreMembers = previousComposition is { IsParticipant: true }
+            ? new TrustedPackageStoreMemberDeclarationDefinition(true, previousComposition.Members)
+            : TrustedPackageStoreMemberDeclarationDefinition.From(services);
     }
 
     /// <summary>
@@ -85,6 +95,90 @@ public sealed class NuplaneBuilder
 
         _packageStoreRoots.Add(new(label, rootLocator));
         return this;
+    }
+
+    /// <summary>
+    /// Selects coordinated package-store participation and declares the complete client roster for
+    /// each participating root. This is an operator assertion: Nuplane validates the declared
+    /// members but cannot discover clients that run outside this composition.
+    /// </summary>
+    /// <param name="completeRoster">Every participating client and its absolute state-file path.</param>
+    /// <param name="allClientsParticipate">Must be <see langword="true"/> to acknowledge the complete roster.</param>
+    /// <returns>This builder.</returns>
+    /// <exception cref="ArgumentException">The roster is empty, incomplete, malformed, or references an unregistered root.</exception>
+    /// <exception cref="InvalidOperationException">A later AddNuplane call attempts to redefine a frozen participant roster.</exception>
+    public NuplaneBuilder UseCoordinatedPackageStore(
+        IEnumerable<PackageStoreMemberDeclaration> completeRoster,
+        bool allClientsParticipate)
+    {
+        ArgumentNullException.ThrowIfNull(completeRoster);
+        if (!allClientsParticipate)
+            throw new ArgumentException("Coordinated participation requires an explicit acknowledgement that every client is declared.", nameof(allClientsParticipate));
+
+        var roots = _packageStoreRoots.Select(static root => root.Label).Append("default")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var declarations = completeRoster.Select(declaration =>
+        {
+            if (declaration is null)
+                throw new ArgumentException("A package-store member declaration cannot be null.", nameof(completeRoster));
+            ArgumentException.ThrowIfNullOrWhiteSpace(declaration.RootLabel);
+            ArgumentException.ThrowIfNullOrWhiteSpace(declaration.MemberId);
+            ArgumentException.ThrowIfNullOrWhiteSpace(declaration.StateFilePath);
+            if (!roots.Contains(declaration.RootLabel))
+                throw new ArgumentException($"Package-store member '{declaration.MemberId}' references unregistered root '{declaration.RootLabel}'.", nameof(completeRoster));
+            if (!Path.IsPathFullyQualified(declaration.StateFilePath))
+                throw new ArgumentException($"Package-store member '{declaration.MemberId}' must declare an absolute state-file path.", nameof(completeRoster));
+
+            return new TrustedPackageStoreMemberDeclaration(
+                declaration.RootLabel,
+                declaration.MemberId,
+                Path.GetFullPath(declaration.StateFilePath));
+        }).ToArray();
+
+        if (declarations.Length == 0)
+            throw new ArgumentException("The complete package-store participant roster must contain at least one member.", nameof(completeRoster));
+
+        var definition = new TrustedPackageStoreMemberDeclarationDefinition(true, declarations);
+        if (_hasFrozenPackageStoreParticipation && !SameRoster(_packageStoreMembers!, definition))
+            throw new InvalidOperationException("The coordinated package-store participant roster is frozen and cannot be redefined by a later AddNuplane call.");
+
+        _packageStoreMembers = definition;
+        _allPackageStoreClientsParticipate = true;
+        _hasFrozenPackageStoreParticipation = true;
+        return this;
+    }
+
+    internal TrustedPackageStoreMemberDeclarationDefinition FreezePackageStoreMembers()
+        => _packageStoreMembers ?? new TrustedPackageStoreMemberDeclarationDefinition(false, []);
+
+    internal PackageStoreCompositionSnapshot FreezeComposition(TrustedPackageStoreRootCatalogDefinition roots)
+    {
+        ArgumentNullException.ThrowIfNull(roots);
+        var members = FreezePackageStoreMembers();
+        var composition = new PackageStoreCompositionSnapshot(
+            _hasFrozenPackageStoreParticipation
+                ? PackageStoreCompositionMode.CoordinatedParticipant
+                : PackageStoreCompositionMode.Ordinary,
+            _allPackageStoreClientsParticipate,
+            roots.AdditionalRoots,
+            members.Declarations);
+        if (composition.IsParticipant)
+            PackageStoreRuntimeAdmission.RequireCompleteParticipantRoster(composition);
+        return composition;
+    }
+
+    private static bool SameRoster(
+        TrustedPackageStoreMemberDeclarationDefinition current,
+        TrustedPackageStoreMemberDeclarationDefinition requested)
+    {
+        if (!current.IsComplete || !requested.IsComplete || current.Declarations.Count != requested.Declarations.Count)
+            return false;
+
+        var pathComparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        return current.Declarations.All(existing => requested.Declarations.Any(candidate =>
+            string.Equals(existing.RootLabel, candidate.RootLabel, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(existing.MemberId, candidate.MemberId, StringComparison.Ordinal) &&
+            string.Equals(existing.StateFileLocator, candidate.StateFileLocator, pathComparison)));
     }
 
     internal TrustedPackageStoreRootCatalogDefinition FreezePackageStoreRoots()
