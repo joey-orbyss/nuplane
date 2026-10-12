@@ -17,6 +17,7 @@ using Nuplane.Loading;
 using Nuplane.Reconciliation;
 using Nuplane.Reconciliation.LockFile;
 using Nuplane.Reconciliation.Models;
+using Nuplane.Registration;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.GraphUseRecords;
 using Nuplane.Store.Coordination.ProtectionRecords;
@@ -41,7 +42,12 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             secret, new AuthenticatedLoopbackNuGetFeed.Dependency("Shared.Dependency", "2.1.0"));
         using var secretScope = new EnvironmentVariableScope(variableName, secret);
         var remoteFeed = new FeedDefinition("feed", feed.ServiceIndexUri, "secrets://env/" + variableName);
-        await using var provider = fixture.CreateProvider("member-b", desiredRequests: [request], remoteFeed: remoteFeed);
+        await using var provider = fixture.CreateProvider("member-b", desiredRequests: [request], remoteFeed: remoteFeed,
+            participant: true);
+
+        Assert.True(provider.GetRequiredService<PackageStoreCompositionSnapshot>().IsParticipant);
+        var reconciliationService = provider.GetRequiredService<ReconciliationService>();
+        Assert.Same(reconciliationService, provider.GetRequiredService<IReconciliationService>());
 
         Assert.IsType<MultiFeedPackageResolver>(provider.GetRequiredService<IPackageResolver>());
         Assert.IsType<NuGetRemotePackageAcquirer>(provider.GetRequiredService<IRemotePackageAcquirer>());
