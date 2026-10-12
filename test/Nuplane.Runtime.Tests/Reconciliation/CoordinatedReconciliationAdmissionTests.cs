@@ -105,6 +105,77 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
     }
 
     [Fact]
+    public async Task ParticipantReconciliation_CancellationDuringScopedSourceReadDrainsOwnershipWithoutPublishing()
+    {
+        using var fixture = await CompletedMembershipFixture.CreateAsync();
+        var entered = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var source = new ScopedFileSource(fixture.SharedInstallPath, entered, release.Task, failAfterRead: false);
+        await using var provider = CreateProvider(fixture.PackageInstallRoot, fixture.StatePaths["first"], source,
+            participantRoster: CreateParticipantRoster(fixture));
+        await using var peer = CreateProvider(fixture.PackageInstallRoot, fixture.StatePaths["second"],
+            new ScopedFileSource(fixture.SharedInstallPath, entered: null, release: null, failAfterRead: false),
+            participantRoster: CreateParticipantRoster(fixture));
+        Assert.True(provider.GetRequiredService<PackageStoreCompositionSnapshot>().IsParticipant);
+        Assert.Same(provider.GetRequiredService<ReconciliationService>(),
+            provider.GetRequiredService<IReconciliationService>());
+
+        foreach (var composition in new[] { provider, peer })
+        {
+            using var lockWarmup = composition.GetRequiredService<IStoreLock>().Acquire();
+            Assert.Equal(StoreLockOutcome.Acquired, lockWarmup.Outcome);
+        }
+
+        var evidenceBefore = CaptureFixtureEvidence(fixture.Temp.Path);
+
+        using var cancellation = new CancellationTokenSource();
+        var cycle = provider.GetRequiredService<IReconciliationService>().TriggerAsync(
+            ReconciliationTrigger.Manual("cancel-admitted-source-read"), cancellation.Token);
+        try
+        {
+            Assert.Equal("shared sentinel", await entered.Task.WaitAsync(TimeSpan.FromSeconds(10)));
+            Assert.Equal(1, source.CallbackCount);
+            Assert.Equal(1, source.SentinelReadCount);
+
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+                cycle.WaitAsync(TimeSpan.FromSeconds(10)));
+        }
+        finally
+        {
+            release.TrySetResult();
+            if (!cycle.IsCompleted)
+                cancellation.Cancel();
+            try { await cycle.WaitAsync(TimeSpan.FromSeconds(10)); }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+        }
+
+        Assert.Equal(1, source.CallbackCount);
+        Assert.Equal(1, source.SentinelReadCount);
+        Assert.Equal(PackageStoreAdmissionReason.ExpiredScope,
+            Assert.Throws<PackageStoreAdmissionException>(() =>
+                Assert.IsType<PackageStoreOperationBorrow>(source.LastBorrow)
+                    .ValidateForInstallPath(fixture.SharedInstallPath)).Reason);
+        Assert.Equal(evidenceBefore.ToArray(), CaptureFixtureEvidence(fixture.Temp.Path).ToArray());
+
+        var admission = provider.GetRequiredService<IPackageStoreAdmission>();
+        using var maintenanceDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using (var reopened = await admission.AcquireConfiguredRootOperationAsync(
+                         PackageStoreAdmissionKind.Maintenance, maintenanceDeadline.Token))
+            Assert.Equal(PackageStoreAdmissionStatus.Enrolled, reopened.Status);
+
+        using (var storeLock = provider.GetRequiredService<IStoreLock>().Acquire())
+            Assert.Equal(StoreLockOutcome.Acquired, storeLock.Outcome);
+
+        using var peerMaintenanceDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await using (var peerAdmission = await peer.GetRequiredService<IPackageStoreAdmission>()
+                         .AcquireConfiguredRootOperationAsync(PackageStoreAdmissionKind.Maintenance,
+                             peerMaintenanceDeadline.Token))
+            Assert.Equal(PackageStoreAdmissionStatus.Enrolled, peerAdmission.Status);
+        Assert.Equal(evidenceBefore.ToArray(), CaptureFixtureEvidence(fixture.Temp.Path).ToArray());
+    }
+
+    [Fact]
     public async Task ThirdUnlistedStateSlot_IsRefusedBeforeSourceCallback()
     {
         using var fixture = await CompletedMembershipFixture.CreateAsync();
@@ -659,8 +730,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         await using var provider = CreateProvider(fixture.PackageInstallRoot, fixture.StatePaths["first"], source,
             dispatcherOverride: replaceObserver ? dispatcher : null,
             cleanupServiceOverride: replaceObserver ? null : cleanup,
-            participantRoster: fixture.StatePaths.Select(static member =>
-                new Nuplane.Builder.PackageStoreMemberDeclaration("default", member.Key, member.Value)).ToArray());
+            participantRoster: CreateParticipantRoster(fixture));
         Assert.True(provider.GetRequiredService<PackageStoreCompositionSnapshot>().IsParticipant);
         Assert.Same(provider.GetRequiredService<ReconciliationService>(),
             provider.GetRequiredService<IReconciliationService>());
@@ -976,6 +1046,10 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         return services.BuildServiceProvider();
     }
 
+    private static IReadOnlyList<Nuplane.Builder.PackageStoreMemberDeclaration> CreateParticipantRoster(
+        CompletedMembershipFixture fixture) => fixture.StatePaths.Select(static member =>
+        new Nuplane.Builder.PackageStoreMemberDeclaration("default", member.Key, member.Value)).ToArray();
+
     private static IReadOnlyDictionary<string, string> CaptureFixtureEvidence(string rootPath)
     {
         var evidence = new SortedDictionary<string, string>(StringComparer.Ordinal);
@@ -1045,6 +1119,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
 
         internal int CallbackCount => Volatile.Read(ref _callbackCount);
         internal int SentinelReadCount => Volatile.Read(ref _sentinelReadCount);
+        internal PackageStoreOperationBorrow? LastBorrow { get; private set; }
 
         public Task<IReadOnlyList<PackageRequest>> GetDesiredAsync(CancellationToken ct)
             => Task.FromException<IReadOnlyList<PackageRequest>>(new InvalidOperationException(
@@ -1054,6 +1129,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
             CancellationToken ct)
         {
             Interlocked.Increment(ref _callbackCount);
+            LastBorrow = borrow;
             borrow.ValidateForInstallPath(installDirectory);
             var text = await File.ReadAllTextAsync(Path.Combine(installDirectory, "sentinel.txt"), ct);
             Interlocked.Increment(ref _sentinelReadCount);
