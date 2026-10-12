@@ -126,7 +126,7 @@ public sealed class NupkgFileStabilityProbeTests
 
     [Fact]
     [Trait("Platform", "Native")]
-    public async Task ReplacingCandidateDuringAwaitedRetryRefusesOnUnixAndWindowsPinBlocksReplacement()
+    public async Task IsStableGuardedAsync_ReplacingCandidateDuringAwaitedRetryRefusesOnUnixAndWindowsPinBlocksReplacement()
     {
         using var tempDir = new TempDirectory();
         var filePath = Path.Combine(tempDir.Path, "replayed.nupkg");
@@ -157,7 +157,7 @@ public sealed class NupkgFileStabilityProbeTests
 
         if (OperatingSystem.IsWindows())
         {
-            var stable = await probe.IsStableAsync(filePath);
+            var stable = await probe.IsStableGuardedAsync(filePath);
 
             Assert.IsAssignableFrom<IOException>(mutationFailure);
             Assert.False(File.Exists(movedPath));
@@ -167,7 +167,7 @@ public sealed class NupkgFileStabilityProbeTests
         else
         {
             var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(
-                () => probe.IsStableAsync(filePath));
+                () => probe.IsStableGuardedAsync(filePath));
 
             Assert.Null(mutationFailure);
             Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);

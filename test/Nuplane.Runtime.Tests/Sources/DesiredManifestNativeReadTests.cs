@@ -1,7 +1,9 @@
 using System.Text;
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.DependencyInjection;
 using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Builder;
 using Nuplane.Sources;
 using Nuplane.Store.Coordination;
 using Nuplane.Runtime.Tests.TestSupport;
@@ -84,7 +86,49 @@ public sealed class DesiredManifestNativeReadTests : IDisposable
     }
 
     [Fact]
-    public async Task ReadAsync_FinalSymbolicLinkIsTypedAuthorityRefusal()
+    public async Task ReadAsync_OrdinaryDefaultDoesNotRequireNativeStoreClassification()
+    {
+        var path = Path.Combine(_directory, "ordinary.json");
+        File.WriteAllText(path, "{\"schemaVersion\":\"1.0\",\"packages\":[]}");
+        System.IO.Directory.CreateDirectory(Path.Combine(_directory, ".nuplane-store"));
+
+        var result = await new DesiredManifestReader().ReadAsync(path, "ordinary", CancellationToken.None);
+
+        Assert.Equal(ManifestReadStatus.Succeeded, result.Status);
+    }
+
+    [Fact]
+    public async Task ReadAsync_CoordinatedParticipantRequiresCurrentBorrow()
+    {
+        var path = Path.Combine(_directory, "participant.json");
+        File.WriteAllText(path, "{\"schemaVersion\":\"1.0\",\"packages\":[]}");
+
+        var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
+            new DesiredManifestReader(requiresBorrow: true).ReadAsync(path, "participant", CancellationToken.None));
+
+        Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, refusal.Reason);
+    }
+
+    [Fact]
+    public async Task DesiredManifestReaderRegistration_UsesFrozenParticipantModeForUnscopedCalls()
+    {
+        var path = Path.Combine(_directory, "registered-participant.json");
+        File.WriteAllText(path, "{\"schemaVersion\":\"1.0\",\"packages\":[]}");
+        var services = new ServiceCollection();
+        services.AddNuplane(builder => builder.UseCoordinatedPackageStore(
+            [new PackageStoreMemberDeclaration("default", "member", Path.Combine(_directory, "state.json"))],
+            allClientsParticipate: true));
+
+        await using var provider = services.BuildServiceProvider();
+        var reader = provider.GetRequiredService<DesiredManifestReader>();
+        var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(
+            () => reader.ReadAsync(path, "registered-participant", CancellationToken.None));
+
+        Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, refusal.Reason);
+    }
+
+    [Fact]
+    public async Task ReadGuardedAsync_FinalSymbolicLinkIsTypedAuthorityRefusal()
     {
         var target = Path.Combine(_directory, "target.json");
         var link = Path.Combine(_directory, "linked.json");
@@ -92,13 +136,13 @@ public sealed class DesiredManifestNativeReadTests : IDisposable
         File.CreateSymbolicLink(link, target);
 
         var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
-            new DesiredManifestReader().ReadAsync(link, "symlink", CancellationToken.None));
+            new DesiredManifestReader().ReadGuardedAsync(link, "symlink", CancellationToken.None));
 
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
     }
 
     [Fact]
-    public async Task ReadAsync_HardLinkedFileIsTypedAuthorityRefusal()
+    public async Task ReadGuardedAsync_HardLinkedFileIsTypedAuthorityRefusal()
     {
         var target = Path.Combine(_directory, "target-hardlink.json");
         var alias = Path.Combine(_directory, "hardlink.json");
@@ -106,26 +150,26 @@ public sealed class DesiredManifestNativeReadTests : IDisposable
         CreateHardLink(target, alias);
 
         var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
-            new DesiredManifestReader().ReadAsync(alias, "hardlink", CancellationToken.None));
+            new DesiredManifestReader().ReadGuardedAsync(alias, "hardlink", CancellationToken.None));
 
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
     }
 
     [DesiredManifestUnixFact]
-    public async Task ReadAsync_SpecialFileIsTypedAuthorityRefusal()
+    public async Task ReadGuardedAsync_SpecialFileIsTypedAuthorityRefusal()
     {
         var path = Path.Combine(_directory, "special.json");
         if (Mkfifo(path, 0x180) != 0)
             throw new IOException($"Creating the native FIFO failed with errno {Marshal.GetLastPInvokeError()}.");
 
         var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
-            new DesiredManifestReader().ReadAsync(path, "special", CancellationToken.None));
+            new DesiredManifestReader().ReadGuardedAsync(path, "special", CancellationToken.None));
 
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
     }
 
     [Fact]
-    public async Task ReadAsync_AwaitsWhileNativeFileIsHeldAndCancellationReleasesIt()
+    public async Task ReadGuardedAsync_AwaitsWhileNativeFileIsHeldAndCancellationReleasesIt()
     {
         var path = Path.Combine(_directory, "held.json");
         File.WriteAllText(path, "{\"schemaVersion\":\"1.0\",\"packages\":[]}");
@@ -137,7 +181,7 @@ public sealed class DesiredManifestNativeReadTests : IDisposable
             readHeld.TrySetResult();
             await releaseRead.Task.WaitAsync(token);
         });
-        var read = reader.ReadAsync(path, "held", cancellation.Token);
+        var read = reader.ReadGuardedAsync(path, "held", cancellation.Token);
 
         try
         {
@@ -230,7 +274,7 @@ public sealed class DesiredManifestNativeReadTests : IDisposable
     }
 
     [DesiredManifestUnixFact]
-    public async Task ReadAsync_RefusesSameLengthReplacementDuringAwaitedNativeRead()
+    public async Task ReadGuardedAsync_RefusesSameLengthReplacementDuringAwaitedNativeRead()
     {
         var path = Path.Combine(_directory, "replacement.json");
         var moved = Path.Combine(_directory, "replacement.original.json");
@@ -248,13 +292,13 @@ public sealed class DesiredManifestNativeReadTests : IDisposable
         });
 
         var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
-            reader.ReadAsync(path, "replacement", CancellationToken.None));
+            reader.ReadGuardedAsync(path, "replacement", CancellationToken.None));
 
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
     }
 
     [Fact]
-    public async Task ReadAsync_RefusesAuthorityIntroducedAfterNativeSnapshot()
+    public async Task ReadGuardedAsync_RefusesAuthorityIntroducedAfterNativeSnapshot()
     {
         var path = Path.Combine(_directory, "authority.json");
         File.WriteAllText(path, "{\"schemaVersion\":\"1.0\",\"packages\":[]}");
@@ -265,7 +309,7 @@ public sealed class DesiredManifestNativeReadTests : IDisposable
         });
 
         var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
-            reader.ReadAsync(path, "authority", CancellationToken.None));
+            reader.ReadGuardedAsync(path, "authority", CancellationToken.None));
 
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
     }

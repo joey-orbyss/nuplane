@@ -861,7 +861,7 @@ jobs:
           filter="(FullyQualifiedName~DirectoryNupkgDesiredSourceTests|FullyQualifiedName~NupkgFileStabilityProbeTests)"
           manifest="build/test-cases/directory-source-unix.json"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            filter="$filter&FullyQualifiedName!~GetDesiredAsync_RefusesPackageSuffixLinksBeforeStabilityCallback"
+            filter="$filter&FullyQualifiedName!~GetDesiredGuardedAsync_RefusesPackageSuffixLinksBeforeStabilityCallback"
             manifest="build/test-cases/directory-source-windows.json"
           else
             filter="$filter&FullyQualifiedName!~WindowsMetadataPinAllowsCompatibleGrowthAndReportsBusyForWriterConflict&FullyQualifiedName!~GetDesiredAsync_WithoutStabilityProbeIncludesMetadataVerifiedBusyRegularCandidateOnWindows"
@@ -881,7 +881,7 @@ jobs:
           filter="FullyQualifiedName~DesiredManifestNativeReadTests"
           manifest="build/test-cases/manifest-source-unix.json"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            filter="$filter&FullyQualifiedName!~ReadAsync_RefusesSameLengthReplacementDuringAwaitedNativeRead&FullyQualifiedName!~ReadAsync_SpecialFileIsTypedAuthorityRefusal"
+            filter="$filter&FullyQualifiedName!~ReadGuardedAsync_RefusesSameLengthReplacementDuringAwaitedNativeRead&FullyQualifiedName!~ReadGuardedAsync_SpecialFileIsTypedAuthorityRefusal"
             manifest="build/test-cases/manifest-source-windows.json"
           fi
           dotnet test test/Nuplane.Runtime.Tests/Nuplane.Runtime.Tests.csproj \

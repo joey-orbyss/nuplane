@@ -14,6 +14,7 @@ namespace Nuplane.Sources;
 public sealed class DesiredManifestReader
 {
     private readonly Func<CancellationToken, Task>? _afterNativeReadAsync;
+    private readonly bool _requiresBorrow;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -27,6 +28,9 @@ public sealed class DesiredManifestReader
 
     internal DesiredManifestReader(Func<CancellationToken, Task> afterNativeReadAsync)
         => _afterNativeReadAsync = afterNativeReadAsync ?? throw new ArgumentNullException(nameof(afterNativeReadAsync));
+
+    internal DesiredManifestReader(bool requiresBorrow)
+        => _requiresBorrow = requiresBorrow;
 
     /// <summary>
     /// Reads the manifest from the specified file path.
@@ -44,8 +48,46 @@ public sealed class DesiredManifestReader
         string correlationId,
         CancellationToken cancellationToken,
         string? expectedSchemaVersion = null)
-        => await ReadCoreAsync(filePath, correlationId, cancellationToken, borrow: null, expectedSchemaVersion)
-            .ConfigureAwait(false);
+    {
+        if (_requiresBorrow)
+            throw new PackageStoreAdmissionException(
+                PackageStoreAdmissionReason.UnsupportedParticipant,
+                "This desired manifest reader is a coordinated participant and requires the current operation borrow.");
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(correlationId);
+        var now = DateTimeOffset.UtcNow;
+        if (!File.Exists(filePath))
+            return NotFound(filePath, correlationId, now);
+
+        string json;
+        try
+        {
+            json = await File.ReadAllTextAsync(filePath, cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            return new(
+                ManifestReadStatus.Unreadable,
+                ConvergenceReasonCodes.ManifestUnreadable,
+                filePath,
+                correlationId,
+                now);
+        }
+
+        return ParseJson(json, filePath, correlationId, now, expectedSchemaVersion);
+    }
+
+    internal Task<DesiredManifestReadResult> ReadGuardedAsync(
+        string filePath,
+        string correlationId,
+        CancellationToken cancellationToken,
+        string? expectedSchemaVersion = null)
+        => ReadCoreAsync(filePath, correlationId, cancellationToken, borrow: null, expectedSchemaVersion);
 
     /// <summary>Reads the manifest while retaining the caller's exact package-store operation.</summary>
     /// <param name="borrow">The original counted borrow owned by the caller.</param>

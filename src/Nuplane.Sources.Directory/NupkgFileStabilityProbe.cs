@@ -40,11 +40,17 @@ public sealed class NupkgFileStabilityProbe
         _onBeforeRetryAsync = onBeforeRetryAsync;
     }
 
-    /// <summary>Probes one exact package-file basename through a positively Unenrolled native parent directory.</summary>
+    /// <summary>Probes the file using the ordinary filesystem's open/share and size-stability behavior.</summary>
     /// <param name="filePath">The path to the <c>.nupkg</c> file.</param>
     /// <param name="cancellationToken">Cancellation token.</param>
     /// <returns><see langword="true"/> if the file is stable; otherwise <see langword="false"/>.</returns>
     public Task<bool> IsStableAsync(string filePath, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
+        return IsStableOrdinaryAsync(filePath, cancellationToken);
+    }
+
+    internal Task<bool> IsStableGuardedAsync(string filePath, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
         var (parentPath, basename) = SplitParentAndBasename(filePath);
@@ -53,6 +59,57 @@ public sealed class NupkgFileStabilityProbe
             borrow: null,
             session => IsStableAsync(session, basename, filePath, cancellationToken),
             cancellationToken);
+    }
+
+    private async Task<bool> IsStableOrdinaryAsync(string filePath, CancellationToken cancellationToken)
+    {
+        long previousSize = -1;
+        for (var attempt = 1; attempt <= _maxAttempts; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                using var stream = new FileStream(
+                    filePath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read);
+                var currentSize = stream.Length;
+                if (previousSize >= 0 && currentSize == previousSize && currentSize > 0)
+                {
+                    _logger.LogDebug(
+                        "File '{FilePath}' is stable after {Attempt} attempt(s) (size: {Size} bytes).",
+                        filePath, attempt, currentSize);
+                    return true;
+                }
+
+                previousSize = currentSize;
+            }
+            catch (IOException exception) when (exception is not FileNotFoundException)
+            {
+                _logger.LogDebug(exception,
+                    "File '{FilePath}' is locked on attempt {Attempt}/{MaxAttempts}.",
+                    filePath, attempt, _maxAttempts);
+            }
+            catch (FileNotFoundException)
+            {
+                _logger.LogDebug(
+                    "File '{FilePath}' not found on attempt {Attempt}/{MaxAttempts}; treating as unstable.",
+                    filePath, attempt, _maxAttempts);
+                return false;
+            }
+
+            if (attempt == _maxAttempts)
+                continue;
+            if (_onBeforeRetryAsync is not null)
+                await _onBeforeRetryAsync(attempt, cancellationToken);
+            await Task.Delay(_retryDelay, cancellationToken);
+        }
+
+        _logger.LogWarning(
+            "File '{FilePath}' did not stabilize after {MaxAttempts} attempts. Treating as unstable.",
+            filePath, _maxAttempts);
+        return false;
     }
 
     internal async Task<bool> IsStableAsync(

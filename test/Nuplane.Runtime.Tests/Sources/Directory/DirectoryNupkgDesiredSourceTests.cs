@@ -1,7 +1,12 @@
 using System.Runtime.InteropServices;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Builder;
+using Nuplane.Feeds.Setup;
+using Nuplane.Sources.Directory.Builder;
+using Nuplane.Sources.Directory.Registration;
 using Nuplane.Sources.Directory;
 
 namespace Nuplane.Runtime.Tests.Sources.Directory;
@@ -180,6 +185,70 @@ public sealed class DirectoryNupkgDesiredSourceTests : IDisposable
         Assert.Equal(legacyEnumeratedUppercase, results.Any(request => request.Id == "Uppercase.Package"));
     }
 
+    [Fact]
+    public async Task GetDesiredAsync_OrdinaryDefaultDoesNotRequireNativeStoreClassification()
+    {
+        CreateNupkg("Ordinary.Package.1.0.0.nupkg");
+        System.IO.Directory.CreateDirectory(Path.Combine(_tempDir, ".nuplane-store"));
+        var source = new DirectoryNupkgDesiredSource("src-name", _tempDir, ["*"]);
+
+        var request = Assert.Single(await source.GetDesiredAsync(CancellationToken.None));
+
+        Assert.Equal("Ordinary.Package", request.Id);
+    }
+
+    [Fact]
+    public async Task GetDesiredAsync_OrdinaryStabilityProbeDoesNotRequireNativeStoreClassification()
+    {
+        CreateNupkg("Ordinary.Probed.Package.1.0.0.nupkg");
+        System.IO.Directory.CreateDirectory(Path.Combine(_tempDir, ".nuplane-store"));
+        var probe = new NupkgFileStabilityProbe(
+            NullLogger<NupkgFileStabilityProbe>.Instance,
+            maxAttempts: 2,
+            retryDelay: TimeSpan.Zero);
+        var source = new DirectoryNupkgDesiredSource("src-name", _tempDir, ["*"], stabilityProbe: probe);
+
+        var request = Assert.Single(await source.GetDesiredAsync(CancellationToken.None));
+
+        Assert.Equal("Ordinary.Probed.Package", request.Id);
+    }
+
+    [Fact]
+    public async Task GetDesiredAsync_CoordinatedParticipantRequiresCurrentBorrow()
+    {
+        CreateNupkg("Participant.Package.1.0.0.nupkg");
+        var source = new DirectoryNupkgDesiredSource(
+            "src-name", _tempDir, ["*"], logger: null, feedName: null, stabilityProbe: null, requiresBorrow: true);
+
+        var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(
+            () => source.GetDesiredAsync(CancellationToken.None));
+
+        Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, refusal.Reason);
+    }
+
+    [Fact]
+    public async Task DirectoryFeedRegistration_UsesFrozenParticipantModeForUnscopedCalls()
+    {
+        CreateNupkg("Participant.Package.1.0.0.nupkg");
+        var services = new ServiceCollection();
+        services.AddNuplane(builder => builder.UseCoordinatedPackageStore(
+            [new PackageStoreMemberDeclaration("default", "member", Path.Combine(_tempDir, "state.json"))],
+            allClientsParticipate: true));
+        DirectorySourceRegistrationServices.RegisterFeed(
+            services,
+            "participant-feed",
+            new NuplaneDirectoryFeedOptions { DirectoryPath = _tempDir, Role = DirectoryFeedRole.Desired },
+            ["*"],
+            credentials: null);
+
+        await using var provider = services.BuildServiceProvider();
+        var source = provider.GetRequiredService<IDesiredPackageSource>();
+        var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(
+            () => source.GetDesiredAsync(CancellationToken.None));
+
+        Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, refusal.Reason);
+    }
+
     [SupportedWindowsFact]
     [Trait("Platform", "Windows")]
     public async Task GetDesiredAsync_WithoutStabilityProbeIncludesMetadataVerifiedBusyRegularCandidateOnWindows()
@@ -200,7 +269,7 @@ public sealed class DirectoryNupkgDesiredSourceTests : IDisposable
 
     [SupportedUnixFact]
     [Trait("Platform", "Unix")]
-    public async Task GetDesiredAsync_RefusesPackageSuffixLinksBeforeStabilityCallback()
+    public async Task GetDesiredGuardedAsync_RefusesPackageSuffixLinksBeforeStabilityCallback()
     {
         var target = Path.Combine(_tempDir, "target.bin");
         var linkedCandidate = Path.Combine(_tempDir, "Linked.Package.1.0.0.nupkg");
@@ -219,7 +288,7 @@ public sealed class DirectoryNupkgDesiredSourceTests : IDisposable
         var source = new DirectoryNupkgDesiredSource("src-name", _tempDir, ["*"], stabilityProbe: probe);
 
         var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(
-            () => source.GetDesiredAsync(CancellationToken.None));
+            () => source.GetDesiredGuardedAsync(CancellationToken.None));
 
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
         Assert.Equal(0, Volatile.Read(ref callbackCount));
@@ -227,7 +296,7 @@ public sealed class DirectoryNupkgDesiredSourceTests : IDisposable
 
     [Fact]
     [Trait("Platform", "Native")]
-    public async Task GetDesiredAsync_RefusesAuthorityChangeDuringStabilityRetryBeforeAnotherRetry()
+    public async Task GetDesiredGuardedAsync_RefusesAuthorityChangeDuringStabilityRetryBeforeAnotherRetry()
     {
         const string candidate = "Changing.Package.1.0.0.nupkg";
         CreateNupkg(candidate);
@@ -255,7 +324,7 @@ public sealed class DirectoryNupkgDesiredSourceTests : IDisposable
         var source = new DirectoryNupkgDesiredSource("src-name", _tempDir, ["*"], stabilityProbe: probe);
 
         var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(
-            () => source.GetDesiredAsync(CancellationToken.None));
+            () => source.GetDesiredGuardedAsync(CancellationToken.None));
 
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
         // If the retry loop continued through another changed-length attempt, it would invoke the
@@ -264,7 +333,7 @@ public sealed class DirectoryNupkgDesiredSourceTests : IDisposable
     }
 
     [Fact]
-    public async Task GetDesiredAsync_RefusesHardLinkedPackagesBeforeStabilityCallback()
+    public async Task GetDesiredGuardedAsync_RefusesHardLinkedPackagesBeforeStabilityCallback()
     {
         var original = Path.Combine(_tempDir, "Hard.Package.1.0.0.nupkg");
         var alias = Path.Combine(_tempDir, "Hard.Package.1.0.1.nupkg");
@@ -283,7 +352,7 @@ public sealed class DirectoryNupkgDesiredSourceTests : IDisposable
         var source = new DirectoryNupkgDesiredSource("src-name", _tempDir, ["*"], stabilityProbe: probe);
 
         var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(
-            () => source.GetDesiredAsync(CancellationToken.None));
+            () => source.GetDesiredGuardedAsync(CancellationToken.None));
 
         Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority, refusal.Reason);
         Assert.Equal(0, Volatile.Read(ref callbackCount));

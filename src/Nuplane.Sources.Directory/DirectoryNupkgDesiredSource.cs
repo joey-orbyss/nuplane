@@ -26,8 +26,9 @@ public sealed class DirectoryNupkgDesiredSource : IScopedDesiredPackageSource
     private readonly IReadOnlyList<string> _includePatterns;
     private readonly ILogger<DirectoryNupkgDesiredSource> _logger;
     private readonly NupkgFileStabilityProbe? _stabilityProbe;
+    private readonly bool _requiresBorrow;
 
-    /// <summary>Creates a native, no-follow directory-backed desired-state source.</summary>
+    /// <summary>Creates an ordinary directory-backed desired-state source.</summary>
     /// <param name="sourceName">A descriptive name for this desired-state source.</param>
     /// <param name="directoryPath">The directory to scan for <c>.nupkg</c> files.</param>
     /// <param name="allowlistedPackageIds">An optional set of package identifier patterns. If <see langword="null"/> or empty, no packages are included.</param>
@@ -56,18 +57,87 @@ public sealed class DirectoryNupkgDesiredSource : IScopedDesiredPackageSource
         _stabilityProbe = stabilityProbe;
     }
 
+    internal DirectoryNupkgDesiredSource(
+        string sourceName,
+        string directoryPath,
+        IEnumerable<string>? allowlistedPackageIds,
+        ILogger<DirectoryNupkgDesiredSource>? logger,
+        string? feedName,
+        NupkgFileStabilityProbe? stabilityProbe,
+        bool requiresBorrow)
+        : this(sourceName, directoryPath, allowlistedPackageIds, logger, feedName, stabilityProbe)
+    {
+        _requiresBorrow = requiresBorrow;
+    }
+
     /// <inheritdoc />
     public Task<IReadOnlyList<PackageRequest>> GetDesiredAsync(CancellationToken ct)
-        => ReadDesiredAsync(borrow: null, ct);
+    {
+        if (_requiresBorrow)
+            throw new PackageStoreAdmissionException(
+                PackageStoreAdmissionReason.UnsupportedParticipant,
+                "This directory desired source is a coordinated participant and requires the current operation borrow.");
+
+        return ReadOrdinaryAsync(ct);
+    }
+
+    internal Task<IReadOnlyList<PackageRequest>> GetDesiredGuardedAsync(CancellationToken ct)
+        => ReadDesiredNativeAsync(borrow: null, ct);
 
     /// <inheritdoc />
     public Task<IReadOnlyList<PackageRequest>> GetDesiredAsync(PackageStoreOperationBorrow borrow, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(borrow);
-        return ReadDesiredAsync(borrow, ct);
+        return ReadDesiredNativeAsync(borrow, ct);
     }
 
-    private Task<IReadOnlyList<PackageRequest>> ReadDesiredAsync(
+    private async Task<IReadOnlyList<PackageRequest>> ReadOrdinaryAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!System.IO.Directory.Exists(_directoryPath))
+            return Array.Empty<PackageRequest>();
+
+        string[] filePaths;
+        try
+        {
+            filePaths = System.IO.Directory
+                .EnumerateFiles(_directoryPath, "*.nupkg", SearchOption.TopDirectoryOnly)
+                .ToArray();
+        }
+        catch (IOException exception)
+        {
+            _logger.LogWarning(exception,
+                "Failed to enumerate .nupkg files in '{DirectoryPath}'. Returning empty desired state.",
+                _directoryPath);
+            return Array.Empty<PackageRequest>();
+        }
+
+        var requests = new List<PackageRequest>();
+        foreach (var filePath in filePaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_stabilityProbe is not null &&
+                !await _stabilityProbe.IsStableAsync(filePath, cancellationToken))
+            {
+                _logger.LogDebug(
+                    "Skipping unstable file '{FilePath}' — it may still be in the process of being written.",
+                    filePath);
+                continue;
+            }
+
+            var fileName = Path.GetFileNameWithoutExtension(filePath);
+            if (string.IsNullOrWhiteSpace(fileName))
+                continue;
+
+            var request = CreateRequest(fileName);
+            if (request is not null)
+                requests.Add(request);
+        }
+
+        return DeduplicateByHighestVersion(requests).ToList();
+    }
+
+    private Task<IReadOnlyList<PackageRequest>> ReadDesiredNativeAsync(
         PackageStoreOperationBorrow? borrow,
         CancellationToken cancellationToken)
         => DesiredSourceDirectoryAccess.WithDirectoryAsync<IReadOnlyList<PackageRequest>>(
@@ -145,17 +215,18 @@ public sealed class DirectoryNupkgDesiredSource : IScopedDesiredPackageSource
                     }
                 }
 
-                // Keep the highest NuGet semantic version for each package ID. Ordering is deterministic.
-                return requests
-                    .GroupBy(request => request.Id, StringComparer.OrdinalIgnoreCase)
-                    .Select(group => group.Count() == 1
-                        ? group.First()
-                        : group.OrderByDescending(request => NuGetVersion.Parse(request.VersionRange)).First())
-                    .OrderBy(request => request.Id, StringComparer.OrdinalIgnoreCase)
-                    .ThenBy(request => request.VersionRange, StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
+                return DeduplicateByHighestVersion(requests);
             },
             cancellationToken);
+
+    private static IReadOnlyList<PackageRequest> DeduplicateByHighestVersion(List<PackageRequest> requests) => requests
+        .GroupBy(request => request.Id, StringComparer.OrdinalIgnoreCase)
+        .Select(group => group.Count() == 1
+            ? group.First()
+            : group.OrderByDescending(request => NuGetVersion.Parse(request.VersionRange)).First())
+        .OrderBy(request => request.Id, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(request => request.VersionRange, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 
     private PackageRequest? CreateRequest(string fileNameWithoutExtension)
     {
