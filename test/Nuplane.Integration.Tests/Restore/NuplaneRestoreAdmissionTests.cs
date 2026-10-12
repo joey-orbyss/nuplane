@@ -330,7 +330,13 @@ public sealed class NuplaneRestoreAdmissionTests
         InstallRoot = root.RootPath,
         StateFilePath = root.StateFilePath,
         LockFilePath = Path.Combine(Path.GetDirectoryName(root.StateFilePath)!, "restore.lock.json"),
-        ConfigureBuilder = configureBuilder
+        ConfigureBuilder = (builder, configuration) =>
+        {
+            builder.UseCoordinatedPackageStore(
+                [new("default", "target", root.StateFilePath), new("default", "sibling", root.SiblingStateFilePath)],
+                allClientsParticipate: true);
+            configureBuilder(builder, configuration);
+        }
     };
 
     private static IConfiguration Configuration() => new ConfigurationBuilder()

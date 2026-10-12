@@ -42,7 +42,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             var operationId = Guid.NewGuid().ToString("N");
             requestPath = Path.Combine(Path.GetTempPath(), $"nuplane-recovery-{operationId}.json");
             var request = new GraphUseProcessRequest(operationId, fixture.RootPath,
-                fixture.StatePaths["member-a"], fixture.Graphs["member-a"].Requests.ToArray());
+                fixture.StatePaths["member-a"], fixture.Graphs["member-a"].Requests.ToArray(), fixture.CompleteRoster);
             await File.WriteAllTextAsync(requestPath,
                 JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
@@ -53,6 +53,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             Assert.Equal(operationId, loaded.RootElement.GetProperty("operationId").GetString());
             Assert.Equal(participant.ProcessId, loaded.RootElement.GetProperty("processId").GetInt32());
             Assert.False(loaded.RootElement.GetProperty("isCollectible").GetBoolean());
+            Assert.True(loaded.RootElement.GetProperty("isCoordinatedParticipant").GetBoolean());
             Assert.False(string.IsNullOrWhiteSpace(loaded.RootElement.GetProperty("contextIdentity").GetString()));
             Assert.False(string.IsNullOrWhiteSpace(loaded.RootElement.GetProperty("contextName").GetString()));
             var assemblyNames = loaded.RootElement.GetProperty("assemblyNames").EnumerateArray()

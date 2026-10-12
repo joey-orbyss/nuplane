@@ -10,6 +10,7 @@ using Microsoft.Extensions.Options;
 using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Store.Coordination;
+using Nuplane.Registration;
 
 namespace Nuplane.Loading;
 
@@ -28,6 +29,7 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
     private readonly ILogger<PackageLoader> _logger;
     private readonly HostIntegratedAssemblyResolver? _hostIntegratedAssemblyResolver;
     private readonly string? _hostTargetFrameworkOverride;
+    private readonly bool _requiresGraphUseLease;
     private readonly object _loadContextSync = new();
     private readonly ConcurrentDictionary<string, AssemblyLoadContext> _contexts = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, PackageLoadSession> _sessions = new(StringComparer.OrdinalIgnoreCase);
@@ -52,11 +54,12 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
         ILogger<PackageLoader>? logger = null,
         HostIntegratedAssemblyResolver? hostIntegratedAssemblyResolver = null,
         IEnumerable<IPackageActivationGate>? activationGates = null,
-        string? hostTargetFrameworkOverride = null)
+        string? hostTargetFrameworkOverride = null,
+        PackageStoreCompositionSnapshot? composition = null)
     {
         _matcher = matcher ?? new SharedAssemblyPolicyMatcher();
         _hostIntegratedResolutionCatalog = hostIntegratedResolutionCatalog ?? new HostIntegratedAssemblyResolutionCatalog();
-        _loadModeSelector = loadModeSelector ?? new PackageLoadModeSelector(loadModeAdvisors);
+        _loadModeSelector = loadModeSelector ?? new PackageLoadModeSelector(loadModeAdvisors, composition: composition);
         _activationGates = activationGates?.ToArray() ?? [];
         _options = options?.Value ?? new LoadingOptions();
         _logger = logger ?? NullLogger<PackageLoader>.Instance;
@@ -64,6 +67,7 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
         _hostTargetFrameworkOverride = string.IsNullOrWhiteSpace(hostTargetFrameworkOverride)
             ? null
             : hostTargetFrameworkOverride.Trim();
+        _requiresGraphUseLease = composition?.Mode == PackageStoreCompositionMode.CoordinatedParticipant;
     }
 
     /// <summary>
@@ -99,10 +103,21 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
     /// Builds deterministic assembly scan candidates for the specified active package install path.
     /// </summary>
     public IReadOnlyList<AssemblyScanCandidate> BuildScanCandidates(string packageId, string installPath)
+        => BuildScanCandidates(packageId, installPath, lease: null);
+
+    internal IReadOnlyList<AssemblyScanCandidate> BuildScanCandidates(
+        string packageId, string installPath, PackageGraphUseLease? lease)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
         ArgumentException.ThrowIfNullOrWhiteSpace(installPath);
+        if (lease is null)
+            RefuseUnscopedRead();
+        using var read = lease?.AcquireRead(installPath);
+        return BuildScanCandidatesCore(packageId, installPath);
+    }
 
+    private IReadOnlyList<AssemblyScanCandidate> BuildScanCandidatesCore(string packageId, string installPath)
+    {
         var selection = ResolveAssemblySelection(installPath, packageId, _hostTargetFrameworkOverride);
         var assemblyPaths = EnumerateAssemblyCandidatesExcludingNativeAssets(selection.CandidateSearchRoot, installPath)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
@@ -130,6 +145,7 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
     {
         ArgumentNullException.ThrowIfNull(packages);
         ArgumentNullException.ThrowIfNull(sharedPolicy);
+        RefuseUnscopedRead();
 
         var loaded = new List<PackageLoadSession>();
         var failed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -152,6 +168,7 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
     {
         ArgumentNullException.ThrowIfNull(packageGraphs);
         ArgumentNullException.ThrowIfNull(sharedPolicy);
+        RefuseUnscopedRead();
 
         var loaded = new List<PackageLoadSession>();
         var failed = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -1225,7 +1242,7 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
         foreach (var package in packages)
         {
             var packageAssemblies = new List<Assembly>();
-            foreach (var candidate in BuildScanCandidates(package.Id, package.InstallPath))
+            foreach (var candidate in BuildScanCandidatesCore(package.Id, package.InstallPath))
             {
                 if (assembliesByPath.TryGetValue(candidate.AssemblyPath, out var existingAssembly))
                 {
@@ -1270,7 +1287,7 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
         var entries = new List<HostIntegratedAssemblyResolutionCandidate>();
         foreach (var package in packages)
         {
-            foreach (var candidate in BuildScanCandidates(package.Id, package.InstallPath))
+            foreach (var candidate in BuildScanCandidatesCore(package.Id, package.InstallPath))
             {
                 try
                 {
@@ -1648,6 +1665,21 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
         /// either because they contain none or because the host runtime already provides them.
         /// </summary>
         public IEnumerable<GraphPackage> InertPackages => SkippedPackages.Concat(HostRuntimePackages);
+    }
+
+    internal PackageGraphUseLease? GetGraphUseLease(AssemblyLoadContext context)
+    {
+        var lease = (context as IGraphUseLeaseBoundLoadContext)?.GraphUseLease;
+        if (lease is null)
+            RefuseUnscopedRead();
+        return lease;
+    }
+
+    private void RefuseUnscopedRead()
+    {
+        if (_requiresGraphUseLease)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "Participating package loading requires a published graph-use lease.");
     }
 
     private sealed record LoadedGraphCacheEntry(

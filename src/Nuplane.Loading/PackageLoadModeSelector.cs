@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Registration;
 
 namespace Nuplane.Loading;
 
@@ -12,13 +13,16 @@ internal sealed class PackageLoadModeSelector
 {
     private readonly IReadOnlyList<IPackageLoadModeAdvisor> _advisors;
     private readonly ILogger<PackageLoadModeSelector> _logger;
+    private readonly bool _requiresGraphUseLease;
 
     public PackageLoadModeSelector(
         IEnumerable<IPackageLoadModeAdvisor>? advisors = null,
-        ILogger<PackageLoadModeSelector>? logger = null)
+        ILogger<PackageLoadModeSelector>? logger = null,
+        PackageStoreCompositionSnapshot? composition = null)
     {
         _advisors = advisors?.ToArray() ?? [];
         _logger = logger ?? NullLogger<PackageLoadModeSelector>.Instance;
+        _requiresGraphUseLease = composition?.Mode == PackageStoreCompositionMode.CoordinatedParticipant;
     }
 
     internal void ValidateScopedParticipants()
@@ -58,6 +62,10 @@ internal sealed class PackageLoadModeSelector
         ArgumentNullException.ThrowIfNull(packages);
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrWhiteSpace(graphKey);
+
+        if (_requiresGraphUseLease && (graphUseLeases is null || graphUseLeases.Count == 0))
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "Participating load-mode selection requires a published graph-use lease.");
 
         var packageOverrides = options.PackageLoadModes
             .GroupBy(static packageOverride => packageOverride.PackageId, StringComparer.OrdinalIgnoreCase)

@@ -70,7 +70,7 @@ public sealed class NuplaneRestoreManifestAdmissionTests
     }
 
     [Fact]
-    public async Task DescribeDesiredAsync_UnenrolledManifestUsesAddNuplaneAndNativeReader()
+    public async Task DescribeDesiredAsync_OrdinaryManifestUsesAddNuplaneWithoutNativeReader()
     {
         using var store = new PackageStoreFixture();
         var manifestPath = Path.Combine(store.PackageInstallRoot, "unenrolled-desired.json");
@@ -98,7 +98,7 @@ public sealed class NuplaneRestoreManifestAdmissionTests
         var request = Assert.Single(description.Requests);
         Assert.Equal("Unenrolled.Package", request.PackageId);
         Assert.Equal("1.2.3", request.PinnedVersion);
-        Assert.Equal(1, Volatile.Read(ref nativeReadCount));
+        Assert.Equal(0, Volatile.Read(ref nativeReadCount));
         Assert.Empty(description.SourceErrors);
     }
 
@@ -173,6 +173,7 @@ public sealed class NuplaneRestoreManifestAdmissionTests
             LockFilePath = Path.Combine(Path.GetDirectoryName(store.StateFilePath)!, "restore.lock.json"),
             ConfigureBuilder = (builder, _) =>
             {
+                builder.UseCoordinatedPackageStore([new("default", "target", store.StateFilePath)], true);
                 builder.Services.RemoveAll<DesiredManifestReader>();
                 builder.Services.AddSingleton(reader);
             }
@@ -328,7 +329,13 @@ public sealed class NuplaneRestoreManifestAdmissionTests
         InstallRoot = root.RootPath,
         StateFilePath = root.StateFilePath,
         LockFilePath = Path.Combine(Path.GetDirectoryName(root.StateFilePath)!, "restore.lock.json"),
-        ConfigureBuilder = configureBuilder
+        ConfigureBuilder = (builder, configuration) =>
+        {
+            builder.UseCoordinatedPackageStore(
+                [new("default", "target", root.StateFilePath), new("default", "sibling", root.SiblingStateFilePath)],
+                allClientsParticipate: true);
+            configureBuilder(builder, configuration);
+        }
     };
 
     private static IConfiguration Configuration(

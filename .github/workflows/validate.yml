@@ -1141,6 +1141,25 @@ jobs:
           print('Qualified no-borrow capability and loading metadata compatibility with no skips.')
           PYCODE
 
+      - name: Qualify immutable participant composition and Loading ingress
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet test test/Nuplane.Runtime.Tests/Nuplane.Runtime.Tests.csproj \
+            --configuration Release --framework net10.0 --no-build \
+            --filter "FullyQualifiedName~PackageStoreCompositionRoutingTests" \
+            --logger "trx;LogFileName=participant-core.trx" \
+            --results-directory "$RUNNER_TEMP/participant-routing"
+          python3 build/verify-required-trx.py "$RUNNER_TEMP/participant-routing/participant-core.trx" \
+            build/test-cases/participant-core-routing.json
+          dotnet test test/Nuplane.Loading.Tests/Nuplane.Loading.Tests.csproj \
+            --configuration Release --framework net10.0 --no-build \
+            --filter "FullyQualifiedName~PackageStoreCompositionLoadingTests" \
+            --logger "trx;LogFileName=participant-loading.trx" \
+            --results-directory "$RUNNER_TEMP/participant-routing"
+          python3 build/verify-required-trx.py "$RUNNER_TEMP/participant-routing/participant-loading.trx" \
+            build/test-cases/participant-loading-routing.json
+
       - name: Run native Unix store adapter and identity tests
         if: matrix.os != 'windows-latest'
         shell: bash

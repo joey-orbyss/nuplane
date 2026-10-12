@@ -5,6 +5,7 @@ using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Loading.Events;
 using Nuplane.Observability;
 using Nuplane.Reconciliation;
+using Nuplane.Registration;
 using Nuplane.Store.State;
 
 namespace Nuplane.Loading;
@@ -21,6 +22,7 @@ internal sealed class PackageAutoLoadingObserver : IScopedNuplaneObserver, ILeas
     private readonly LoadingOptions _loadingOptions;
     private readonly ILogger<PackageAutoLoadingObserver> _logger;
     private readonly IStoreRegistry? _storeRegistry;
+    private readonly bool _requiresGraphUseLease;
 
     public PackageAutoLoadingObserver(
         PackageLoader loader,
@@ -31,7 +33,8 @@ internal sealed class PackageAutoLoadingObserver : IScopedNuplaneObserver, ILeas
         IFailureRecorder? failureRecorder = null,
         ReconciliationMetrics? metrics = null,
         LoadingFailureTracker? loadingFailureTracker = null,
-        LoadingCatalogRefreshTracker? refreshTracker = null)
+        LoadingCatalogRefreshTracker? refreshTracker = null,
+        PackageStoreCompositionSnapshot? composition = null)
     {
         _loader = loader ?? throw new ArgumentNullException(nameof(loader));
         _scopedLoader = loader as IScopedPackageLoader;
@@ -43,6 +46,7 @@ internal sealed class PackageAutoLoadingObserver : IScopedNuplaneObserver, ILeas
         LoadingFailureTracker = loadingFailureTracker;
         RefreshTracker = refreshTracker;
         _storeRegistry = storeRegistry ?? throw new ArgumentNullException(nameof(storeRegistry));
+        _requiresGraphUseLease = composition?.Mode == PackageStoreCompositionMode.CoordinatedParticipant;
     }
 
     internal PackageAutoLoadingObserver(
@@ -54,7 +58,8 @@ internal sealed class PackageAutoLoadingObserver : IScopedNuplaneObserver, ILeas
         ReconciliationMetrics? metrics = null,
         ILoadingFailureTracker? loadingFailureTracker = null,
         LoadingCatalogRefreshTracker? refreshTracker = null,
-        IStoreRegistry? storeRegistry = null)
+        IStoreRegistry? storeRegistry = null,
+        PackageStoreCompositionSnapshot? composition = null)
     {
         _loader = loader ?? throw new ArgumentNullException(nameof(loader));
         _scopedLoader = loader as IScopedPackageLoader;
@@ -66,6 +71,7 @@ internal sealed class PackageAutoLoadingObserver : IScopedNuplaneObserver, ILeas
         LoadingFailureTracker = loadingFailureTracker;
         RefreshTracker = refreshTracker;
         _storeRegistry = storeRegistry;
+        _requiresGraphUseLease = composition?.Mode == PackageStoreCompositionMode.CoordinatedParticipant;
     }
 
     private IFailureRecorder? FailureRecorder { get; }
@@ -107,6 +113,10 @@ internal sealed class PackageAutoLoadingObserver : IScopedNuplaneObserver, ILeas
         IReadOnlyList<ResolvedPackage> appliedPackages,
         CancellationToken ct)
     {
+        if (_requiresGraphUseLease)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "Participating package loading requires a published graph-use lease handoff.");
+
         if (!_loadingOptions.Enabled)
         {
             _logger.LogDebug("Loading disabled; skipping load for CorrelationId={CorrelationId}.", changeSet.CorrelationId);

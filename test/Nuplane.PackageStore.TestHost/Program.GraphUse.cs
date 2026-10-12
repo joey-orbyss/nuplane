@@ -12,6 +12,8 @@ using Nuplane.Loading.Hosting.Builder;
 using Nuplane.Reconciliation;
 using Nuplane.Reconciliation.LockFile;
 using Nuplane.Reconciliation.Models;
+using Nuplane.Builder;
+using Nuplane.Registration;
 
 namespace Nuplane.PackageStore.TestHost;
 
@@ -27,6 +29,7 @@ internal static partial class Program
         services.AddNuplane(nuplane =>
         {
             nuplane.WithStateFile(request.StateFilePath);
+            nuplane.UseCoordinatedPackageStore(request.CompleteRoster, allClientsParticipate: true);
             nuplane.AutoloadPackages(loading => loading.WithDefaultLoadMode(PackageLoadMode.HostIntegrated));
         });
         services.AddSingleton<IDesiredPackageSource>(new GraphUseDesiredSource(request.DesiredRequests));
@@ -66,7 +69,8 @@ internal static partial class Program
             .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         await WriteJsonLineAsync(new LoadedIdleMessage("loaded-idle", request.OperationId, Environment.ProcessId,
-            contextIdentity, context.Name, context.IsCollectible, assemblyNames)).ConfigureAwait(false);
+            contextIdentity, context.Name, context.IsCollectible, assemblyNames,
+            provider.GetRequiredService<PackageStoreCompositionSnapshot>().IsParticipant)).ConfigureAwait(false);
 
         var input = await Console.In.ReadLineAsync().ConfigureAwait(false);
         if (input is null)
@@ -100,6 +104,7 @@ internal static partial class Program
         if (!Guid.TryParseExact(request.OperationId, "N", out _) ||
             string.IsNullOrWhiteSpace(request.RootPath) || !Path.IsPathFullyQualified(request.RootPath) ||
             string.IsNullOrWhiteSpace(request.StateFilePath) || !Path.IsPathFullyQualified(request.StateFilePath) ||
+            request.CompleteRoster is null || request.CompleteRoster.Length is < 1 or > 8 ||
             request.DesiredRequests is null || request.DesiredRequests.Length is < 1 or > 8 ||
             request.DesiredRequests.Any(static desired => desired is null ||
                 string.IsNullOrWhiteSpace(desired.Id) || string.IsNullOrWhiteSpace(desired.VersionRange) ||
@@ -115,7 +120,8 @@ internal static partial class Program
         string OperationId,
         string RootPath,
         string StateFilePath,
-        PackageRequest[] DesiredRequests);
+        PackageRequest[] DesiredRequests,
+        PackageStoreMemberDeclaration[] CompleteRoster);
 
     private sealed record GraphUseReleaseCommand(string? Command, string? OperationId);
     private sealed record LoadedIdleMessage(
@@ -125,7 +131,8 @@ internal static partial class Program
         string ContextIdentity,
         string? ContextName,
         bool IsCollectible,
-        string[] AssemblyNames);
+        string[] AssemblyNames,
+        bool IsCoordinatedParticipant);
     private sealed record ExitingMessage(string Kind, string OperationId, int ProcessId);
 
     private sealed class GraphUseDesiredSource(IReadOnlyList<PackageRequest> requests) : IPackagePathIndependentDesiredPackageSource

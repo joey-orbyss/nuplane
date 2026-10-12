@@ -529,6 +529,7 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
         services.Configure<FeedResolutionOptions>(options => options.PackageInstallRoot = configuredRoot);
         services.Configure<StoreRegistryOptions>(options => options.StateFilePath = statePath);
         services.AddSingleton<IDesiredPackageSource>(source);
+        services.AddSingleton(ProtectedReconciliationServices.Create);
         return services.BuildServiceProvider();
     }
 

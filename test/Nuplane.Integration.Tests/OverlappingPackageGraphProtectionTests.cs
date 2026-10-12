@@ -232,13 +232,16 @@ public sealed partial class OverlappingPackageGraphProtectionTests
 
         internal ServiceProvider CreateProvider(string memberId, IPackageActivationGate? activationGate = null,
             IReadOnlyList<PackageRequest>? desiredRequests = null,
-            FeedDefinition? remoteFeed = null)
+            FeedDefinition? remoteFeed = null,
+            bool participant = false)
         {
             var services = new ServiceCollection();
             services.AddLogging();
             services.AddNuplane(nuplane =>
             {
                 nuplane.WithStateFile(StatePaths[memberId]);
+                if (participant)
+                    nuplane.UseCoordinatedPackageStore(CompleteRoster, true);
                 nuplane.AutoloadPackages(loading => loading.WithDefaultLoadMode(_packageLoadMode));
             });
             services.Configure<FeedResolutionOptions>(options => options.PackageInstallRoot = RootPath);
@@ -264,12 +267,21 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             }
             if (activationGate is not null)
                 services.AddSingleton(activationGate);
-            services.RemoveAll<IPhysicalStoreFileSystem>();
-            services.AddSingleton<IPhysicalStoreFileSystem>(Files);
+            if (!participant)
+            {
+                services.RemoveAll<IPhysicalStoreFileSystem>();
+                services.AddSingleton<IPhysicalStoreFileSystem>(Files);
+                // This instrumented component fixture deliberately supplies native admission.
+                // Production participant composition rejects wrapped filesystem providers.
+                services.AddSingleton(ProtectedReconciliationServices.Create);
+            }
             return services.BuildServiceProvider();
         }
 
         internal IReadOnlyDictionary<string, string> StatePaths { get; private set; } = null!;
+
+        internal Nuplane.Builder.PackageStoreMemberDeclaration[] CompleteRoster => StatePaths.Select(pair =>
+            new Nuplane.Builder.PackageStoreMemberDeclaration("default", pair.Key, pair.Value)).ToArray();
 
         internal StoreStateRecord BuildProtectedState(
             string memberId,

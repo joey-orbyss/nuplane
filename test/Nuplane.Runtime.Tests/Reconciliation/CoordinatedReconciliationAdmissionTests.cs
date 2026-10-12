@@ -19,6 +19,7 @@ using Nuplane.Reconciliation.Models;
 using Nuplane.Observability;
 using Nuplane.Registration;
 using Nuplane.Runtime.Tests.TestSupport;
+using Nuplane.Tests.Shared;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.MembershipRecords;
 using Nuplane.Store.Coordination.PhysicalFiles;
@@ -835,7 +836,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
     }
 
     [Fact]
-    public async Task PublicManualLkg_RefusesProtectedInstallPathBeforeValidationOrObservers()
+    public async Task PublicManualLkg_RetainsOrdinaryCompatibilityWithoutNativeAdmission()
     {
         using var fixture = await CompletedMembershipFixture.CreateAsync();
         var selectedRegistry = Substitute.For<IStoreRegistry>();
@@ -845,13 +846,13 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         var recovery = new LastKnownGoodStartupRecoveryService(selectedRegistry, dispatcher,
             new StartupRecoveryState());
 
-        var error = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
-            recovery.TryRecoverAsync("manual-protected-lkg", CancellationToken.None));
+        var result = await recovery.TryRecoverAsync("manual-ordinary-lkg", CancellationToken.None);
 
-        Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, error.Reason);
-        Assert.Equal(fixture.RootIdentity, error.Root);
+        Assert.True(result.Succeeded);
+        Assert.Equal(fixture.States["first"].ActiveVersionById.Count, result.RecoveredPackages.Count);
         await selectedRegistry.Received(1).GetStateAsync(Arg.Any<CancellationToken>());
-        Assert.Empty(dispatcher.ReceivedCalls());
+        await dispatcher.Received(1).PublishReconciledAsync(Arg.Any<PackageChangeSet>(),
+            Arg.Any<IReadOnlyList<ResolvedPackage>>(), CancellationToken.None);
     }
 
     private static ServiceProvider CreateProvider(
@@ -916,6 +917,9 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
             services.RemoveAll<IObserverEventDispatcher>();
             services.AddSingleton<IObserverEventDispatcher>(dispatcherOverride);
         }
+        // This component suite deliberately requests protected admission; ordinary AddNuplane
+        // composition no longer opts into the coordination protocol implicitly.
+        services.AddSingleton(ProtectedReconciliationServices.Create);
         return services.BuildServiceProvider();
     }
 

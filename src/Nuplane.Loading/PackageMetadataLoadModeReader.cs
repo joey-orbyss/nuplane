@@ -18,7 +18,12 @@ internal sealed class PackageMetadataLoadModeReader
 {
     internal const string MetadataFileName = NuplanePackageMetadataReader.MetadataFileName;
 
-    private readonly NuplanePackageMetadataReader _reader = new();
+    private readonly NuplanePackageMetadataReader _reader;
+
+    public PackageMetadataLoadModeReader(NuplanePackageMetadataReader? reader = null)
+    {
+        _reader = reader ?? new NuplanePackageMetadataReader();
+    }
 
     public PackageMetadataLoadModeReadResult Read(string packageId, string version, string installPath)
     {

@@ -6,13 +6,16 @@ using NuGet.RuntimeModel;
 
 namespace Nuplane.Loading;
 
-internal class PackageGraphLoadContext : AssemblyLoadContext, ISharedAssemblyPolicyLoadContext
+internal class PackageGraphLoadContext : AssemblyLoadContext, ISharedAssemblyPolicyLoadContext, IGraphUseLeaseBoundLoadContext
 {
     private readonly IReadOnlyDictionary<string, string> assemblyPathsByName;
     private readonly IReadOnlyList<AssemblyDependencyResolver> _dependencyResolvers;
     private readonly IReadOnlyList<string> _packageInstallPaths;
     private readonly IReadOnlyList<SharedAssemblyPolicyEntry> _sharedPolicy;
     private readonly SharedAssemblyPolicyMatcher _matcher;
+    private readonly PackageGraphUseLease? _graphUseLease;
+
+    PackageGraphUseLease? IGraphUseLeaseBoundLoadContext.GraphUseLease => _graphUseLease;
     private static readonly Lazy<RuntimeGraph> RuntimeGraphProvider = new(LoadRuntimeGraph);
 
     public PackageGraphLoadContext(
@@ -52,6 +55,7 @@ internal class PackageGraphLoadContext : AssemblyLoadContext, ISharedAssemblyPol
         _sharedPolicy = sharedPolicy ?? throw new ArgumentNullException(nameof(sharedPolicy));
         _matcher = matcher ?? throw new ArgumentNullException(nameof(matcher));
         _packageInstallPaths = packageInstallPaths ?? throw new ArgumentNullException(nameof(packageInstallPaths));
+        _graphUseLease = graphLeaseOwner?.Lease;
         graphLeaseOwner?.TransferToLifetime(this, isCollectible);
         _dependencyResolvers = mainAssemblyPaths.Select(static path => new AssemblyDependencyResolver(path)).ToArray();
         assemblyPathsByName = mainAssemblyPaths

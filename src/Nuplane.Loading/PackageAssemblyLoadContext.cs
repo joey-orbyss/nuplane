@@ -9,11 +9,14 @@ namespace Nuplane.Loading;
 /// and shared assembly policy support. Assemblies matching the shared policy are loaded from
 /// the host's default context to avoid version conflicts.
 /// </summary>
-public sealed class PackageAssemblyLoadContext : AssemblyLoadContext, ISharedAssemblyPolicyLoadContext
+public sealed class PackageAssemblyLoadContext : AssemblyLoadContext, ISharedAssemblyPolicyLoadContext, IGraphUseLeaseBoundLoadContext
 {
     private readonly AssemblyDependencyResolver _dependencyResolver;
     private readonly IReadOnlyList<SharedAssemblyPolicyEntry> _sharedPolicy;
     private readonly SharedAssemblyPolicyMatcher _matcher;
+    private readonly PackageGraphUseLease? _graphUseLease;
+
+    PackageGraphUseLease? IGraphUseLeaseBoundLoadContext.GraphUseLease => _graphUseLease;
 
     /// <summary>
     /// Initializes a new instance of <see cref="PackageAssemblyLoadContext"/> for the specified package assembly.
@@ -40,6 +43,7 @@ public sealed class PackageAssemblyLoadContext : AssemblyLoadContext, ISharedAss
         ArgumentNullException.ThrowIfNull(sharedPolicy);
         ArgumentNullException.ThrowIfNull(matcher);
 
+        _graphUseLease = graphLeaseOwner?.Lease;
         graphLeaseOwner?.TransferToLifetime(this, isCollectible: true);
         _dependencyResolver = new(packageMainAssemblyPath);
         _sharedPolicy = sharedPolicy;
