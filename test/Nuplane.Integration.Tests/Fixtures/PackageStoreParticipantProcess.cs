@@ -73,6 +73,10 @@ internal sealed class PackageStoreParticipantProcess : IAsyncDisposable
         string operationId, string requestPath, CancellationToken cancellationToken)
         => StartOperationAsync("--participant-graph-use-scoped-gate", operationId, requestPath, cancellationToken);
 
+    public static Task<PackageStoreParticipantProcess> StartParticipantGraphUseIdentityMismatchAsync(
+        string operationId, string requestPath, CancellationToken cancellationToken)
+        => StartOperationAsync("--participant-graph-use-identity-mismatch", operationId, requestPath, cancellationToken);
+
     private static Task<PackageStoreParticipantProcess> StartOperationAsync(
         string command, string operationId, string requestPath, CancellationToken cancellationToken)
     {
@@ -145,6 +149,18 @@ internal sealed class PackageStoreParticipantProcess : IAsyncDisposable
         await _process.StandardInput.FlushAsync(cancellationToken);
         using var response = await ReadResponseAsync("exiting", cancellationToken).ConfigureAwait(false);
         return await CaptureExitAsync(cancellationToken);
+    }
+
+    public async Task<JsonDocument> RequestIdentityRepeatAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ObjectDisposedException.ThrowIf(_disposeTask is not null, this);
+        if (_correlationProperty != "operationId" || _released)
+            throw new InvalidOperationException("Only an idle operation participant accepts an identity-repeat command.");
+        var command = JsonSerializer.Serialize(new { command = "repeat", operationId = OperationId });
+        await _process.StandardInput.WriteLineAsync(command.AsMemory(), cancellationToken);
+        await _process.StandardInput.FlushAsync(cancellationToken);
+        return await ReadResponseAsync("repeat-refused", cancellationToken).ConfigureAwait(false);
     }
 
     public Task<JsonDocument> ReadResponseAsync(string kind, CancellationToken cancellationToken)

@@ -41,6 +41,141 @@ public sealed partial class OverlappingPackageGraphProtectionTests
     public Task HostIntegratedParticipantLoad_RunsScopedGateAfterSnapshotRelease() =>
         RunGraphUseProcessExitAsync(false, ParticipantGraphUseProcessMode.ParticipantScopedGate);
 
+    [Fact]
+    public async Task HostIntegratedParticipantLoad_RejectsChangedPersistedIdentityOnRepeat()
+    {
+        var fixture = await GraphUseFixture.CreateAsync(
+            PackageLoadMode.HostIntegrated, includeFreshMemberAGraph: true);
+        ServiceProvider? parentProvider = null;
+        PackageStoreParticipantProcess? participant = null;
+        string? requestPath = null;
+        Exception? primaryFailure = null;
+        var cleanupFailures = new List<Exception>();
+        try
+        {
+            parentProvider = fixture.CreateProvider("member-a");
+            var nativeEvidenceBefore = CaptureFixtureNativeEvidence(fixture);
+            var operationId = Guid.NewGuid().ToString("N");
+            requestPath = Path.Combine(Path.GetTempPath(), $"nuplane-graph-use-repeat-{operationId}.json");
+            var request = new GraphUseProcessRequest(operationId, fixture.RootPath,
+                fixture.StatePaths["member-a"], fixture.Graphs["member-a"].Requests.ToArray(), fixture.CompleteRoster);
+            await File.WriteAllTextAsync(requestPath,
+                JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            participant = await PackageStoreParticipantProcess.StartParticipantGraphUseIdentityMismatchAsync(
+                operationId, requestPath, deadline.Token);
+            using var loaded = await participant.ReadResponseAsync("loaded-idle", deadline.Token);
+            Assert.Equal(participant.ProcessId, loaded.RootElement.GetProperty("processId").GetInt32());
+            Assert.False(loaded.RootElement.GetProperty("isCollectible").GetBoolean());
+            Assert.True(loaded.RootElement.GetProperty("isCoordinatedParticipant").GetBoolean());
+            Assert.False(participant.HasExited);
+            var assemblyNames = loaded.RootElement.GetProperty("assemblyNames").EnumerateArray()
+                .Select(static item => item.GetString()!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            Assert.Contains("Root.First", assemblyNames);
+            Assert.Contains("Shared.Dependency", assemblyNames);
+
+            var admission = parentProvider.GetRequiredService<IPackageStoreAdmission>();
+            var originalLive = await InspectUseStateAsync(admission, fixture, GraphUseRecordOwnershipState.Live, deadline.Token);
+            Assert.Equal(participant.ProcessId, originalLive.Record.DiagnosticProcessId);
+            Assert.Equal(fixture.Graphs["member-a"].Graph.GenerationId, originalLive.Record.GraphSnapshot.GenerationId);
+            AssertGraphUseMatchesFixture(originalLive.Record.GraphSnapshot, fixture, nativeEvidenceBefore);
+
+            var originalState = await new StoreStateSerializer().LoadAsync(
+                fixture.StatePaths["member-a"], CancellationToken.None);
+            var originalCandidate = Assert.Single(
+                Assert.IsType<PackageProtectionRecord>(originalState.ProtectionRecord).ActiveClosure.Graphs!);
+            var replacementGraph = Assert.IsType<ResolvedGraphFixture>(fixture.FreshMemberAGraph);
+            Assert.Equal(originalCandidate.GraphId, replacementGraph.Graph.GraphId);
+            Assert.NotEqual(originalCandidate.GenerationId, replacementGraph.Graph.GenerationId);
+            Assert.Equal(originalCandidate.Nodes.Select(static node => (node.Install.PackageId, node.Install.Version))
+                    .OrderBy(static item => item.PackageId, StringComparer.OrdinalIgnoreCase),
+                replacementGraph.Graph.Nodes.Select(static node => (node.PackageId, node.Version))
+                    .OrderBy(static item => item.PackageId, StringComparer.OrdinalIgnoreCase));
+
+            var replacementState = await PublishProtectedStateAsync(parentProvider, current =>
+            {
+                Assert.Equal(originalState.ProtectionRecord!.Revision, current.ProtectionRecord!.Revision);
+                return fixture.BuildProtectedState("member-a", replacementGraph, current,
+                    checked(current.ProtectionRecord.Revision + 1), isUpdate: true);
+            });
+            var replacementCandidate = Assert.Single(
+                Assert.IsType<PackageProtectionRecord>(replacementState.ProtectionRecord).ActiveClosure.Graphs!);
+            Assert.NotEqual(originalCandidate.SnapshotId, replacementCandidate.SnapshotId);
+            Assert.NotEqual(originalCandidate.GenerationId, replacementCandidate.GenerationId);
+            Assert.Equal(originalCandidate.Nodes.Select(static node => (node.Install.PackageId, node.Install.Version))
+                    .OrderBy(static item => item.PackageId, StringComparer.OrdinalIgnoreCase),
+                replacementCandidate.Nodes.Select(static node => (node.Install.PackageId, node.Install.Version))
+                    .OrderBy(static item => item.PackageId, StringComparer.OrdinalIgnoreCase));
+
+            var publishedPersistence = CapturePersistenceEvidence(fixture);
+            AssertNativeEvidenceEqual(nativeEvidenceBefore, CaptureFixtureNativeEvidence(fixture));
+            await AssertMembersRemainProtectedAsync(fixture, nativeEvidenceBefore);
+
+            using (var repeat = await participant.RequestIdentityRepeatAsync(deadline.Token))
+            {
+                Assert.Equal(operationId, repeat.RootElement.GetProperty("operationId").GetString());
+                Assert.Equal(participant.ProcessId, repeat.RootElement.GetProperty("processId").GetInt32());
+                Assert.Equal(PackageStoreAdmissionReason.UnknownAuthority.ToString(),
+                    repeat.RootElement.GetProperty("reason").GetString());
+                Assert.False(repeat.RootElement.GetProperty("activationGateEvaluated").GetBoolean());
+                Assert.Equal(1, repeat.RootElement.GetProperty("matchingPackageGraphContexts").GetInt32());
+                Assert.Equal(loaded.RootElement.GetProperty("contextIdentity").GetString(),
+                    repeat.RootElement.GetProperty("contextIdentity").GetString());
+            }
+
+            var stillLive = await InspectUseStateAsync(admission, fixture, GraphUseRecordOwnershipState.Live, deadline.Token);
+            Assert.Equal(originalLive.Record.UseId, stillLive.Record.UseId);
+            Assert.Equal(originalLive.Record.PayloadDigest, stillLive.Record.PayloadDigest);
+            Assert.Equal(originalLive.Record.SentinelIdentity, stillLive.Record.SentinelIdentity);
+            Assert.Equal(originalLive.Record.GraphSnapshot.SnapshotId, stillLive.Record.GraphSnapshot.SnapshotId);
+            Assert.Equal(originalLive.Record.GraphSnapshot.GenerationId, stillLive.Record.GraphSnapshot.GenerationId);
+            AssertPersistenceEvidenceEqual(publishedPersistence, CapturePersistenceEvidence(fixture));
+            AssertNativeEvidenceEqual(nativeEvidenceBefore, CaptureFixtureNativeEvidence(fixture));
+
+            var exit = await participant.ReleaseOperationAsync(deadline.Token);
+            Assert.Equal(0, exit.ExitCode);
+            var stale = await InspectUseStateAsync(admission, fixture, GraphUseRecordOwnershipState.Stale, deadline.Token);
+            Assert.Equal(originalLive.Record.UseId, stale.Record.UseId);
+            Assert.Equal(originalLive.Record.PayloadDigest, stale.Record.PayloadDigest);
+            Assert.Equal(originalLive.Record.SentinelIdentity, stale.Record.SentinelIdentity);
+            Assert.Equal(originalLive.Record.GraphSnapshot.GenerationId, stale.Record.GraphSnapshot.GenerationId);
+            AssertPersistenceEvidenceEqual(publishedPersistence, CapturePersistenceEvidence(fixture));
+            AssertNativeEvidenceEqual(nativeEvidenceBefore, CaptureFixtureNativeEvidence(fixture));
+        }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+        }
+
+        if (participant is not null)
+        {
+            try { await participant.DisposeAsync(); }
+            catch (Exception exception) { cleanupFailures.Add(exception); }
+        }
+        try
+        {
+            if (parentProvider is not null)
+                await parentProvider.DisposeAsync();
+        }
+        catch (Exception exception) { cleanupFailures.Add(exception); }
+        try { fixture.Dispose(); }
+        catch (Exception exception) { cleanupFailures.Add(exception); }
+        if (requestPath is not null)
+        {
+            try { File.Delete(requestPath); }
+            catch (Exception exception) { cleanupFailures.Add(exception); }
+        }
+
+        if (primaryFailure is not null && cleanupFailures.Count > 0)
+            throw new AggregateException("The identity-repeat assertion and its cleanup both failed.",
+                [primaryFailure, .. cleanupFailures]);
+        if (primaryFailure is not null)
+            ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+        if (cleanupFailures.Count > 0)
+            throw new AggregateException("Identity-repeat test cleanup failed.", cleanupFailures);
+    }
+
     private async Task RunGraphUseProcessExitAsync(bool terminateProcess, ParticipantGraphUseProcessMode mode)
     {
         var fixture = await GraphUseFixture.CreateAsync(PackageLoadMode.HostIntegrated);

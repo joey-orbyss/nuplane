@@ -33,6 +33,7 @@ internal static partial class Program
         var didParticipantRepeatCompositionAcceptance = false;
         var didActivationGateProbeLiveUse = false;
         var activationGateEvaluated = false;
+        string? retainedInitialContextIdentity = null;
         if (!isParticipantLoad)
         {
             var result = await provider.GetRequiredService<IReconciliationService>()
@@ -90,6 +91,13 @@ internal static partial class Program
                     throw new InvalidOperationException("The scoped gate did not observe its committed live graph-use record after the short catalog snapshot was released.");
                 didActivationGateProbeLiveUse = true;
             }
+            else if (mode == "--participant-graph-use-identity-mismatch")
+            {
+                var firstLoad = await NuplaneHostIntegratedLoader.LoadFromParticipantAsync(access).ConfigureAwait(false);
+                if (firstLoad.FailedByPackageId.Count != 0)
+                    throw new InvalidOperationException(
+                        $"The initial participant load failed: {string.Join(",", firstLoad.FailedByPackageId.Keys)}.");
+            }
             else
             {
                 var firstLoad = await NuplaneHostIntegratedLoader.LoadFromParticipantAsync(access).ConfigureAwait(false);
@@ -121,6 +129,7 @@ internal static partial class Program
 
             var context = matchingContexts[0];
             var contextIdentity = $"{context.Name ?? "unnamed"}:{RuntimeHelpers.GetHashCode(context):x8}";
+            retainedInitialContextIdentity = contextIdentity;
             var assemblyNames = context.Assemblies.Select(static assembly => assembly.GetName().Name!)
                 .OrderBy(static name => name, StringComparer.OrdinalIgnoreCase)
                 .ToArray();
@@ -142,6 +151,57 @@ internal static partial class Program
         {
             await WriteDiagnosticAsync("Expected one graph-use release command.").ConfigureAwait(false);
             return InvalidProtocolExitCode;
+        }
+
+        if (mode == "--participant-graph-use-identity-mismatch" && command?.Command == "repeat" &&
+            command.OperationId == request.OperationId)
+        {
+            var repeatGate = new RepeatIdentityActivationGate();
+            var repeatOptions = new HostIntegratedLoadOptions();
+            repeatOptions.ActivationGates.Add(repeatGate);
+            PackageStoreAdmissionException? refusal = null;
+            try
+            {
+                await NuplaneHostIntegratedLoader.LoadFromParticipantAsync(
+                    provider.GetRequiredService<NuplaneStoreSnapshotAccess>(), repeatOptions).ConfigureAwait(false);
+            }
+            catch (PackageStoreAdmissionException exception)
+            {
+                refusal = exception;
+            }
+
+            if (refusal is null)
+                throw new InvalidOperationException("The changed persisted graph identity was unexpectedly accepted for a retained process context.");
+            if (refusal.Reason != PackageStoreAdmissionReason.UnknownAuthority)
+                throw new InvalidOperationException(
+                    $"Changed persisted identity refused for an unexpected reason: {refusal.Reason}.", refusal);
+
+            var retainedContexts = AssemblyLoadContext.All
+                .Where(context => !context.IsCollectible && requiredAssemblies.All(expected =>
+                    context.Assemblies.Any(assembly => string.Equals(assembly.GetName().Name, expected, StringComparison.OrdinalIgnoreCase))))
+                .ToArray();
+            if (repeatGate.WasEvaluated || retainedContexts.Length != 1 ||
+                !string.Equals($"{retainedContexts[0].Name ?? "unnamed"}:{RuntimeHelpers.GetHashCode(retainedContexts[0]):x8}",
+                    retainedInitialContextIdentity, StringComparison.Ordinal))
+                throw new InvalidOperationException("The changed-identity repeat invoked a gate or replaced the retained package context.");
+
+            await WriteJsonLineAsync(new RepeatRefusedMessage(
+                "repeat-refused", request.OperationId, Environment.ProcessId, refusal.Reason.ToString(),
+                repeatGate.WasEvaluated, retainedContexts.Length,
+                $"{retainedContexts[0].Name ?? "unnamed"}:{RuntimeHelpers.GetHashCode(retainedContexts[0]):x8}"))
+                .ConfigureAwait(false);
+            input = await Console.In.ReadLineAsync().ConfigureAwait(false);
+            if (input is null)
+                return PrematureEofExitCode;
+            try
+            {
+                command = JsonSerializer.Deserialize<GraphUseReleaseCommand>(input, JsonOptions);
+            }
+            catch (JsonException)
+            {
+                await WriteDiagnosticAsync("Expected one graph-use release command after the repeat refusal.").ConfigureAwait(false);
+                return InvalidProtocolExitCode;
+            }
         }
 
         if (command is null || command.Command != "release" || command.OperationId != request.OperationId)
@@ -302,6 +362,14 @@ internal static partial class Program
         bool ActivationGateEvaluated,
         int MatchingPackageGraphContexts);
     private sealed record ExitingMessage(string Kind, string OperationId, int ProcessId);
+    private sealed record RepeatRefusedMessage(
+        string Kind,
+        string OperationId,
+        int ProcessId,
+        string Reason,
+        bool ActivationGateEvaluated,
+        int MatchingPackageGraphContexts,
+        string ContextIdentity);
 
     private sealed class GraphUseDesiredSource(IReadOnlyList<PackageRequest> requests) : IPackagePathIndependentDesiredPackageSource
     {
@@ -309,6 +377,20 @@ internal static partial class Program
         {
             ct.ThrowIfCancellationRequested();
             return Task.FromResult(requests);
+        }
+    }
+
+    private sealed class RepeatIdentityActivationGate : IPackagePathIndependentActivationGate
+    {
+        public bool WasEvaluated { get; private set; }
+
+        public ValueTask<PackageActivationGateResult> EvaluateAsync(
+            PackageActivationContext context,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            WasEvaluated = true;
+            return ValueTask.FromResult(PackageActivationGateResult.Allow);
         }
     }
 }

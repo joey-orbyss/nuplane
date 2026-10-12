@@ -5,13 +5,13 @@ using Nuplane.Store.State;
 namespace Nuplane.Loading;
 
 /// <summary>
-/// Offline, dependency-injection-free entry point that loads an already-resolved active package set
-/// into assemblies exactly the way <see cref="PackageLoadMode.HostIntegrated"/> loading does inside a
-/// running Nuplane host — with no host, no hosted services, no reconciliation, and no feed or network
-/// access.
-/// <see cref="LoadFromStateAsync(string, HostIntegratedLoadOptions, CancellationToken)"/> is the primary
-/// entry point: it reads a <c>store-state.json</c> offline and loads what it records, grouping packages
-/// into graphs exactly as the host that wrote the state does.
+/// Offline, dependency-injection-free entry points load an already-resolved active package set or
+/// persisted state into assemblies the way <see cref="PackageLoadMode.HostIntegrated"/> loading does,
+/// without host services, reconciliation, feeds, or network access. For a running enrolled participant,
+/// use <see cref="LoadFromParticipantAsync(NuplaneStoreSnapshotAccess, HostIntegratedLoadOptions, CancellationToken)"/>
+/// to load through its complete native catalog admission and retain process-lifetime graph protection.
+/// <see cref="LoadFromStateAsync(string, HostIntegratedLoadOptions, CancellationToken)"/> is the preferred
+/// ordinary offline state-file entry point.
 /// <see cref="LoadActivePackagesAsync(IReadOnlyList{ActivePackage}, HostIntegratedLoadOptions, CancellationToken)"/>
 /// takes an already-assembled package set instead, and groups by graph generation identity because that
 /// is all such a set carries.
@@ -149,10 +149,12 @@ public static class NuplaneHostIntegratedLoader
     }
 
     /// <summary>
-    /// Reads the persisted store state at <paramref name="stateFilePath"/> and loads the package set it
-    /// records into this process the way a running host's <see cref="PackageLoadMode.HostIntegrated"/>
-    /// loading would. This is the entry point to prefer: it is the only one that can group packages into
-    /// graphs exactly as the host does, because grouping needs the state's graph activation records.
+    /// Reads the persisted store state at <paramref name="stateFilePath"/> offline and loads the package
+    /// set it records into this process the way a running host's <see cref="PackageLoadMode.HostIntegrated"/>
+    /// loading would. This is the preferred ordinary offline entry point because it groups packages
+    /// using the state's graph activation records. Enrolled participants should use
+    /// <see cref="LoadFromParticipantAsync(NuplaneStoreSnapshotAccess, HostIntegratedLoadOptions, CancellationToken)"/>
+    /// instead.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -193,7 +195,8 @@ public static class NuplaneHostIntegratedLoader
     /// Reads the persisted store state from the state file resolved from <paramref name="storeOptions"/>
     /// the same way a running host resolves it, and loads the package set it records. See
     /// <see cref="LoadFromStateAsync(string, HostIntegratedLoadOptions, CancellationToken)"/>, which
-    /// this delegates to.
+    /// this delegates to. This is an ordinary offline read; enrolled participants should instead use
+    /// <see cref="LoadFromParticipantAsync(NuplaneStoreSnapshotAccess, HostIntegratedLoadOptions, CancellationToken)"/>.
     /// </summary>
     /// <param name="storeOptions">The store registry options to resolve the effective state file path from.</param>
     /// <param name="options">The load options, or <see langword="null"/> to load exactly as a host with default host-integrated configuration does.</param>

@@ -497,6 +497,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
     private static Dictionary<string, NativeInstallEvidence> CaptureFixtureNativeEvidence(GraphUseFixture fixture)
     {
         var packages = fixture.Graphs.Values.SelectMany(static graph => graph.Packages)
+            .Concat(fixture.IndependentGraph?.Packages ?? [])
             .Append(fixture.UnrelatedInstall)
             .DistinctBy(static package => package.InstallPath, StringComparer.Ordinal)
             .OrderBy(static package => package.InstallPath, StringComparer.Ordinal)

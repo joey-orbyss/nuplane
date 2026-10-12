@@ -213,14 +213,19 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         internal RootMembershipRegistry Registry { get; private set; } = null!;
         internal string RootPath => _fixture.PackageInstallRoot;
         internal ResolvedPackage UnrelatedInstall { get; private set; } = null!;
+        internal ResolvedGraphFixture? IndependentGraph { get; private set; }
+        internal ResolvedGraphFixture? FreshMemberAGraph { get; private set; }
         internal Dictionary<string, ResolvedGraphFixture> Graphs { get; } = new(StringComparer.Ordinal);
 
-        internal static async Task<GraphUseFixture> CreateAsync(PackageLoadMode packageLoadMode = PackageLoadMode.Collectible)
+        internal static async Task<GraphUseFixture> CreateAsync(
+            PackageLoadMode packageLoadMode = PackageLoadMode.Collectible,
+            bool includeIndependentGraph = false,
+            bool includeFreshMemberAGraph = false)
         {
             var fixture = new GraphUseFixture(packageLoadMode);
             try
             {
-                await fixture.InitializeAsync();
+                await fixture.InitializeAsync(includeIndependentGraph, includeFreshMemberAGraph);
                 return fixture;
             }
             catch
@@ -293,32 +298,54 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             ResolvedGraphFixture graph,
             StoreStateRecord currentState,
             long revision,
+            bool isUpdate) => BuildProtectedState(memberId, [graph], currentState, revision, isUpdate);
+
+        internal StoreStateRecord BuildProtectedState(
+            string memberId,
+            IReadOnlyList<ResolvedGraphFixture> graphs,
+            StoreStateRecord currentState,
+            long revision,
             bool isUpdate)
         {
-            var installs = new List<PackageInstallIdentity>();
-            foreach (var node in graph.Graph.Nodes)
+            ArgumentNullException.ThrowIfNull(graphs);
+            if (graphs.Count == 0)
+                throw new ArgumentException("At least one graph is required to build protected state.", nameof(graphs));
+
+            var installsByPath = new Dictionary<string, PackageInstallIdentity>(StringComparer.Ordinal);
+            foreach (var node in graphs.SelectMany(static graph => graph.Graph.Nodes))
             {
+                var relativePath = Path.GetRelativePath(RootPath, node.InstallPath!).Replace(Path.DirectorySeparatorChar, '/');
                 using var observation = new PackageInstallIdentityReader(Files).Observe(Root, RootIdentity,
-                    Path.GetRelativePath(RootPath, node.InstallPath!).Replace(Path.DirectorySeparatorChar, '/'),
+                    relativePath,
                     node.PackageId, node.Version);
-                installs.Add(observation.InstallIdentity);
+                if (installsByPath.TryGetValue(relativePath, out var priorIdentity))
+                    Assert.Equal(priorIdentity, observation.InstallIdentity);
+                else
+                    installsByPath.Add(relativePath, observation.InstallIdentity);
             }
 
-            var snapshot = RecoverableGraphSnapshotFactory.CreateActiveAndRecoverableCandidate(
-                graph.Graph, graph.Requests, installs, revision);
-            var versions = graph.Packages.ToDictionary(static package => package.Id,
+            var snapshots = graphs.Select(graph => RecoverableGraphSnapshotFactory.CreateActiveAndRecoverableCandidate(
+                graph.Graph, graph.Requests, graph.Graph.Nodes.Select(node =>
+                    installsByPath[Path.GetRelativePath(RootPath, node.InstallPath!).Replace(Path.DirectorySeparatorChar, '/')]).ToArray(), revision))
+                .ToArray();
+            var packages = graphs.SelectMany(static graph => graph.Packages).ToArray();
+            var versions = packages.ToDictionary(static package => package.Id,
                 static package => package.Version, StringComparer.OrdinalIgnoreCase);
             var now = DateTimeOffset.UtcNow;
-            var change = new PackageChangeSet(
-                isUpdate ? [] : graph.Packages,
-                isUpdate ? graph.Packages.Where(package => currentState.ActiveVersionById.TryGetValue(package.Id, out var oldVersion) &&
-                    !string.Equals(oldVersion, package.Version, StringComparison.OrdinalIgnoreCase)).ToArray() : [],
-                [], memberId, now);
+            var added = isUpdate
+                ? packages.Where(package => !currentState.ActiveVersionById.ContainsKey(package.Id)).ToArray()
+                : packages;
+            var updated = isUpdate
+                ? packages.Where(package => currentState.ActiveVersionById.TryGetValue(package.Id, out var oldVersion) &&
+                    !string.Equals(oldVersion, package.Version, StringComparison.OrdinalIgnoreCase)).ToArray()
+                : [];
+            var change = new PackageChangeSet(added, updated, [], memberId, now);
+            var activeGraphs = graphs.Select(static graph => graph.Graph).ToArray();
             var descriptors = ActivePackageCatalogMapper.BuildNextDescriptors(currentState, versions,
-                graph.Packages, change, memberId, now, [graph.Graph]);
-            var graphRecords = ActivePackageCatalogMapper.BuildActiveGraphRecords(currentState, [graph.Graph],
+                packages, change, memberId, now, activeGraphs);
+            var graphRecords = ActivePackageCatalogMapper.BuildActiveGraphRecords(currentState, activeGraphs,
                 versions, memberId, now);
-            var closure = new PackageProtectionClosure(PackageProtectionClosureKnowledge.Known, null, [snapshot]);
+            var closure = new PackageProtectionClosure(PackageProtectionClosureKnowledge.Known, null, snapshots);
             var state = currentState with
             {
                 ActiveVersionById = versions,
@@ -370,7 +397,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 $"Collectible graph-use records did not become stale after their load contexts were unloaded.{detail}");
         }
 
-        private async Task InitializeAsync()
+        private async Task InitializeAsync(bool includeIndependentGraph, bool includeFreshMemberAGraph)
         {
             Root = OwnedProcessDirectory.Open(Files, RootPath);
             RootIdentity = new PhysicalRootIdentity(Files.InspectHandle(Root).Identity);
@@ -401,6 +428,13 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             Graphs.Add("member-b", await ResolveGraphAsync("member-b", secondV1Root, shared));
             Graphs.Add("member-b-v2", await ResolveGraphAsync("member-b", secondV2Root, shared));
             UnrelatedInstall = CreateInstall("Unrelated.Package", "0.1.0", dependencyId: null, sourceName: "unrelated");
+            if (includeFreshMemberAGraph)
+                FreshMemberAGraph = await ResolveGraphAsync("member-a", firstRoot, shared);
+            if (includeIndependentGraph)
+            {
+                var independentRoot = CreateInstall("Root.Independent", "1.0.0", dependencyId: null, sourceName: "member-a");
+                IndependentGraph = await ResolveGraphAsync("member-a", independentRoot, UnrelatedInstall);
+            }
 
             Registry.InitializeIncomplete(Root, RootIdentity, RootMembershipBindingEpoch, declarations,
                 quiescentCutoverConfirmed: true, CancellationToken.None);
