@@ -2,13 +2,13 @@
 
 **Branch**: `108-safe-package-store-pruning` | **Date**: 2026-10-09 | **Spec**: [spec.md](spec.md)
 
-**Status**: Design accepted after independent review and root verification on 2026-10-09. The 128-artifact implementation checklist is independently reviewed and root-accepted in [tasks.md](tasks.md). Foundational implementation is in progress, with 48 of 128 task rows checked as accepted (including bounded prerequisites and the T124 package/host acceptance plan) and further native admission/graph-projection qualification underway; per-increment evidence is linked from the checklist. Full runtime admission, graph lifetimes and package-deletion acceptance remain outstanding.
+**Status**: Design accepted after independent review and root verification on 2026-10-09. The 128-artifact implementation checklist is independently reviewed and root-accepted in [tasks.md](tasks.md). Implementation is in progress; the current accepted rows and per-increment evidence are maintained in [tasks.md](tasks.md), including bounded prerequisites and the T124 package/host acceptance plan. Full runtime admission, graph lifetimes and package-deletion acceptance remain outstanding.
 
 ## Summary
 
 Coordinate every admitted user of one physical package-install root while preserving multiple independent persistent states. Persist complete active/LKG graph paths, publish graph-use protection before package content is read, retain it for actual load lifetime, then provide explicit manual inventory/retention/execute. Default dry-run and absent-retention keep-all remain mandatory. Actual deletion follows a fresh root-plus-all-state snapshot through a no-follow exact-identity filesystem primitive; policy eligibility is never physical deletion evidence.
 
-The root engineering selection is recorded in [Nuplane #108](https://github.com/valence-works/nuplane/issues/108#issuecomment-6076600594). Existing-root enrollment is a fully quiescent operator cutover through durable complete membership publication. Non-enrolled roots retain ordinary behavior; upgraded clients of enrolled roots must participate even without enabling maintenance locally. Unknown authority denies ordinary package-path access until verified recovery and refuses deletion. Arbitrary noncooperating readers/writers are outside this coordinated-root contract; runtime cannot discover them.
+The root engineering selection is recorded in [Nuplane #108](https://github.com/valence-works/nuplane/issues/108#issuecomment-6076600594). Ordinary Nuplane compositions retain released-compatible behavior by default. Enabling pruning requires a fully quiescent operator cutover through durable complete membership publication and explicit participation by every client using that store, including clients that do not enable maintenance locally. Participating compositions refuse unknown authority before package-path reads and never retry through ordinary routes; unsupported environments refuse pruning. Complete client coverage is an operator assertion. Arbitrary noncooperating readers/writers are outside this coordinated-root contract; runtime cannot discover them.
 
 ## Technical Context
 
