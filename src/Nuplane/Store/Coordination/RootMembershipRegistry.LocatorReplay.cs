@@ -14,7 +14,8 @@ internal sealed partial class RootMembershipRegistry
         GroupAcknowledged,
         PendingStateRecovery,
         Declared,
-        BoundIncomplete
+        BoundIncomplete,
+        Enrollment
     }
 
     /// <summary>Runs a scoped member-state callback while a structurally Complete root and all member locks are held.</summary>
@@ -198,7 +199,8 @@ internal sealed partial class RootMembershipRegistry
         long expectedEnrollmentEpoch,
         bool quiescentCutoverConfirmed,
         Func<LockedMemberLocations, CancellationToken, Task<TResult>> callback,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool enrollmentOwner = false)
     {
         ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(expectedRoot);
@@ -219,23 +221,30 @@ internal sealed partial class RootMembershipRegistry
         {
             // Bound slots name lock files only. The digest and configured paths are replayed after all locks are held.
             var hints = ReadLedger(root, control);
-            RequireBoundIncompleteLocatorLedger(hints, expectedRoot, expectedEnrollmentEpoch);
+            if (enrollmentOwner)
+                RequireEnrollmentLocatorLedger(hints, expectedRoot, expectedEnrollmentEpoch);
+            else
+                RequireBoundIncompleteLocatorLedger(hints, expectedRoot, expectedEnrollmentEpoch);
             var lockHints = hints.Members.Select(GetSlot).ToArray();
             owner = await _locks.AcquireAsync(control, lockHints, cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
 
             var lockedLedger = ReadLedger(root, control, out var lockedLedgerIdentity);
             RequireSameDigest(hints, lockedLedger);
-            RequireBoundIncompleteLocatorLedger(lockedLedger, expectedRoot, expectedEnrollmentEpoch);
+            if (enrollmentOwner)
+                RequireEnrollmentLocatorLedger(lockedLedger, expectedRoot, expectedEnrollmentEpoch);
+            else
+                RequireBoundIncompleteLocatorLedger(lockedLedger, expectedRoot, expectedEnrollmentEpoch);
             scope = new MemberLocatorReplayScope(lockedLedger);
-            preparedLocations = ResolveMemberLocatorMap(lockedLedger, scope, LocatorReplayBindingPolicy.BoundIncomplete);
+            var policy = enrollmentOwner ? LocatorReplayBindingPolicy.Enrollment : LocatorReplayBindingPolicy.BoundIncomplete;
+            preparedLocations = ResolveMemberLocatorMap(lockedLedger, scope, policy);
             cancellationToken.ThrowIfCancellationRequested();
 
             var ownedTransaction = new Transaction(this, root, control, owner, lockedLedger, lockedLedgerIdentity);
             transaction = ownedTransaction;
             owner = null;
             context = CreateLockedMemberLocations(ownedTransaction, root, scope, preparedLocations,
-                LocatorReplayBindingPolicy.BoundIncomplete, expectedRoot, expectedEnrollmentEpoch);
+                policy, expectedRoot, expectedEnrollmentEpoch);
             preparedLocations = null; // Context now owns the resolved parent handles.
             return await callback(context, cancellationToken).ConfigureAwait(false);
         }
@@ -375,7 +384,10 @@ internal sealed partial class RootMembershipRegistry
     {
         var memberIds = ledger.Members.Select(member => member.MemberId).ToHashSet(StringComparer.Ordinal);
         var targetIds = ledger.TargetMemberIds.ToHashSet(StringComparer.Ordinal);
-        if (ledger.Members.Count == 0 || memberIds.Count != ledger.Members.Count || !memberIds.SetEquals(targetIds))
+        if (ledger.Members.Count == 0 || memberIds.Count != ledger.Members.Count ||
+            (policy == LocatorReplayBindingPolicy.Enrollment
+                ? targetIds.Count == 0 || !targetIds.IsSubsetOf(memberIds)
+                : !memberIds.SetEquals(targetIds)))
             throw Refused("Every locator replay requires the exact non-empty member and target union.");
 
         var locations = new Dictionary<string, ResolvedMemberStateLocation>(StringComparer.Ordinal);
@@ -536,6 +548,28 @@ internal sealed partial class RootMembershipRegistry
                     throw Refused("A configured member locator no longer resolves to its bound Incomplete native state slot.");
                 return;
             }
+            case LocatorReplayBindingPolicy.Enrollment:
+            {
+                var expectedSlot = member.Binding switch
+                {
+                    RootMemberRecord.DeclaredBinding => location.Slot,
+                    RootMemberRecord.ProspectiveBinding prospective =>
+                        new StateSlotIdentity(prospective.VerifiedParentIdentity, prospective.NameSemantics, prospective.RequestedBasename),
+                    RootMemberRecord.ExistingUnprotectedBinding unprotected => unprotected.StateSlot,
+                    RootMemberRecord.AcknowledgedBinding acknowledged => acknowledged.StateSlot,
+                    _ => throw Refused("Enrollment encountered an unsupported member binding.")
+                };
+                var expectedIdentity = member.Binding switch
+                {
+                    RootMemberRecord.DeclaredBinding or RootMemberRecord.ProspectiveBinding => null,
+                    RootMemberRecord.ExistingUnprotectedBinding unprotected => unprotected.ObservedStateFileIdentity,
+                    RootMemberRecord.AcknowledgedBinding acknowledged => acknowledged.ObservedStateFileIdentity,
+                    _ => throw Refused("Enrollment encountered an unsupported member binding.")
+                };
+                if (location.Slot != expectedSlot || location.ExistingFileIdentity != expectedIdentity)
+                    throw Refused("A configured member locator no longer resolves to its exact enrollment state slot.");
+                return;
+            }
             default:
                 throw new ArgumentOutOfRangeException(nameof(policy));
         }
@@ -620,6 +654,25 @@ internal sealed partial class RootMembershipRegistry
         }
     }
 
+    private static void RequireEnrollmentLocatorLedger(
+        RootMembershipRecord ledger,
+        PhysicalRootIdentity expectedRoot,
+        long expectedEnrollmentEpoch)
+    {
+        if (ledger.RootIdentity != expectedRoot || ledger.EnrollmentEpoch != expectedEnrollmentEpoch ||
+            ledger.Status != RootMembershipStatus.Incomplete || ledger.PendingStateCommit is not null ||
+            ledger.PendingGroupPublicationV2 is not null || ledger.Members.Count == 0)
+            throw Refused("Quiescent enrollment replay requires the expected non-pending Incomplete membership.");
+
+        var memberIds = ledger.Members.Select(member => member.MemberId).ToHashSet(StringComparer.Ordinal);
+        var targetIds = ledger.TargetMemberIds.ToHashSet(StringComparer.Ordinal);
+        if (memberIds.Count != ledger.Members.Count || targetIds.Count == 0 || !targetIds.IsSubsetOf(memberIds))
+            throw Refused("Enrollment replay requires a non-empty target subset of the exact membership union.");
+        if (ledger.Members.Any(static member => member.Binding is not (RootMemberRecord.ProspectiveBinding or
+                RootMemberRecord.ExistingUnprotectedBinding or RootMemberRecord.AcknowledgedBinding)))
+            throw Refused("Enrollment replay encountered an unsupported member binding.");
+    }
+
     private LockedMemberLocations CreateLockedMemberLocations(
         Transaction transaction,
         PhysicalStoreDirectoryHandle root,
@@ -632,6 +685,11 @@ internal sealed partial class RootMembershipRegistry
         Func<RootMembershipRecord, Task>? afterOwnedPublication = null,
         Action? revalidateProjectionRoot = null)
     {
+        Func<LockedMemberLocations, CancellationToken, Task<RootMembershipRecord>>? completeEnrollment =
+            policy == LocatorReplayBindingPolicy.Enrollment
+                ? (context, token) => CompleteEnrollmentUnderOwnerAsync(transaction, root, context,
+                    expectedRoot, expectedEnrollmentEpoch, token)
+                : null;
         return new LockedMemberLocations(
             _files,
             root,
@@ -668,7 +726,8 @@ internal sealed partial class RootMembershipRegistry
                 expectedRoot, expectedEnrollmentEpoch, policy, token),
             catalogSession,
             afterOwnedPublication,
-            revalidateProjectionRoot);
+            revalidateProjectionRoot,
+            completeEnrollment);
     }
 
     private LockedMemberLocations.ConfiguredMemberBinding BindConfiguredStateFile(
@@ -766,6 +825,13 @@ internal sealed partial class RootMembershipRegistry
         LocatorReplayBindingPolicy policy,
         CancellationToken cancellationToken)
     {
+        if (policy == LocatorReplayBindingPolicy.Enrollment)
+        {
+            await VerifyEnrollmentCandidateAsync(transaction, root, scope, locations, memberId,
+                priorState, nextState, expectedRoot, expectedEnrollmentEpoch, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         var ledger = transaction.ReadCurrent();
         scope.RequireCandidate(ledger.RootIdentity, ledger);
         var priorStates = await VerifyLockedMemberStatesAsync(transaction, root, scope, locations,
@@ -823,6 +889,88 @@ internal sealed partial class RootMembershipRegistry
         }
     }
 
+    private async Task VerifyEnrollmentCandidateAsync(
+        Transaction transaction,
+        PhysicalStoreDirectoryHandle root,
+        MemberLocatorReplayScope scope,
+        IReadOnlyDictionary<string, ResolvedMemberStateLocation> locations,
+        string memberId,
+        StoreStateRecord suppliedPriorState,
+        StoreStateRecord nextState,
+        PhysicalRootIdentity expectedRoot,
+        long expectedEnrollmentEpoch,
+        CancellationToken cancellationToken)
+    {
+        var ledger = transaction.ReadCurrent();
+        scope.RequireCandidate(ledger.RootIdentity, ledger);
+        RequireEnrollmentLocatorLedger(ledger, expectedRoot, expectedEnrollmentEpoch);
+        if (!ledger.TargetMemberIds.Contains(memberId, StringComparer.Ordinal))
+            throw Refused("Enrollment candidate publication requires one explicitly intended member.");
+        if (!locations.TryGetValue(memberId, out var location))
+            throw Refused("Enrollment candidate publication has no exact retained state slot.");
+
+        var member = FindMember(ledger, memberId);
+        var currentPrior = await ReadMemberStateAsync(transaction, memberId, location.Parent, cancellationToken)
+            .ConfigureAwait(false);
+        switch (member.Binding)
+        {
+            case RootMemberRecord.ProspectiveBinding:
+                if (currentPrior is not null || location.ExistingFileIdentity is not null)
+                    throw Refused("A prospective member state slot is no longer absent.");
+                break;
+            case RootMemberRecord.ExistingUnprotectedBinding unprotected:
+                if (currentPrior is null || currentPrior.ProtectionRecord is not null || currentPrior.ProtectionBundle is not null ||
+                    !unprotected.ProtectionMetadataAbsent ||
+                    !string.Equals(ProtectionDigest.StateBody(currentPrior), unprotected.StateBodyDigest, StringComparison.Ordinal) ||
+                    !string.Equals(ProtectionDigest.StateBody(suppliedPriorState), unprotected.StateBodyDigest, StringComparison.Ordinal))
+                    throw Refused("The unprotected source state changed before enrollment publication.");
+                break;
+            case RootMemberRecord.AcknowledgedBinding acknowledged:
+                if (currentPrior?.ProtectionRecord is not { } currentProtection ||
+                    !currentProtection.HasSamePayloadAs(acknowledged.ProtectionRecord) ||
+                    !string.Equals(ProtectionDigest.StateBody(currentPrior), acknowledged.ProtectionRecord.StateBodyDigest, StringComparison.Ordinal))
+                    throw Refused("The acknowledged source state changed before enrollment publication.");
+                break;
+            default:
+                throw Refused("Enrollment candidate publication encountered an unsupported source binding.");
+        }
+
+        var protection = nextState.ProtectionRecord ?? throw Refused("An enrollment candidate must carry persisted protection.");
+        var expectedRevision = member.Binding is RootMemberRecord.AcknowledgedBinding priorAcknowledgement
+            ? checked(priorAcknowledgement.ProtectionRecord.Revision + 1)
+            : 1;
+        if (protection.RootIdentity != expectedRoot || protection.EnrollmentEpoch != expectedEnrollmentEpoch ||
+            !string.Equals(protection.MemberId, memberId, StringComparison.Ordinal) || protection.Revision != expectedRevision)
+            throw Refused("An enrollment candidate must bind the exact root, epoch, member and next protection revision.");
+
+        var graphs = PersistedStoreStateGraphVerifier.Verify(nextState);
+        var candidateScope = new MemberLocatorReplayScope(ledger);
+        var observations = new List<IDisposable>();
+        var revalidations = new List<Action>();
+        try
+        {
+            ObserveProtectedInstalls(root, expectedRoot, nextState,
+                graphs.ActiveGraphs.Concat(graphs.RecoverableGraphs), candidateScope,
+                observations, revalidations, cancellationToken);
+            RevalidateCandidateLedger(transaction, ledger, scope, locations, LocatorReplayBindingPolicy.Enrollment);
+            foreach (var revalidate in revalidations)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                revalidate();
+            }
+            RevalidateCandidateLedger(transaction, ledger, scope, locations, LocatorReplayBindingPolicy.Enrollment);
+        }
+        finally
+        {
+            try
+            {
+                for (var index = observations.Count - 1; index >= 0; index--)
+                    observations[index].Dispose();
+            }
+            finally { candidateScope.Expire(); }
+        }
+    }
+
     private static void RevalidateCandidateLedger(
         Transaction transaction,
         RootMembershipRecord expectedLedger,
@@ -859,6 +1007,9 @@ internal sealed partial class RootMembershipRegistry
                 break;
             case LocatorReplayBindingPolicy.BoundIncomplete:
                 RequireBoundIncompleteLocatorLedger(ledger, expectedRoot, expectedEnrollmentEpoch);
+                break;
+            case LocatorReplayBindingPolicy.Enrollment:
+                RequireEnrollmentLocatorLedger(ledger, expectedRoot, expectedEnrollmentEpoch);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(policy));
@@ -957,6 +1108,7 @@ internal sealed partial class RootMembershipRegistry
         private readonly CatalogRuntimeOperationSession? _catalogSession;
         private readonly Func<RootMembershipRecord, Task>? _afterOwnedPublication;
         private readonly Action? _revalidateProjectionRoot;
+        private readonly Func<LockedMemberLocations, CancellationToken, Task<RootMembershipRecord>>? _completeEnrollment;
         private readonly SemaphoreSlim _operationGate = new(1, 1);
         private MemberLocatorReplayScope _scope;
         private IReadOnlyDictionary<string, ResolvedMemberStateLocation> _locations;
@@ -983,7 +1135,8 @@ internal sealed partial class RootMembershipRegistry
                 StoreStateRecord, StoreStateRecord, CancellationToken, Task> verifyCandidate,
             CatalogRuntimeOperationSession? catalogSession = null,
             Func<RootMembershipRecord, Task>? afterOwnedPublication = null,
-            Action? revalidateProjectionRoot = null)
+            Action? revalidateProjectionRoot = null,
+            Func<LockedMemberLocations, CancellationToken, Task<RootMembershipRecord>>? completeEnrollment = null)
         {
             ArgumentNullException.ThrowIfNull(files);
             ArgumentNullException.ThrowIfNull(root);
@@ -1013,6 +1166,7 @@ internal sealed partial class RootMembershipRegistry
             _catalogSession = catalogSession;
             _afterOwnedPublication = afterOwnedPublication;
             _revalidateProjectionRoot = revalidateProjectionRoot;
+            _completeEnrollment = completeEnrollment;
         }
 
         internal RootMembershipRecord Ledger
@@ -1156,7 +1310,7 @@ internal sealed partial class RootMembershipRegistry
             ArgumentNullException.ThrowIfNull(expectedRoot);
             ArgumentNullException.ThrowIfNull(callback);
             cancellationToken.ThrowIfCancellationRequested();
-            if (_policy != LocatorReplayBindingPolicy.BoundIncomplete)
+            if (_policy is not (LocatorReplayBindingPolicy.BoundIncomplete or LocatorReplayBindingPolicy.Enrollment))
                 throw Refused("Held-root graph reconstruction requires exact bound Incomplete member ownership.");
 
             var operationGateAcquired = false;
@@ -1168,7 +1322,16 @@ internal sealed partial class RootMembershipRegistry
                 operationGateAcquired = true;
                 EnsureValidMap();
                 var ledger = _getLedger();
-                RequireBoundIncompleteLocatorLedger(ledger, expectedRoot, expectedEnrollmentEpoch);
+                if (_policy == LocatorReplayBindingPolicy.Enrollment)
+                {
+                    RequireEnrollmentLocatorLedger(ledger, expectedRoot, expectedEnrollmentEpoch);
+                    if (!ledger.TargetMemberIds.Contains(memberId, StringComparer.Ordinal))
+                        throw Refused("Legacy graph reconstruction is limited to an explicitly intended member.");
+                }
+                else
+                {
+                    RequireBoundIncompleteLocatorLedger(ledger, expectedRoot, expectedEnrollmentEpoch);
+                }
                 if (ledger.PendingGroupPublicationV2 is not null)
                     throw Refused("A pending group publication must be recovered before bound Incomplete graph reconstruction.");
                 var rootInfo = _files.InspectHandle(_root);
@@ -1377,6 +1540,20 @@ internal sealed partial class RootMembershipRegistry
             }
         }
 
+        /// <summary>Verifies all intended members and publishes Complete without releasing this root/member owner.</summary>
+        internal async Task<RootMembershipRecord> CompleteEnrollmentAsync(CancellationToken cancellationToken)
+        {
+            if (_policy != LocatorReplayBindingPolicy.Enrollment || _completeEnrollment is null)
+                throw Refused("Enrollment completion requires the exact quiescent enrollment owner.");
+            await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                EnsureValidMap();
+                return await _completeEnrollment(this, cancellationToken).ConfigureAwait(false);
+            }
+            finally { _operationGate.Release(); }
+        }
+
         private async Task<RootMembershipRecord> PublishStateUnderGateAsync(
             string memberId,
             StoreStateRecord nextState,
@@ -1386,6 +1563,18 @@ internal sealed partial class RootMembershipRegistry
             EnsureValidMap();
             if (_policy == LocatorReplayBindingPolicy.Declared)
                 throw Refused("An all-Declared locator context has no verified state binding to publish.");
+            if (_policy == LocatorReplayBindingPolicy.Enrollment)
+            {
+                var ledger = _getLedger();
+                if (!ledger.TargetMemberIds.Contains(memberId, StringComparer.Ordinal))
+                    throw Refused("Enrollment state publication is limited to an explicitly intended member.");
+                if (!_locations.TryGetValue(memberId, out var memberLocation))
+                    throw Refused("Enrollment state publication has no exact retained state location.");
+                var priorState = await _readState(memberId, memberLocation.Parent, cancellationToken).ConfigureAwait(false);
+                await _verifyCandidate(_scope, _locations, memberId, priorState ?? StoreStateRecord.Empty(), nextState,
+                    cancellationToken).ConfigureAwait(false);
+                EnsureValidMap();
+            }
             var priorScope = _scope;
             var priorLocations = _locations;
             var parents = priorLocations.ToDictionary(pair => pair.Key, pair => pair.Value.Parent, StringComparer.Ordinal);

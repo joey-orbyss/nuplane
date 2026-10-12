@@ -13,7 +13,7 @@ internal sealed partial class RootMembershipRegistry
     /// are held, publishes the whole bound union as Incomplete, and grants no graph-completeness or admission
     /// authority. Existing protected payloads require their separate verified acknowledgement path.
     /// </remarks>
-    internal async Task<RootMembershipRecord> BindDeclaredMembersAsync(
+    internal Task<RootMembershipRecord> BindDeclaredMembersAsync(
         PhysicalStoreDirectoryHandle root,
         PhysicalRootIdentity expectedRoot,
         long expectedEnrollmentEpoch,
@@ -22,11 +22,27 @@ internal sealed partial class RootMembershipRegistry
         bool quiescentCutoverConfirmed,
         CancellationToken cancellationToken,
         Action<RootMembershipBindingPoint>? checkpoint = null)
+        => BindDeclaredMembersAndRunAsync(root, expectedRoot, expectedEnrollmentEpoch, expectedDeclarations,
+            memberLocations, quiescentCutoverConfirmed,
+            static (locked, _) => Task.FromResult(locked.Ledger), cancellationToken, checkpoint);
+
+    /// <summary>Binds declared members and runs protected publication/completion before releasing the same owner.</summary>
+    internal async Task<TResult> BindDeclaredMembersAndRunAsync<TResult>(
+        PhysicalStoreDirectoryHandle root,
+        PhysicalRootIdentity expectedRoot,
+        long expectedEnrollmentEpoch,
+        IReadOnlyList<RootMemberRecord> expectedDeclarations,
+        IReadOnlyDictionary<string, (PhysicalStoreDirectoryHandle Parent, string RequestedBasename)> memberLocations,
+        bool quiescentCutoverConfirmed,
+        Func<LockedMemberLocations, CancellationToken, Task<TResult>> callback,
+        CancellationToken cancellationToken,
+        Action<RootMembershipBindingPoint>? checkpoint = null)
     {
         ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(expectedRoot);
         ArgumentNullException.ThrowIfNull(expectedDeclarations);
         ArgumentNullException.ThrowIfNull(memberLocations);
+        ArgumentNullException.ThrowIfNull(callback);
         cancellationToken.ThrowIfCancellationRequested();
         if (!quiescentCutoverConfirmed)
             throw Refused("Binding declared members requires explicit confirmation that the cutover remains quiescent.");
@@ -66,6 +82,9 @@ internal sealed partial class RootMembershipRegistry
         var control = OpenControl(root);
         IAsyncDisposable? owner = null;
         var transactionOwnsHandles = false;
+        MemberLocatorReplayScope? boundScope = null;
+        IReadOnlyDictionary<string, ResolvedMemberStateLocation>? boundLocations = null;
+        LockedMemberLocations? lockedContext = null;
         try
         {
             RootMembershipRecord? callbackLedger = null;
@@ -159,14 +178,47 @@ internal sealed partial class RootMembershipRegistry
             await using var ownedTransaction = transaction;
             transaction.Publish(boundLedger);
             checkpoint?.Invoke(RootMembershipBindingPoint.BoundLedgerPublished);
-            return transaction.Ledger;
+            boundScope = new MemberLocatorReplayScope(transaction.Ledger);
+            boundLocations = ResolveMemberLocatorMap(transaction.Ledger, boundScope, LocatorReplayBindingPolicy.Enrollment);
+            lockedContext = CreateLockedMemberLocations(transaction, root, boundScope, boundLocations,
+                LocatorReplayBindingPolicy.Enrollment, expectedRoot, expectedEnrollmentEpoch);
+            boundScope = null;
+            boundLocations = null;
+            try
+            {
+                return await callback(lockedContext, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                lockedContext.Dispose();
+                lockedContext = null;
+            }
         }
         finally
         {
             try
             {
-                if (owner is not null)
-                    await owner.DisposeAsync().ConfigureAwait(false);
+                try
+                {
+                    lockedContext?.Dispose();
+                }
+                finally
+                {
+                    try
+                    {
+                        if (boundLocations is not null)
+                            DisposeLocations(boundLocations.Values);
+                    }
+                    finally
+                    {
+                        try { boundScope?.Expire(); }
+                        finally
+                        {
+                            if (owner is not null)
+                                await owner.DisposeAsync().ConfigureAwait(false);
+                        }
+                    }
+                }
             }
             finally
             {

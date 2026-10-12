@@ -474,17 +474,8 @@ internal static class LegacyActiveGraphCandidateProducer
         long epoch,
         string memberId,
         PackageProtectionClosure closure)
-    {
-        var candidate = new PackageProtectionRecord(PackageProtectionRecord.CurrentSchemaVersion, root, epoch, memberId, 1,
-            ProtectionDigest.StateBody(state), new string('0', 64), closure, closure, [], legacyUnknownRecovery: false);
-        return state with
-        {
-            ProtectionRecord = new PackageProtectionRecord(candidate.SchemaVersion, candidate.RootIdentity,
-                candidate.EnrollmentEpoch, candidate.MemberId, candidate.Revision, candidate.StateBodyDigest,
-                ProtectionDigest.Protection(candidate), candidate.ActiveClosure, candidate.RecoverableClosure,
-                candidate.RetiredGraphs, candidate.LegacyUnknownRecovery)
-        };
-    }
+        => PackageStoreProtectionRecordFactory.WithProtection(state, root, epoch, memberId, 1,
+            closure, closure);
 
     private static List<Exception> DisposeBindings(IReadOnlyList<BoundInstall> bindings)
     {

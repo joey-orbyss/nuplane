@@ -294,6 +294,12 @@ internal sealed partial class RootMembershipRegistry
         return ReadLedger(root, control);
     }
 
+    internal RootMembershipRecord ReadCandidate(PhysicalStoreDirectoryHandle root, out PhysicalFileIdentity ledgerIdentity)
+    {
+        using var control = OpenControl(root);
+        return ReadLedger(root, control, out ledgerIdentity);
+    }
+
     internal RootMembershipRecord ReadCandidate(PhysicalStoreDirectoryHandle root,
         PhysicalFileIdentity expectedLedgerIdentity, out PhysicalFileIdentity actualLedgerIdentity)
     {

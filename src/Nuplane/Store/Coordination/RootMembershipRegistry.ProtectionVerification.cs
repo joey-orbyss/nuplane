@@ -9,6 +9,49 @@ namespace Nuplane.Store.Coordination;
 
 internal sealed partial class RootMembershipRegistry
 {
+    private async Task<RootMembershipRecord> CompleteEnrollmentUnderOwnerAsync(
+        Transaction transaction,
+        PhysicalStoreDirectoryHandle root,
+        LockedMemberLocations context,
+        PhysicalRootIdentity expectedRoot,
+        long expectedEpoch,
+        CancellationToken cancellationToken)
+    {
+        var ledger = transaction.ReadCurrent();
+        RequireEnrollmentLocatorLedger(ledger, expectedRoot, expectedEpoch);
+        var memberIds = ledger.Members.Select(static member => member.MemberId).ToHashSet(StringComparer.Ordinal);
+        var targetIds = ledger.TargetMemberIds.ToHashSet(StringComparer.Ordinal);
+        if (!memberIds.SetEquals(targetIds) || ledger.Members.Any(static member =>
+                member.Binding is not RootMemberRecord.AcknowledgedBinding))
+            throw Refused("Enrollment completion requires every member to be an acknowledged target; roster retirement requires its explicit migration path.");
+
+        var locations = context.Locations;
+        void Revalidate()
+        {
+            var current = transaction.ReadCurrent();
+            RequireSameDigest(ledger, current);
+            context.Revalidate();
+        }
+
+        async Task<StoreStateRecord?> ReadMember(string memberId, CancellationToken token)
+        {
+            Revalidate();
+            if (!locations.TryGetValue(memberId, out var location))
+                throw Refused("Enrollment completion did not retain the exact target state slot.");
+            var state = await ReadMemberStateAsync(transaction, memberId, location.Parent, token).ConfigureAwait(false);
+            Revalidate();
+            return state;
+        }
+
+        await VerifyAllMemberProtectionCoreAsync(ledger, root, expectedRoot, expectedEpoch,
+            RootMembershipStatus.Incomplete, ReadMember, Revalidate, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        Revalidate();
+        var complete = Rebuild(ledger, RootMembershipStatus.Complete, ledger.Members, pending: null);
+        transaction.Publish(complete);
+        return transaction.Ledger;
+    }
+
     /// <summary>Reopens every acknowledged state and verifies its semantics and native protected install bindings.</summary>
     /// <remarks>
     /// The caller retains root and all member locks throughout this operation. Returned payloads are descriptive
