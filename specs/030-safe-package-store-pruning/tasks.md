@@ -179,6 +179,7 @@ The [coordinated runtime increment](evidence/coordinated-runtime-admission.md) s
 - [ ] T089 [US3] Add core observer and admission registrations in `src/Nuplane/Registration/NuplaneRuntimeRegistrationServices.cs`.
 
 - [ ] T090 [US3] Add OpenActivePackageSnapshotAsync in `src/Nuplane/NuplaneStore.cs`; retain unscoped pure state/descriptor observation, acquire sorted roots after descriptor observation, reread stable state and validate membership before exposing an admitted snapshot. Returned raw paths alone are never leases.
+  - The [admitted snapshot increment](evidence/admitted-active-snapshot.md) implements a participant-bound immutable disposable scope over one complete catalog, including the selected state root for empty snapshots. Root and independent local review pass focused11, restored required Runtime81 and Loading267 without skips, plus net8/net9/net10 builds. A compiled stale-state comparison omission fails as intended, then byte-exact restored source passes. Fresh hosted proof remains pending; T090/T098 stay unchecked.
 - [ ] T091 [US3] Add scoped restore composition entry point in `src/Nuplane/Restore/RestoreComposition.cs`; preserve the existing host-free registration behavior.
 - [ ] T092 [US3] Add Loading attachment registration in `src/Nuplane.Loading/Registration/LoadingRegistrationServices.cs`; leave the passive observer registered by core.
 - [ ] T093 [US3] Add before-advisor graph admission in `src/Nuplane.Loading/PackageLoadModeSelector.cs`; ensure metadata advisors cannot read before the complete graph lease is published.
