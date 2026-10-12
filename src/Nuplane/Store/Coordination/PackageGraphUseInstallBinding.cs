@@ -5,6 +5,7 @@ using Nuplane.Reconciliation.Models;
 using Nuplane.Store.Coordination.MembershipRecords;
 using Nuplane.Store.Coordination.PhysicalFiles;
 using Nuplane.Store.Coordination.ProtectionRecords;
+using PackageInstallIdentityObservation = Nuplane.Store.Coordination.PackageInstallIdentityReader.PackageInstallIdentityObservation;
 
 namespace Nuplane.Store.Coordination;
 
@@ -109,22 +110,15 @@ internal sealed class PackageGraphUseInstallBinding : IDisposable
                 if (!paths.Add(path))
                     throw Refused("Distinct graph nodes cannot share one exact install path.");
 
-                var resolved = resolver.ResolveProtectedInstallPath(path, scope);
-                observations.Add(resolved);
-                var target = files.InspectHandle(resolved.Target);
-                if (resolved.RootIdentity != lockedLedger.RootIdentity || target.Kind != PhysicalStoreEntryKind.Directory)
-                    throw Refused("A selected graph path does not identify a directory in the locked root.");
-
                 // The suffix is only a candidate. Both independent native walks must identify the
                 // same completed directory; string prefix/normalization never establishes authority.
-                var hint = GetInstallSuffixHint(path);
-                var observed = reader.Observe(heldRoot, lockedLedger.RootIdentity, hint,
+                var observed = ObserveNativeInstallPath(files, resolver, reader, scope, heldRoot,
+                    lockedLedger.RootIdentity, path, GetInstallSuffixHint(path),
                     node.PackageId, node.Version, node.PackageContentHash);
                 observations.Add(observed);
-                if (observed.InstallIdentity.DirectoryIdentity != target.Identity || !identities.Add(target.Identity))
+                if (!identities.Add(observed.InstallIdentity.DirectoryIdentity))
                     throw Refused("A graph path aliases a different install or another selected node's native directory.");
 
-                revalidations.Add(resolved.Revalidate);
                 revalidations.Add(observed.Revalidate);
                 installs.Add(new BoundInstall(node, path, observed.InstallIdentity));
             }
@@ -150,6 +144,69 @@ internal sealed class PackageGraphUseInstallBinding : IDisposable
         _scope.EnsureActive();
         foreach (var revalidate in _revalidations)
             revalidate();
+    }
+
+    internal static NativeInstallPathObservation ObserveNativeInstallPath(
+        IPhysicalStoreFileSystem files,
+        PackageStoreAuthorityResolver resolver,
+        PackageInstallIdentityReader reader,
+        RootMembershipRegistry.MemberLocatorReplayScope scope,
+        PhysicalStoreDirectoryHandle heldRoot,
+        PhysicalRootIdentity expectedRoot,
+        string exactInstallPath,
+        string rootRelativeInstallPath,
+        string packageId,
+        string version,
+        string? verifiedArchiveHash)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        ArgumentNullException.ThrowIfNull(resolver);
+        ArgumentNullException.ThrowIfNull(reader);
+        ArgumentNullException.ThrowIfNull(scope);
+        ArgumentNullException.ThrowIfNull(heldRoot);
+        ArgumentNullException.ThrowIfNull(expectedRoot);
+        ArgumentException.ThrowIfNullOrWhiteSpace(exactInstallPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(rootRelativeInstallPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(packageId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(version);
+
+        ResolvedPackageStorePath? resolved = null;
+        PackageInstallIdentityObservation? observed = null;
+        NativeInstallPathObservation? result = null;
+        try
+        {
+            resolved = resolver.ResolveProtectedInstallPath(exactInstallPath, scope);
+            var target = files.InspectHandle(resolved.Target);
+            if (resolved.RootIdentity != expectedRoot || target.Kind != PhysicalStoreEntryKind.Directory)
+                throw Refused("A selected graph path does not identify a directory in the locked root.");
+
+            observed = reader.Observe(heldRoot, expectedRoot, rootRelativeInstallPath,
+                packageId, version, verifiedArchiveHash);
+            if (observed.InstallIdentity.DirectoryIdentity != target.Identity)
+                throw Refused("Independent native install walks do not identify the same directory.");
+
+            result = new NativeInstallPathObservation(resolved, observed);
+            resolved = null;
+            observed = null;
+            result.Revalidate();
+            var retained = result;
+            result = null;
+            return retained;
+        }
+        catch (Exception primary)
+        {
+            var cleanupErrors = new List<Exception>();
+            try { result?.Dispose(); }
+            catch (Exception exception) { cleanupErrors.Add(exception); }
+            try { observed?.Dispose(); }
+            catch (Exception exception) { cleanupErrors.Add(exception); }
+            try { resolved?.Dispose(); }
+            catch (Exception exception) { cleanupErrors.Add(exception); }
+            if (cleanupErrors.Count > 0)
+                throw new AggregateException("Native install observation failed and its retained handles did not close cleanly.",
+                    new[] { primary }.Concat(cleanupErrors));
+            throw;
+        }
     }
 
     public void Dispose()
@@ -191,4 +248,49 @@ internal sealed class PackageGraphUseInstallBinding : IDisposable
     internal sealed record BoundInstall(ResolvedPackageNode Node, string ExactInstallPath, PackageInstallIdentity Identity);
 
     internal sealed record BoundGraphCandidate(ProtectedGraphSnapshot Candidate, IReadOnlyDictionary<Guid, string> ExactPathsByNode);
+
+    internal sealed class NativeInstallPathObservation : IDisposable
+    {
+        private readonly ResolvedPackageStorePath _resolved;
+        private readonly PackageInstallIdentityObservation _observed;
+        private bool _disposed;
+
+        internal NativeInstallPathObservation(
+            ResolvedPackageStorePath resolved,
+            PackageInstallIdentityObservation observed)
+        {
+            _resolved = resolved ?? throw new ArgumentNullException(nameof(resolved));
+            _observed = observed ?? throw new ArgumentNullException(nameof(observed));
+        }
+
+        internal PackageInstallIdentity InstallIdentity => _observed.InstallIdentity;
+
+        internal void Revalidate()
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            _resolved.Revalidate();
+            _observed.Revalidate();
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+
+            Exception? primary = null;
+            try { _observed.Dispose(); }
+            catch (Exception exception) { primary = exception; }
+            try { _resolved.Dispose(); }
+            catch (Exception exception)
+            {
+                if (primary is not null)
+                    throw new AggregateException("Native install observations did not close cleanly.", primary, exception);
+                throw;
+            }
+
+            if (primary is not null)
+                throw primary;
+        }
+    }
 }

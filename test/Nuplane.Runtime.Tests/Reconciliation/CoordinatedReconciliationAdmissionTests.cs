@@ -1252,10 +1252,14 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         internal PhysicalRootIdentity RootIdentity { get; private set; } = null!;
         internal Dictionary<string, string> StatePaths { get; } = new(StringComparer.Ordinal);
         internal Dictionary<string, StoreStateRecord> States { get; } = new(StringComparer.Ordinal);
+        private bool _includeLoadableAssemblies;
 
-        internal static async Task<CompletedMembershipFixture> CreateAsync()
+        internal static async Task<CompletedMembershipFixture> CreateAsync(bool includeLoadableAssemblies = false)
         {
-            var fixture = new CompletedMembershipFixture();
+            var fixture = new CompletedMembershipFixture
+            {
+                _includeLoadableAssemblies = includeLoadableAssemblies
+            };
             try
             {
                 fixture.PackageInstallRoot = fixture.Temp.CreateSubdirectory("packages");
@@ -1374,6 +1378,21 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
                 : $"<dependencies><dependency id=\"{dependencyId}\" version=\"2.0.0\" /></dependencies>";
             File.WriteAllText(Path.Combine(path, packageId + ".nuspec"),
                 $"<package><metadata><id>{packageId}</id><version>{version}</version>{dependencies}</metadata></package>");
+            if (_includeLoadableAssemblies)
+            {
+                var assemblyPath = packageId switch
+                {
+                    "Root.First" => typeof(CoordinatedReconciliationAdmissionTests).Assembly.Location,
+                    "Shared.Dependency" => typeof(PackageRequest).Assembly.Location,
+                    _ => null
+                };
+                if (assemblyPath is not null)
+                {
+                    var libPath = Path.Combine(path, "lib", "net10.0");
+                    Directory.CreateDirectory(libPath);
+                    File.Copy(assemblyPath, Path.Combine(libPath, packageId + ".dll"), overwrite: true);
+                }
+            }
             File.WriteAllBytes(Path.Combine(path, PackageInstallStore.CompletionMarkerFileName), []);
             if (packageId == "Shared.Dependency")
                 File.WriteAllText(Path.Combine(path, "sentinel.txt"), "shared sentinel");

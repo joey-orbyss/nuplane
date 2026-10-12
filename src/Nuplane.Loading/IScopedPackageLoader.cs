@@ -1,5 +1,6 @@
 using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Reconciliation;
 
 namespace Nuplane.Loading;
 
@@ -16,6 +17,11 @@ internal interface IScopedPackageLoader : IPackageLoader
 
     Task<PackageLoadResult> EnsureGraphLoadedAsync(
         IReadOnlyList<ScopedResolvedPackageGraph> packageGraphs,
+        IReadOnlyList<SharedAssemblyPolicyEntry> sharedPolicy,
+        CancellationToken cancellationToken);
+
+    Task<PackageLoadResult> EnsureProtectedRecoveryGraphsLoadedAsync(
+        IReadOnlyList<LeasedProtectedRecoveryGraphSelection> graphSelections,
         IReadOnlyList<SharedAssemblyPolicyEntry> sharedPolicy,
         CancellationToken cancellationToken);
 }

@@ -79,6 +79,8 @@ public static class NuplaneBuilderLoadingExtensions
         services.TryAddEnumerable(ServiceDescriptor.Singleton<INuplaneObserver, PackageAutoLoadingObserver>());
         services.TryAddSingleton<ILeasedPackageGraphLoadingObserver>(sp =>
             sp.GetServices<INuplaneObserver>().OfType<PackageAutoLoadingObserver>().Single());
+        services.TryAddSingleton<ILeasedPackageGraphRecoveryLoadingObserver>(sp =>
+            sp.GetServices<INuplaneObserver>().OfType<PackageAutoLoadingObserver>().Single());
 
         var loadingBuilder = new NuplaneLoadingBuilder(services);
         if (enableByDefault)

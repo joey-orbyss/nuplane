@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Reconciliation;
 using Nuplane.Store.Coordination;
 using Nuplane.Registration;
 
@@ -215,11 +216,39 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
         ArgumentNullException.ThrowIfNull(packageGraphs);
         ArgumentNullException.ThrowIfNull(sharedPolicy);
 
+        var work = packageGraphs.Select(packageGraph => packageGraph is null
+            ? null
+            : new LeasedGraphWorkItem(packageGraph.Packages, packageGraph.LeaseOwner,
+                () => ScopedResolvedPackageGraphValidator.Validate(packageGraph))).ToArray();
+        return await EnsureLeasedGraphsLoadedAsync(work, sharedPolicy, cancellationToken).ConfigureAwait(false);
+    }
+
+    async Task<PackageLoadResult> IScopedPackageLoader.EnsureProtectedRecoveryGraphsLoadedAsync(
+        IReadOnlyList<LeasedProtectedRecoveryGraphSelection> graphSelections,
+        IReadOnlyList<SharedAssemblyPolicyEntry> sharedPolicy,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(graphSelections);
+        ArgumentNullException.ThrowIfNull(sharedPolicy);
+
+        var work = graphSelections.Select(selection => selection is null
+            ? null
+            : new LeasedGraphWorkItem(selection.Packages, selection.LeaseOwner,
+                () => ScopedProtectedRecoveryGraphValidator.Validate(selection))).ToArray();
+        return await EnsureLeasedGraphsLoadedAsync(work, sharedPolicy, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<PackageLoadResult> EnsureLeasedGraphsLoadedAsync(
+        IReadOnlyList<LeasedGraphWorkItem?> graphWork,
+        IReadOnlyList<SharedAssemblyPolicyEntry> sharedPolicy,
+        CancellationToken cancellationToken)
+    {
+
         // Freeze caller-owned collections before any callback can await or mutate them.
-        var scopedGraphs = packageGraphs.ToArray();
+        var graphs = graphWork.ToArray();
         var copiedSharedPolicy = sharedPolicy.ToArray();
-        var owners = scopedGraphs.Where(static graph => graph is not null)
-            .Select(static graph => graph.LeaseOwner).Distinct().ToArray();
+        var owners = graphs.Where(static graph => graph is not null)
+            .Select(static graph => graph!.LeaseOwner).Distinct().ToArray();
 
         var readPins = new List<IDisposable>();
         var loaded = new List<PackageLoadSession>();
@@ -227,9 +256,9 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
         Exception? operationFailure = null;
         try
         {
-            if (owners.Length != scopedGraphs.Length)
+            if (owners.Length != graphs.Length)
                 throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.StateMismatch,
-                    "Each scoped resolved graph must have a distinct published lease owner.");
+                    "Each selected graph must have a distinct published lease owner.");
 
             _loadModeSelector.ValidateScopedParticipants();
             if (_activationGates.Any(static gate =>
@@ -240,30 +269,33 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
             }
 
             // Validate every immutable envelope before the first package read or user callback.
-            var projectionsByGraph = new Dictionary<ScopedResolvedPackageGraph, IReadOnlyDictionary<string, PackageProjection>>();
-            foreach (var packageGraph in scopedGraphs)
+            foreach (var graph in graphs)
             {
-                ScopedResolvedPackageGraphValidator.Validate(packageGraph);
-                projectionsByGraph.Add(packageGraph, CreatePackageProjections(packageGraph));
+                var selected = graph ?? throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.StateMismatch,
+                    "A leased graph collection contains a null entry.");
+                selected.Validate();
+                selected.PackageProjections = CreatePackageProjections(selected.Packages, selected.LeaseOwner.Lease);
             }
 
             // Hold counted exact-path pins across metadata, gates, package enumeration, and transfer
             // into the actual load context. No root operation borrow is retained or reacquired here.
-            foreach (var packageGraph in scopedGraphs)
+            foreach (var graph in graphs)
             {
-                var lease = packageGraph.LeaseOwner.Lease;
-                foreach (var package in packageGraph.Packages)
+                var selected = graph!;
+                var lease = selected.LeaseOwner.Lease;
+                foreach (var package in selected.Packages)
                     readPins.Add(lease.AcquireRead(package.InstallPath));
             }
 
-            foreach (var packageGraph in scopedGraphs)
+            foreach (var graph in graphs)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var packages = packageGraph.Packages;
-                var owner = packageGraph.LeaseOwner;
+                var selected = graph!;
+                var packages = selected.Packages;
+                var owner = selected.LeaseOwner;
                 var graphLease = owner.Lease;
                 var graphKey = BuildGraphKey(packages);
-                var packageProjections = projectionsByGraph[packageGraph];
+                var packageProjections = selected.PackageProjections!;
                 var graphLeases = new[] { graphLease };
                 var graphDecision = await _loadModeSelector.SelectGraphAsync(
                     packages, _options, graphKey, cancellationToken, graphLeases).ConfigureAwait(false);
@@ -350,6 +382,17 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
                     cleanupFailures);
             }
         }
+    }
+
+    private sealed class LeasedGraphWorkItem(
+        IReadOnlyList<ResolvedPackage> packages,
+        PackageGraphUseLeaseOwner leaseOwner,
+        Action validate)
+    {
+        internal IReadOnlyList<ResolvedPackage> Packages { get; } = packages;
+        internal PackageGraphUseLeaseOwner LeaseOwner { get; } = leaseOwner;
+        internal Action Validate { get; } = validate;
+        internal IReadOnlyDictionary<string, PackageProjection>? PackageProjections { get; set; }
     }
 
     private async Task ProcessGraphAsync(

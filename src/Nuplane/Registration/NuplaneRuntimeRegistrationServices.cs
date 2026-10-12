@@ -69,15 +69,63 @@ public static class NuplaneRuntimeRegistrationServices
         services.TryAddSingleton<ILastKnownGoodStartupRecoveryService>(sp =>
         {
             var composition = sp.GetRequiredService<PackageStoreCompositionSnapshot>();
+            var storeRegistry = sp.GetRequiredService<IStoreRegistry>();
+            var observerDispatcher = sp.GetRequiredService<IObserverEventDispatcher>();
+            var admission = composition.IsParticipant
+                ? RequireValidatedParticipantAdmission(sp, composition)
+                : null;
+
+            ILeasedPackageGraphLoadingObserver? leasedLoadingObserver = null;
+            ILeasedPackageGraphRecoveryLoadingObserver? recoveryLoadingObserver = null;
+            ICoordinatedStoreRegistry? coordinatedRegistry = null;
+            PackageGraphUseLeaseAcquisition? graphUseAcquisition = null;
+            ITrustedPackageStoreRootCatalog? trustedRoots = null;
+            IScopedObserverEventDispatcher? scopedDispatcher = null;
+            if (composition.IsParticipant)
+            {
+                leasedLoadingObserver = sp.GetService<ILeasedPackageGraphLoadingObserver>();
+                recoveryLoadingObserver = sp.GetService<ILeasedPackageGraphRecoveryLoadingObserver>();
+                coordinatedRegistry = storeRegistry as ICoordinatedStoreRegistry
+                    ?? throw UnsupportedParticipantRecovery("The selected store registry has no coordinated state reader.");
+                trustedRoots = sp.GetRequiredService<ITrustedPackageStoreRootCatalog>();
+                scopedDispatcher = observerDispatcher as IScopedObserverEventDispatcher
+                    ?? throw UnsupportedParticipantRecovery("The selected observer dispatcher has no coordinated scope.");
+
+                graphUseAcquisition = sp.GetRequiredService<PackageGraphUseLeaseAcquisition>();
+                if (!ReferenceEquals(graphUseAcquisition, sp.GetRequiredService<IResolvedPackageGraphUseLeaseAcquisition>()))
+                    throw UnsupportedParticipantRecovery("The selected graph-use acquisition service differs from the built-in native publisher.");
+
+                if (leasedLoadingObserver is not null)
+                {
+                    PackageStoreCompositionValidator.RequireSupportedParticipantExecutionRoute(
+                        composition,
+                        sp.GetRequiredService<IPackageResolver>(),
+                        sp.GetRequiredService<CapabilityDesiredStateContributor>().MetadataReader);
+                }
+
+                if (recoveryLoadingObserver is not null &&
+                    !ReferenceEquals(leasedLoadingObserver, recoveryLoadingObserver))
+                {
+                    throw UnsupportedParticipantRecovery(
+                        "The selected recovery-loading observer differs from the validated leased-loading observer.");
+                }
+            }
+
             return new LastKnownGoodStartupRecoveryService(
-                sp.GetRequiredService<IStoreRegistry>(),
-                sp.GetRequiredService<IObserverEventDispatcher>(),
+                storeRegistry,
+                observerDispatcher,
                 sp.GetRequiredService<StartupRecoveryState>(),
                 sp.GetServices<ICycleFailureContributor>(),
                 sp.GetRequiredService<IOptions<ReconciliationOptions>>(),
                 sp.GetService<IStoreLock>(),
-                composition.IsParticipant ? sp.GetRequiredService<IPackageStoreAdmission>() : null,
-                coordinatedParticipantMode: composition.IsParticipant);
+                admission,
+                coordinatedParticipantMode: composition.IsParticipant,
+                coordinatedStoreRegistry: coordinatedRegistry,
+                graphUseLeaseAcquisition: graphUseAcquisition,
+                trustedRootCatalog: trustedRoots,
+                scopedObserverEventDispatcher: scopedDispatcher,
+                recoveryLoadingObserver: recoveryLoadingObserver,
+                leasedLoadingObserverConfigured: leasedLoadingObserver is not null);
         });
         services.AddSingleton<ActivePackageCatalog>(sp =>
         {
@@ -161,6 +209,9 @@ public static class NuplaneRuntimeRegistrationServices
             services.GetRequiredService<IOptions<FeedResolutionOptions>>().Value);
         return admission;
     }
+
+    private static PackageStoreAdmissionException UnsupportedParticipantRecovery(string message)
+        => new(PackageStoreAdmissionReason.UnsupportedParticipant, message);
 
     private static void AddTriggerIngressServices(this IServiceCollection services)
     {
