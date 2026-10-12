@@ -279,7 +279,7 @@ internal sealed class LastKnownGoodStartupRecoveryService : ILastKnownGoodStartu
                                     "The verified recovery graph does not exactly cover the current active, last-known-good descriptor set.", owner.Root);
                             }
 
-                            var exactPath = PackageGraphUseRecoveryInstallBinding.GetExactCandidatePath(
+                            var exactPath = PackageGraphUseProtectedInstallBinding.GetExactCandidatePath(
                                 configuredInstallRoot, install);
                             var package = new ResolvedPackage(install.PackageId, install.Version,
                                 descriptor.FeedName ?? string.Empty, exactPath, descriptor.ActivatedAtUtc,

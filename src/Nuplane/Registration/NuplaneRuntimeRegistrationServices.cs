@@ -154,7 +154,11 @@ public static class NuplaneRuntimeRegistrationServices
                 ?? throw UnsupportedParticipantRecovery("The selected snapshot route has no built-in coordinated registry.");
             var serializer = sp.GetRequiredService<IStoreStateSerializer>() as StoreStateSerializer
                 ?? throw UnsupportedParticipantRecovery("The selected snapshot route has no built-in protection serializer.");
-            return new NuplaneStoreSnapshotAccess(registry, serializer, admission);
+            var graphUseAcquisition = sp.GetRequiredService<PackageGraphUseLeaseAcquisition>();
+            var selectedGraphUseAcquisition = sp.GetRequiredService<IResolvedPackageGraphUseLeaseAcquisition>();
+            var lifetimeObserver = sp.GetRequiredService<IPackageGraphUseLifetimeObserver>();
+            return new NuplaneStoreSnapshotAccess(registry, serializer, admission, composition,
+                graphUseAcquisition, lifetimeObserver, selectedGraphUseAcquisition);
         });
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IOperationalStateContributor, PackageCatalogOperationalStateContributor>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IOperationalStateContributor, StartupRecoveryOperationalStateContributor>());

@@ -35,6 +35,12 @@ public sealed class PackageStorePathAdmission : IAsyncDisposable
         return _control.BorrowFor(this, installPath);
     }
 
+    internal PackageStoreOperationBorrow BorrowRootFor(string installPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(installPath);
+        return _control.BorrowRootFor(this, installPath);
+    }
+
     /// <summary>Releases all root owners in reverse acquisition order after outstanding borrows drain.</summary>
     public ValueTask DisposeAsync()
     {

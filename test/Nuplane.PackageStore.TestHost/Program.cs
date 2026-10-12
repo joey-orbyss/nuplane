@@ -44,10 +44,15 @@ internal static partial class Program
                 return await RunBindAsync(request).ConfigureAwait(false);
             }
 
-            if (args.Length == 2 && args[0] == "--graph-use-idle")
-                return await RunGraphUseIdleAsync(args[1]).ConfigureAwait(false);
+            if (args.Length == 2 && args[0] is
+                "--graph-use-idle" or
+                "--participant-graph-use-idle" or
+                "--participant-graph-use-reordered-roster" or
+                "--participant-graph-use-unscoped-gate" or
+                "--participant-graph-use-scoped-gate")
+                return await RunGraphUseIdleAsync(args[1], args[0]).ConfigureAwait(false);
 
-            await WriteDiagnosticAsync("Expected --gate <name>, --membership-publish <request.json>, --membership-recover <request.json>, --membership-initialize <request.json>, --membership-bind <request.json>, or --graph-use-idle <request.json>.")
+            await WriteDiagnosticAsync("Expected --gate <name>, --membership-publish <request.json>, --membership-recover <request.json>, --membership-initialize <request.json>, --membership-bind <request.json>, --graph-use-idle <request.json>, --participant-graph-use-idle <request.json>, --participant-graph-use-reordered-roster <request.json>, --participant-graph-use-unscoped-gate <request.json>, or --participant-graph-use-scoped-gate <request.json>.")
                 .ConfigureAwait(false);
             return InvalidProtocolExitCode;
         }

@@ -1,5 +1,6 @@
 using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Store.State;
 
 namespace Nuplane;
 
@@ -11,14 +12,20 @@ public sealed class AdmittedActivePackageSnapshot : IAsyncDisposable
     private PackageStorePathAdmission? _admission;
     private Task? _disposeTask;
 
-    internal AdmittedActivePackageSnapshot(ActivePackagesSnapshot snapshot, PackageStorePathAdmission admission)
+    internal AdmittedActivePackageSnapshot(
+        ActivePackagesSnapshot snapshot,
+        PackageStorePathAdmission admission,
+        StoreStateRecord state)
     {
         Snapshot = snapshot ?? throw new ArgumentNullException(nameof(snapshot));
         _admission = admission ?? throw new ArgumentNullException(nameof(admission));
+        State = state ?? throw new ArgumentNullException(nameof(state));
     }
 
     /// <summary>Gets the immutable snapshot projection.</summary>
     public ActivePackagesSnapshot Snapshot { get; }
+
+    internal StoreStateRecord State { get; }
 
     /// <summary>Creates a counted path-limited borrow for a path captured by the snapshot.</summary>
     public PackageStoreOperationBorrow BorrowFor(string installPath)
@@ -27,6 +34,14 @@ public sealed class AdmittedActivePackageSnapshot : IAsyncDisposable
         var admission = Volatile.Read(ref _admission)
             ?? throw new ObjectDisposedException(nameof(AdmittedActivePackageSnapshot));
         return admission.BorrowFor(installPath);
+    }
+
+    internal PackageStoreOperationBorrow BorrowRootFor(string installPath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(installPath);
+        var admission = Volatile.Read(ref _admission)
+            ?? throw new ObjectDisposedException(nameof(AdmittedActivePackageSnapshot));
+        return admission.BorrowRootFor(installPath);
     }
 
     /// <summary>Closes the scope and waits for borrows already issued from it to drain.</summary>

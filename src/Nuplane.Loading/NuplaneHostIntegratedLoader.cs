@@ -32,8 +32,10 @@ namespace Nuplane.Loading;
 /// after doing their work, not from a long-running process that expects to reload a package set.
 /// </para>
 /// <para>
-/// The entry point never writes: it does not touch the store, the state file, completion markers, or
-/// the install directories it reads.
+/// The ordinary offline entry points never write: they do not touch the store, the state file,
+/// completion markers, or the install directories they read. The participant-bound entry point also
+/// publishes graph-use records in the native store control area so package bytes remain protected for
+/// the process lifetime.
 /// </para>
 /// <para>
 /// A load is not re-entrant. It holds a process-wide lock for its duration, so calling it again from
@@ -118,6 +120,33 @@ public static class NuplaneHostIntegratedLoader
         HostIntegratedLoadOptions? options = null,
         CancellationToken cancellationToken = default) =>
         LoadAsync(packages, state: null, options, cancellationToken);
+
+    /// <summary>
+    /// Loads the selected participant composition's persisted active graphs after complete native
+    /// catalog admission and publishes one process-lifetime graph-use owner for every loaded graph.
+    /// </summary>
+    /// <remarks>
+    /// The access object is created only by a validated coordinated participant composition. This
+    /// method acquires the process-wide load gate before opening its short native snapshot, validates
+    /// every active graph before package reads, publishes all graph-use owners before the first load,
+    /// then releases snapshot/member ownership before metadata, gates, and assembly reads. Ordinary
+    /// path and state-file entry points retain their released-compatible behavior and do not infer
+    /// participant authority.
+    /// </remarks>
+    /// <param name="access">The registered access for the selected coordinated participant composition.</param>
+    /// <param name="options">The load options, or <see langword="null"/> for the default host-integrated configuration.</param>
+    /// <param name="cancellationToken">Cancels admission or loading before an irreversible load context is created.</param>
+    /// <returns>The per-package load state and any ordinary load failures.</returns>
+    public static Task<HostIntegratedLoadResult> LoadFromParticipantAsync(
+        NuplaneStoreSnapshotAccess access,
+        HostIntegratedLoadOptions? options = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(access);
+        options ??= new HostIntegratedLoadOptions();
+        ValidateOptions(options);
+        return HostIntegratedLoadComposition.LoadParticipantAsync(access, options, cancellationToken);
+    }
 
     /// <summary>
     /// Reads the persisted store state at <paramref name="stateFilePath"/> and loads the package set it

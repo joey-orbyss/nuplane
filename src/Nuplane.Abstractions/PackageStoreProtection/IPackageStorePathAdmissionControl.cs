@@ -4,5 +4,6 @@ namespace Nuplane.Abstractions.PackageStoreProtection;
 internal interface IPackageStorePathAdmissionControl
 {
     PackageStoreOperationBorrow BorrowFor(PackageStorePathAdmission admission, string installPath);
+    PackageStoreOperationBorrow BorrowRootFor(PackageStorePathAdmission admission, string installPath);
     ValueTask DisposeAsync(PackageStorePathAdmission admission);
 }

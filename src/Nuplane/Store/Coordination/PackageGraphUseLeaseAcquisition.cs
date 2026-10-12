@@ -2,6 +2,7 @@ using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Reconciliation.Models;
 using Nuplane.Store.Coordination.PhysicalFiles;
+using Nuplane.Store.Coordination.MembershipRecords;
 using Nuplane.Store.Coordination.ProtectionRecords;
 
 namespace Nuplane.Store.Coordination;
@@ -15,6 +16,9 @@ internal sealed class PackageGraphUseLeaseAcquisition(
     RootMembershipRegistry? registry,
     IPackageGraphUseLifetimeObserver lifetimeObserver) : IResolvedPackageGraphUseLeaseAcquisition
 {
+    internal RootMembershipRegistry? Registry => registry;
+    internal IPackageGraphUseLifetimeObserver LifetimeObserver => lifetimeObserver;
+
     public async ValueTask<PackageGraphUseLeaseOwner> AcquireForRootAsync(
         PackageStoreOperationBorrow borrow,
         ResolvedPackageGraph graph,
@@ -83,7 +87,7 @@ internal sealed class PackageGraphUseLeaseAcquisition(
         }
     }
 
-    internal async ValueTask<PackageGraphUseLeaseOwner> AcquireProtectedRecoveryForRootAsync(
+    internal ValueTask<PackageGraphUseLeaseOwner> AcquireProtectedRecoveryForRootAsync(
         PackageStoreOperationBorrow borrow,
         ProtectedGraphSnapshot recoverableGraph,
         string configuredInstallRoot,
@@ -103,6 +107,59 @@ internal sealed class PackageGraphUseLeaseAcquisition(
                 "Recovery acquisition requires the exact persisted recoverable graph candidate.", borrow.Root);
         }
 
+        var activeView = AsActiveView(recoverableGraph);
+        return AcquireProtectedGraphForRootAsync(
+            borrow,
+            activeView,
+            (files, root, ledger) => PackageGraphUseProtectedInstallBinding.Observe(
+                files, registry!, root, ledger, recoverableGraph, configuredInstallRoot),
+            cancellationToken,
+            "Recovery graph-use acquisition");
+    }
+
+    internal ValueTask<PackageGraphUseLeaseOwner> AcquireProtectedActiveForRootAsync(
+        PackageStoreOperationBorrow borrow,
+        ProtectedGraphSnapshot activeGraph,
+        IReadOnlyDictionary<Guid, string> exactPathsByNode,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(borrow);
+        ArgumentNullException.ThrowIfNull(activeGraph);
+        ArgumentNullException.ThrowIfNull(exactPathsByNode);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (registry is null)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "This package-store composition does not provide native graph-use publication.", borrow.Root);
+        if ((activeGraph.Disposition & ProtectedGraphDisposition.Active) == 0)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.StateMismatch,
+                "Active loading requires the exact persisted active graph candidate.", borrow.Root);
+
+        var activeView = AsActiveView(activeGraph);
+        return AcquireProtectedGraphForRootAsync(
+            borrow,
+            activeView,
+            (files, root, ledger) => PackageGraphUseProtectedInstallBinding.ObserveActive(
+                files, registry!, root, ledger, activeView, exactPathsByNode),
+            cancellationToken,
+            "Active graph-use acquisition");
+    }
+
+    private async ValueTask<PackageGraphUseLeaseOwner> AcquireProtectedGraphForRootAsync(
+        PackageStoreOperationBorrow borrow,
+        ProtectedGraphSnapshot activeView,
+        Func<IPhysicalStoreFileSystem, PhysicalStoreDirectoryHandle, RootMembershipRecord,
+            PackageGraphUseProtectedInstallBinding> observeBinding,
+        CancellationToken cancellationToken,
+        string operationName)
+    {
+        ArgumentNullException.ThrowIfNull(borrow);
+        ArgumentNullException.ThrowIfNull(activeView);
+        ArgumentNullException.ThrowIfNull(observeBinding);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (registry is null)
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "This package-store composition does not provide native graph-use publication.", borrow.Root);
+
         var members = PackageStoreOperationAccess.GetLockedMemberLocations(borrow);
         PublishedGraphUseRecord? publication = null;
         PackageGraphUseLeaseOwner? owner = null;
@@ -111,24 +168,14 @@ internal sealed class PackageGraphUseLeaseAcquisition(
             var prepared = await PackageStoreOperationAccess.WithValidatedRootAsync(borrow, async (files, root, token) =>
             {
                 RequireProviderBinding(files, borrow);
-                using var binding = PackageGraphUseRecoveryInstallBinding.Observe(
-                    files, registry, root, members.Ledger, recoverableGraph, configuredInstallRoot);
-                var activeView = new ProtectedGraphSnapshot(
-                    recoverableGraph.SnapshotId,
-                    recoverableGraph.GraphId,
-                    recoverableGraph.GenerationId,
-                    ProtectedGraphDisposition.Active,
-                    recoverableGraph.Roots,
-                    recoverableGraph.RequestedRoots,
-                    recoverableGraph.Nodes,
-                    recoverableGraph.Edges,
-                    recoverySelectionEvidence: null);
+                using var binding = observeBinding(files, root, members.Ledger);
                 return await PublishBoundSnapshotAsync(files, root, borrow, activeView, binding.ExactPathsByNode,
-                    PackageGraphUseSnapshotState.Committed, binding.Revalidate, record => publication = record, token).ConfigureAwait(false);
+                    PackageGraphUseSnapshotState.Committed, binding.Revalidate,
+                    record => publication = record, token).ConfigureAwait(false);
             }, cancellationToken).ConfigureAwait(false);
 
             owner = PackageGraphUseLeaseOwnerControl.Create(borrow.Root, prepared.Snapshot, prepared.Paths,
-                publication ?? throw new InvalidOperationException("Recovery graph-use publication did not return native ownership."),
+                publication ?? throw new InvalidOperationException("Graph-use publication did not return native ownership."),
                 lifetimeObserver, registry.Files);
             publication = null;
             cancellationToken.ThrowIfCancellationRequested();
@@ -145,12 +192,23 @@ internal sealed class PackageGraphUseLeaseAcquisition(
             }
             catch (Exception cleanup)
             {
-                throw new AggregateException("Recovery graph-use acquisition failed and unreturned ownership did not release cleanly.",
+                throw new AggregateException($"{operationName} failed and unreturned ownership did not release cleanly.",
                     primary, cleanup);
             }
             throw;
         }
     }
+
+    private static ProtectedGraphSnapshot AsActiveView(ProtectedGraphSnapshot graph) => new(
+        graph.SnapshotId,
+        graph.GraphId,
+        graph.GenerationId,
+        ProtectedGraphDisposition.Active,
+        graph.Roots,
+        graph.RequestedRoots,
+        graph.Nodes,
+        graph.Edges,
+        recoverySelectionEvidence: null);
 
     private async Task<PreparedGraphUse> PublishBoundSnapshotAsync(
         IPhysicalStoreFileSystem files,

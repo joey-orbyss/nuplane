@@ -3,7 +3,9 @@ using System.Security.Cryptography;
 using Nuplane.Abstractions;
 using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Operational;
+using Nuplane.Registration;
 using Nuplane.Store.Coordination;
+using Nuplane.Store.Coordination.ProtectionRecords;
 using Nuplane.Store.State;
 
 namespace Nuplane;
@@ -15,28 +17,65 @@ public sealed class NuplaneStoreSnapshotAccess
     private readonly StoreRegistry _registry;
     private readonly StoreStateSerializer _serializer;
     private readonly PackageStoreAdmission _admission;
+    private readonly PackageStoreCompositionSnapshot _composition;
+    private readonly PackageGraphUseLeaseAcquisition _graphUseAcquisition;
 
     internal NuplaneStoreSnapshotAccess(
         StoreRegistry registry,
         StoreStateSerializer serializer,
-        PackageStoreAdmission admission)
+        PackageStoreAdmission admission,
+        PackageStoreCompositionSnapshot composition,
+        PackageGraphUseLeaseAcquisition graphUseAcquisition,
+        IPackageGraphUseLifetimeObserver lifetimeObserver,
+        IResolvedPackageGraphUseLeaseAcquisition selectedGraphUseAcquisition)
     {
         ArgumentNullException.ThrowIfNull(registry);
         ArgumentNullException.ThrowIfNull(serializer);
         ArgumentNullException.ThrowIfNull(admission);
+        ArgumentNullException.ThrowIfNull(composition);
+        ArgumentNullException.ThrowIfNull(graphUseAcquisition);
+        ArgumentNullException.ThrowIfNull(lifetimeObserver);
+        ArgumentNullException.ThrowIfNull(selectedGraphUseAcquisition);
         if (!ReferenceEquals(registry.PayloadSerializer, serializer) ||
-            !ReferenceEquals(admission.SelectedStoreRegistry, registry))
+            !ReferenceEquals(admission.SelectedStoreRegistry, registry) ||
+            !composition.IsParticipant ||
+            !ReferenceEquals(admission.Registry, graphUseAcquisition.Registry) ||
+            !ReferenceEquals(admission.Files, graphUseAcquisition.Registry?.Files) ||
+            !ReferenceEquals(graphUseAcquisition.LifetimeObserver, lifetimeObserver) ||
+            !ReferenceEquals(graphUseAcquisition, selectedGraphUseAcquisition))
         {
             throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
-                "Snapshot access requires the registry, serializer, and native admission selected by one composition.");
+                "Snapshot access requires the native admission, participant composition, lease publisher and lifetime observer selected by one composition.");
         }
 
         _registry = registry;
         _serializer = serializer;
         _admission = admission;
+        _composition = composition;
+        _graphUseAcquisition = graphUseAcquisition;
     }
 
+    internal PackageStoreCompositionSnapshot Composition => _composition;
+
+    internal ValueTask<PackageGraphUseLeaseOwner> AcquireProtectedActiveGraphAsync(
+        PackageStoreOperationBorrow borrow,
+        ProtectedGraphSnapshot activeGraph,
+        IReadOnlyDictionary<Guid, string> exactPathsByNode,
+        CancellationToken cancellationToken) =>
+        _graphUseAcquisition.AcquireProtectedActiveForRootAsync(borrow, activeGraph, exactPathsByNode, cancellationToken);
+
     internal async Task<AdmittedActivePackageSnapshot> OpenActivePackageSnapshotAsync(
+        CancellationToken cancellationToken)
+        => await OpenActivePackageSnapshotAsync(PackageStoreAdmissionKind.Maintenance, cancellationToken)
+            .ConfigureAwait(false);
+
+    internal async Task<AdmittedActivePackageSnapshot> OpenActivePackageSnapshotForLoadingAsync(
+        CancellationToken cancellationToken)
+        => await OpenActivePackageSnapshotAsync(PackageStoreAdmissionKind.Loading, cancellationToken)
+            .ConfigureAwait(false);
+
+    private async Task<AdmittedActivePackageSnapshot> OpenActivePackageSnapshotAsync(
+        PackageStoreAdmissionKind kind,
         CancellationToken cancellationToken)
     {
         var statePath = _registry.CoordinatedStateFileLocator;
@@ -45,11 +84,18 @@ public sealed class NuplaneStoreSnapshotAccess
                 "An admitted active snapshot requires the selected coordinated state member.");
 
         var initialState = await NuplaneStore.ReadStateAsync(statePath, cancellationToken).ConfigureAwait(false);
-        return await OpenObservedActivePackageSnapshotAsync(initialState, cancellationToken).ConfigureAwait(false);
+        return await OpenObservedActivePackageSnapshotAsync(initialState, kind, cancellationToken).ConfigureAwait(false);
     }
 
     internal async Task<AdmittedActivePackageSnapshot> OpenObservedActivePackageSnapshotAsync(
         StoreStateRecord observedState,
+        CancellationToken cancellationToken)
+        => await OpenObservedActivePackageSnapshotAsync(observedState, PackageStoreAdmissionKind.Maintenance, cancellationToken)
+            .ConfigureAwait(false);
+
+    private async Task<AdmittedActivePackageSnapshot> OpenObservedActivePackageSnapshotAsync(
+        StoreStateRecord observedState,
+        PackageStoreAdmissionKind kind,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(observedState);
@@ -59,7 +105,7 @@ public sealed class NuplaneStoreSnapshotAccess
         var initialSnapshot = ActivePackageCatalogMapper.MapSnapshot(initialState, Guid.NewGuid().ToString("N"));
         var installPaths = initialSnapshot.Packages.Select(static package => package.InstallPath)
             .Distinct(StringComparer.Ordinal).ToArray();
-        var admission = await _admission.AcquireForActiveSnapshotAsync(installPaths, cancellationToken)
+        var admission = await _admission.AcquireForActiveSnapshotAsync(installPaths, cancellationToken, kind)
             .ConfigureAwait(false);
 
         try
@@ -82,7 +128,8 @@ public sealed class NuplaneStoreSnapshotAccess
             }
 
             var immutableSnapshot = CopySnapshot(initialSnapshot);
-            return new AdmittedActivePackageSnapshot(immutableSnapshot, admission.Paths);
+            return new AdmittedActivePackageSnapshot(immutableSnapshot, admission.Paths,
+                StoreRegistry.CopyState(admission.State));
         }
         catch (Exception primaryFailure)
         {

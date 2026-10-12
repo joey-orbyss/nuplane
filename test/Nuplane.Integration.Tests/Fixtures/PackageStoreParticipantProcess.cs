@@ -57,6 +57,22 @@ internal sealed class PackageStoreParticipantProcess : IAsyncDisposable
         string operationId, string requestPath, CancellationToken cancellationToken)
         => StartOperationAsync("--graph-use-idle", operationId, requestPath, cancellationToken);
 
+    public static Task<PackageStoreParticipantProcess> StartParticipantGraphUseIdleAsync(
+        string operationId, string requestPath, CancellationToken cancellationToken)
+        => StartOperationAsync("--participant-graph-use-idle", operationId, requestPath, cancellationToken);
+
+    public static Task<PackageStoreParticipantProcess> StartParticipantGraphUseReorderedRosterAsync(
+        string operationId, string requestPath, CancellationToken cancellationToken)
+        => StartOperationAsync("--participant-graph-use-reordered-roster", operationId, requestPath, cancellationToken);
+
+    public static Task<PackageStoreParticipantProcess> StartParticipantGraphUseUnscopedGateAsync(
+        string operationId, string requestPath, CancellationToken cancellationToken)
+        => StartOperationAsync("--participant-graph-use-unscoped-gate", operationId, requestPath, cancellationToken);
+
+    public static Task<PackageStoreParticipantProcess> StartParticipantGraphUseScopedGateAsync(
+        string operationId, string requestPath, CancellationToken cancellationToken)
+        => StartOperationAsync("--participant-graph-use-scoped-gate", operationId, requestPath, cancellationToken);
+
     private static Task<PackageStoreParticipantProcess> StartOperationAsync(
         string command, string operationId, string requestPath, CancellationToken cancellationToken)
     {

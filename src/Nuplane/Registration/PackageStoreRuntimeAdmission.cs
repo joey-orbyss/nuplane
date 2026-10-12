@@ -409,6 +409,14 @@ internal static class PackageStoreRuntimeAdmission
             throw Refuse("An unenrolled path does not receive an enrolled operation borrow.");
         }
 
+        public PackageStoreOperationBorrow BorrowRootFor(PackageStorePathAdmission admission, string installPath)
+        {
+            if (!ReferenceEquals(_admission, admission))
+                throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.ExpiredScope,
+                    "The admission handle does not own this metadata-only path classification.");
+            throw Refuse("An unenrolled path does not receive an enrolled root operation borrow.");
+        }
+
         public ValueTask DisposeAsync(PackageStorePathAdmission admission)
         {
             if (!ReferenceEquals(_admission, admission))

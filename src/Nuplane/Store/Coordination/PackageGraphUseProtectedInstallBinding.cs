@@ -13,13 +13,13 @@ namespace Nuplane.Store.Coordination;
 /// member-locator and install observations while Core publishes graph-use records, and grants no
 /// package payload access by itself.
 /// </remarks>
-internal sealed class PackageGraphUseRecoveryInstallBinding : IDisposable
+internal sealed class PackageGraphUseProtectedInstallBinding : IDisposable
 {
     private readonly RootMembershipRegistry.MemberLocatorReplayScope _scope;
     private readonly IReadOnlyList<PackageGraphUseInstallBinding.NativeInstallPathObservation> _observations;
     private bool _disposed;
 
-    private PackageGraphUseRecoveryInstallBinding(
+    private PackageGraphUseProtectedInstallBinding(
         RootMembershipRegistry.MemberLocatorReplayScope scope,
         IReadOnlyList<PackageGraphUseInstallBinding.NativeInstallPathObservation> observations,
         IReadOnlyDictionary<Guid, string> exactPathsByNode)
@@ -31,7 +31,7 @@ internal sealed class PackageGraphUseRecoveryInstallBinding : IDisposable
 
     internal IReadOnlyDictionary<Guid, string> ExactPathsByNode { get; }
 
-    internal static PackageGraphUseRecoveryInstallBinding Observe(
+    internal static PackageGraphUseProtectedInstallBinding Observe(
         IPhysicalStoreFileSystem files,
         RootMembershipRegistry registry,
         PhysicalStoreDirectoryHandle heldRoot,
@@ -45,14 +45,58 @@ internal sealed class PackageGraphUseRecoveryInstallBinding : IDisposable
         ArgumentNullException.ThrowIfNull(lockedLedger);
         ArgumentNullException.ThrowIfNull(graph);
         ArgumentException.ThrowIfNullOrWhiteSpace(configuredInstallRoot);
+        if ((graph.Disposition & ProtectedGraphDisposition.Recoverable) == 0 ||
+            graph.RecoverySelectionEvidence is null)
+            throw Refused("Recovery graph binding requires the exact persisted recoverable candidate.", lockedLedger.RootIdentity);
+
+        var exactPathsByNode = graph.Nodes.ToDictionary(
+            static node => node.NodeId,
+            node => GetExactCandidatePath(configuredInstallRoot, node.Install));
+        return ObserveExactPaths(files, registry, heldRoot, lockedLedger, graph, exactPathsByNode, "recovery");
+    }
+
+    internal static PackageGraphUseProtectedInstallBinding ObserveActive(
+        IPhysicalStoreFileSystem files,
+        RootMembershipRegistry registry,
+        PhysicalStoreDirectoryHandle heldRoot,
+        RootMembershipRecord lockedLedger,
+        ProtectedGraphSnapshot graph,
+        IReadOnlyDictionary<Guid, string> exactPathsByNode)
+    {
+        ArgumentNullException.ThrowIfNull(graph);
+        ArgumentNullException.ThrowIfNull(lockedLedger);
+        ArgumentNullException.ThrowIfNull(exactPathsByNode);
+        if ((graph.Disposition & ProtectedGraphDisposition.Active) == 0)
+            throw Refused("Active graph binding requires an exact persisted active candidate.", lockedLedger.RootIdentity);
+        return ObserveExactPaths(files, registry, heldRoot, lockedLedger, graph, exactPathsByNode, "active");
+    }
+
+    private static PackageGraphUseProtectedInstallBinding ObserveExactPaths(
+        IPhysicalStoreFileSystem files,
+        RootMembershipRegistry registry,
+        PhysicalStoreDirectoryHandle heldRoot,
+        RootMembershipRecord lockedLedger,
+        ProtectedGraphSnapshot graph,
+        IReadOnlyDictionary<Guid, string> exactPathsByNode,
+        string operation)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        ArgumentNullException.ThrowIfNull(registry);
+        ArgumentNullException.ThrowIfNull(heldRoot);
+        ArgumentNullException.ThrowIfNull(lockedLedger);
+        ArgumentNullException.ThrowIfNull(graph);
+        ArgumentNullException.ThrowIfNull(exactPathsByNode);
         if (lockedLedger.Status != RootMembershipStatus.Complete || lockedLedger.PendingStateCommit is not null)
-            throw Refused("Recovery graph binding requires Complete, non-pending locked membership.", lockedLedger.RootIdentity);
-        if (!Path.IsPathFullyQualified(configuredInstallRoot))
-            throw Refused("The selected trusted install root is not fully qualified.", lockedLedger.RootIdentity);
+            throw Refused($"{operation} graph binding requires Complete, non-pending locked membership.", lockedLedger.RootIdentity);
         if (graph.Roots.Count != 1 || graph.Roots[0] != lockedLedger.RootIdentity ||
             graph.Nodes.Any(node => node.Install.Root != lockedLedger.RootIdentity))
         {
-            throw Refused("A participant recovery graph must belong exactly to the admitted physical root.", lockedLedger.RootIdentity);
+            throw Refused($"A participant {operation} graph must belong exactly to the admitted physical root.", lockedLedger.RootIdentity);
+        }
+        if (exactPathsByNode.Count != graph.Nodes.Count ||
+            graph.Nodes.Any(node => !exactPathsByNode.ContainsKey(node.NodeId)))
+        {
+            throw Refused($"{operation} graph binding requires one exact install path per protected node.", lockedLedger.RootIdentity);
         }
 
         var scope = new RootMembershipRegistry.MemberLocatorReplayScope(lockedLedger);
@@ -63,7 +107,7 @@ internal sealed class PackageGraphUseRecoveryInstallBinding : IDisposable
             if (rootHandleInfo.Kind != PhysicalStoreEntryKind.Directory ||
                 rootHandleInfo.Identity != lockedLedger.RootIdentity.HandleIdentity)
             {
-                throw Refused("The held recovery root differs from the acknowledged membership root.", lockedLedger.RootIdentity);
+                throw Refused($"The held {operation} root differs from the acknowledged membership root.", lockedLedger.RootIdentity);
             }
 
             var resolver = new PackageStoreAuthorityResolver(files, registry);
@@ -74,9 +118,10 @@ internal sealed class PackageGraphUseRecoveryInstallBinding : IDisposable
             foreach (var node in graph.Nodes)
             {
                 var expected = node.Install;
-                var candidatePath = GetExactCandidatePath(configuredInstallRoot, expected);
+                var candidatePath = exactPathsByNode[node.NodeId];
+                ArgumentException.ThrowIfNullOrWhiteSpace(candidatePath);
                 if (!exactNames.Add(candidatePath))
-                    throw Refused("Two persisted recovery nodes share one exact install path.", lockedLedger.RootIdentity);
+                    throw Refused($"Two persisted {operation} nodes share one exact install path.", lockedLedger.RootIdentity);
 
                 var observed = PackageGraphUseInstallBinding.ObserveNativeInstallPath(
                     files, resolver, reader, scope, heldRoot, lockedLedger.RootIdentity,
@@ -84,12 +129,12 @@ internal sealed class PackageGraphUseRecoveryInstallBinding : IDisposable
                     expected.VerifiedArchiveHash);
                 observations.Add(observed);
                 if (observed.InstallIdentity != expected || !directoryIdentities.Add(expected.DirectoryIdentity))
-                    throw Refused("A persisted recovery install identity does not match its current native completion observation.", lockedLedger.RootIdentity);
+                    throw Refused($"A persisted {operation} install identity differs from its current native completion observation.", lockedLedger.RootIdentity);
                 if (!paths.TryAdd(node.NodeId, candidatePath))
-                    throw Refused("A persisted recovery graph contains a duplicate node identity.", lockedLedger.RootIdentity);
+                    throw Refused($"A persisted {operation} graph contains a duplicate node identity.", lockedLedger.RootIdentity);
             }
 
-            var binding = new PackageGraphUseRecoveryInstallBinding(scope, observations,
+            var binding = new PackageGraphUseProtectedInstallBinding(scope, observations,
                 new ReadOnlyDictionary<Guid, string>(paths));
             binding.Revalidate();
             return binding;
@@ -104,7 +149,7 @@ internal sealed class PackageGraphUseRecoveryInstallBinding : IDisposable
             }
             scope.Expire();
             if (cleanupFailures.Count > 0)
-                throw new AggregateException("Recovery install binding failed and native observations did not close cleanly.",
+                throw new AggregateException($"{operation} install binding failed and native observations did not close cleanly.",
                     new[] { primary }.Concat(cleanupFailures));
             throw;
         }
@@ -144,7 +189,7 @@ internal sealed class PackageGraphUseRecoveryInstallBinding : IDisposable
         }
         _scope.Expire();
         if (failures.Count > 0)
-            throw new AggregateException("Native recovery install observations did not close cleanly.", failures);
+            throw new AggregateException("Native graph-use install observations did not close cleanly.", failures);
     }
 
     private static PackageStoreAdmissionException Refused(string message, PhysicalRootIdentity root)

@@ -238,6 +238,21 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
         return await EnsureLeasedGraphsLoadedAsync(work, sharedPolicy, cancellationToken).ConfigureAwait(false);
     }
 
+    async Task<PackageLoadResult> IScopedPackageLoader.EnsureProtectedActiveGraphsLoadedAsync(
+        IReadOnlyList<LeasedProtectedActiveGraphSelection> graphSelections,
+        IReadOnlyList<SharedAssemblyPolicyEntry> sharedPolicy,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(graphSelections);
+        ArgumentNullException.ThrowIfNull(sharedPolicy);
+
+        var work = graphSelections.Select(selection => selection is null
+            ? null
+            : new LeasedGraphWorkItem(selection.Packages, selection.LeaseOwner,
+                () => ScopedProtectedActiveGraphValidator.Validate(selection))).ToArray();
+        return await EnsureLeasedGraphsLoadedAsync(work, sharedPolicy, cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<PackageLoadResult> EnsureLeasedGraphsLoadedAsync(
         IReadOnlyList<LeasedGraphWorkItem?> graphWork,
         IReadOnlyList<SharedAssemblyPolicyEntry> sharedPolicy,

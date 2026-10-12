@@ -24,4 +24,9 @@ internal interface IScopedPackageLoader : IPackageLoader
         IReadOnlyList<LeasedProtectedRecoveryGraphSelection> graphSelections,
         IReadOnlyList<SharedAssemblyPolicyEntry> sharedPolicy,
         CancellationToken cancellationToken);
+
+    Task<PackageLoadResult> EnsureProtectedActiveGraphsLoadedAsync(
+        IReadOnlyList<LeasedProtectedActiveGraphSelection> graphSelections,
+        IReadOnlyList<SharedAssemblyPolicyEntry> sharedPolicy,
+        CancellationToken cancellationToken);
 }

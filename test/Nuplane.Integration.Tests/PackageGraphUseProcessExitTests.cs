@@ -20,7 +20,28 @@ public sealed partial class OverlappingPackageGraphProtectionTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public async Task HostIntegratedGraphUse_BecomesStaleOnlyAfterIdleProcessExit(bool terminateProcess)
+    public Task HostIntegratedGraphUse_BecomesStaleOnlyAfterIdleProcessExit(bool terminateProcess) =>
+        RunGraphUseProcessExitAsync(terminateProcess, ParticipantGraphUseProcessMode.OrdinaryReconciliation);
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public Task HostIntegratedParticipantLoad_BecomesStaleOnlyAfterIdleProcessExit(bool terminateProcess) =>
+        RunGraphUseProcessExitAsync(terminateProcess, ParticipantGraphUseProcessMode.ParticipantRepeat);
+
+    [Fact]
+    public Task HostIntegratedParticipantLoad_ReusesAcrossEquivalentReorderedRoster() =>
+        RunGraphUseProcessExitAsync(false, ParticipantGraphUseProcessMode.ParticipantRepeatReorderedRoster);
+
+    [Fact]
+    public Task HostIntegratedParticipantLoad_RejectsUnscopedGateAndReleasesLease() =>
+        RunGraphUseProcessExitAsync(false, ParticipantGraphUseProcessMode.ParticipantUnscopedGate);
+
+    [Fact]
+    public Task HostIntegratedParticipantLoad_RunsScopedGateAfterSnapshotRelease() =>
+        RunGraphUseProcessExitAsync(false, ParticipantGraphUseProcessMode.ParticipantScopedGate);
+
+    private async Task RunGraphUseProcessExitAsync(bool terminateProcess, ParticipantGraphUseProcessMode mode)
     {
         var fixture = await GraphUseFixture.CreateAsync(PackageLoadMode.HostIntegrated);
         ServiceProvider? parentProvider = null;
@@ -40,51 +61,97 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
 
             using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-            participant = await PackageStoreParticipantProcess.StartGraphUseIdleAsync(
-                operationId, requestPath, deadline.Token);
-            using var loaded = await participant.ReadResponseAsync("loaded-idle", deadline.Token);
-            Assert.Equal(operationId, loaded.RootElement.GetProperty("operationId").GetString());
-            Assert.Equal(participant.ProcessId, loaded.RootElement.GetProperty("processId").GetInt32());
-            Assert.False(loaded.RootElement.GetProperty("isCollectible").GetBoolean());
-            Assert.True(loaded.RootElement.GetProperty("isCoordinatedParticipant").GetBoolean());
-            Assert.False(string.IsNullOrWhiteSpace(loaded.RootElement.GetProperty("contextIdentity").GetString()));
-            Assert.False(string.IsNullOrWhiteSpace(loaded.RootElement.GetProperty("contextName").GetString()));
-            Assert.False(participant.HasExited);
-            var assemblyNames = loaded.RootElement.GetProperty("assemblyNames").EnumerateArray()
-                .Select(static item => item.GetString()!).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            Assert.Contains("Root.First", assemblyNames);
-            Assert.Contains("Shared.Dependency", assemblyNames);
-
+            participant = mode switch
+            {
+                ParticipantGraphUseProcessMode.OrdinaryReconciliation => await PackageStoreParticipantProcess.StartGraphUseIdleAsync(
+                    operationId, requestPath, deadline.Token),
+                ParticipantGraphUseProcessMode.ParticipantRepeat => await PackageStoreParticipantProcess.StartParticipantGraphUseIdleAsync(
+                    operationId, requestPath, deadline.Token),
+                ParticipantGraphUseProcessMode.ParticipantRepeatReorderedRoster => await PackageStoreParticipantProcess.StartParticipantGraphUseReorderedRosterAsync(
+                    operationId, requestPath, deadline.Token),
+                ParticipantGraphUseProcessMode.ParticipantUnscopedGate => await PackageStoreParticipantProcess.StartParticipantGraphUseUnscopedGateAsync(
+                    operationId, requestPath, deadline.Token),
+                ParticipantGraphUseProcessMode.ParticipantScopedGate => await PackageStoreParticipantProcess.StartParticipantGraphUseScopedGateAsync(
+                    operationId, requestPath, deadline.Token),
+                _ => throw new ArgumentOutOfRangeException(nameof(mode))
+            };
             var admission = parentProvider.GetRequiredService<IPackageStoreAdmission>();
-            var live = await InspectUseStateAsync(admission, fixture, GraphUseRecordOwnershipState.Live, deadline.Token);
-            Assert.Equal(participant.ProcessId, live.Record.DiagnosticProcessId);
-            Assert.Equal(GraphUseLifetimeKind.OsExclusiveSentinel, live.Record.LifetimeKind);
-            Assert.Equal(PackageGraphUseSnapshotState.Committed, live.Record.SnapshotState);
-            AssertGraphUseMatchesFixture(live.Record.GraphSnapshot, fixture, inventoryBefore);
+            if (mode == ParticipantGraphUseProcessMode.ParticipantUnscopedGate)
+            {
+                using var refused = await participant.ReadResponseAsync("refused-idle", deadline.Token);
+                Assert.Equal(operationId, refused.RootElement.GetProperty("operationId").GetString());
+                Assert.Equal(participant.ProcessId, refused.RootElement.GetProperty("processId").GetInt32());
+                Assert.False(refused.RootElement.GetProperty("activationGateEvaluated").GetBoolean());
+                Assert.Equal(0, refused.RootElement.GetProperty("matchingPackageGraphContexts").GetInt32());
+                Assert.False(participant.HasExited);
 
-            var idlePersistence = CapturePersistenceEvidence(fixture);
-            Assert.Equal(RootMembershipStatus.Complete, idlePersistence.LedgerStatus);
-            Assert.Equal(fixture.RootIdentity, idlePersistence.LedgerRootIdentity);
-            Assert.False(string.IsNullOrWhiteSpace(idlePersistence.LedgerDigest));
-            await AssertMembersRemainProtectedAsync(fixture, inventoryBefore);
-            AssertNativeEvidenceEqual(inventoryBefore, CaptureFixtureNativeEvidence(fixture));
+                var staleBeforeExit = await InspectUseStateAsync(admission, fixture, GraphUseRecordOwnershipState.Stale, deadline.Token);
+                Assert.Equal(PackageGraphUseSnapshotState.Committed, staleBeforeExit.Record.SnapshotState);
+                var refusedPersistence = CapturePersistenceEvidence(fixture);
+                Assert.Equal(RootMembershipStatus.Complete, refusedPersistence.LedgerStatus);
+                Assert.Equal(fixture.RootIdentity, refusedPersistence.LedgerRootIdentity);
+                await AssertMembersRemainProtectedAsync(fixture, inventoryBefore);
+                AssertNativeEvidenceEqual(inventoryBefore, CaptureFixtureNativeEvidence(fixture));
 
-            var exit = terminateProcess
-                ? await participant.TerminateAsync(deadline.Token)
-                : await participant.ReleaseOperationAsync(deadline.Token);
-            if (terminateProcess)
-                Assert.NotEqual(0, exit.ExitCode);
+                var refusalExit = await participant.ReleaseOperationAsync(deadline.Token);
+                Assert.Equal(0, refusalExit.ExitCode);
+                var staleAfterExit = await InspectUseStateAsync(admission, fixture, GraphUseRecordOwnershipState.Stale, deadline.Token);
+                Assert.Equal(staleBeforeExit.Record.UseId, staleAfterExit.Record.UseId);
+                Assert.Equal(staleBeforeExit.Record.PayloadDigest, staleAfterExit.Record.PayloadDigest);
+                Assert.Equal(staleBeforeExit.Record.SentinelIdentity, staleAfterExit.Record.SentinelIdentity);
+                AssertPersistenceEvidenceEqual(refusedPersistence, CapturePersistenceEvidence(fixture));
+                await AssertMembersRemainProtectedAsync(fixture, inventoryBefore);
+                AssertNativeEvidenceEqual(inventoryBefore, CaptureFixtureNativeEvidence(fixture));
+            }
             else
-                Assert.Equal(0, exit.ExitCode);
+            {
+                using var loaded = await participant.ReadResponseAsync("loaded-idle", deadline.Token);
+                Assert.Equal(operationId, loaded.RootElement.GetProperty("operationId").GetString());
+                Assert.Equal(participant.ProcessId, loaded.RootElement.GetProperty("processId").GetInt32());
+                Assert.False(loaded.RootElement.GetProperty("isCollectible").GetBoolean());
+                Assert.True(loaded.RootElement.GetProperty("isCoordinatedParticipant").GetBoolean());
+                Assert.False(string.IsNullOrWhiteSpace(loaded.RootElement.GetProperty("contextIdentity").GetString()));
+                Assert.False(string.IsNullOrWhiteSpace(loaded.RootElement.GetProperty("contextName").GetString()));
+                Assert.False(participant.HasExited);
+                if (mode == ParticipantGraphUseProcessMode.ParticipantRepeatReorderedRoster)
+                    Assert.True(loaded.RootElement.GetProperty("didParticipantRepeatCompositionAcceptance").GetBoolean());
+                if (mode == ParticipantGraphUseProcessMode.ParticipantScopedGate)
+                    Assert.True(loaded.RootElement.GetProperty("didActivationGateProbeLiveUse").GetBoolean());
+                var assemblyNames = loaded.RootElement.GetProperty("assemblyNames").EnumerateArray()
+                    .Select(static item => item.GetString()!).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                Assert.Contains("Root.First", assemblyNames);
+                Assert.Contains("Shared.Dependency", assemblyNames);
 
-            var stale = await InspectUseStateAsync(admission, fixture, GraphUseRecordOwnershipState.Stale, deadline.Token);
-            Assert.Equal(live.Record.UseId, stale.Record.UseId);
-            Assert.Equal(live.Record.PayloadDigest, stale.Record.PayloadDigest);
-            Assert.Equal(live.Record.SentinelIdentity, stale.Record.SentinelIdentity);
-            Assert.Equal(live.Record.GraphSnapshot.GenerationId, stale.Record.GraphSnapshot.GenerationId);
-            AssertPersistenceEvidenceEqual(idlePersistence, CapturePersistenceEvidence(fixture));
-            await AssertMembersRemainProtectedAsync(fixture, inventoryBefore);
-            AssertNativeEvidenceEqual(inventoryBefore, CaptureFixtureNativeEvidence(fixture));
+                var live = await InspectUseStateAsync(admission, fixture, GraphUseRecordOwnershipState.Live, deadline.Token);
+                Assert.Equal(participant.ProcessId, live.Record.DiagnosticProcessId);
+                Assert.Equal(GraphUseLifetimeKind.OsExclusiveSentinel, live.Record.LifetimeKind);
+                Assert.Equal(PackageGraphUseSnapshotState.Committed, live.Record.SnapshotState);
+                AssertGraphUseMatchesFixture(live.Record.GraphSnapshot, fixture, inventoryBefore);
+
+                var idlePersistence = CapturePersistenceEvidence(fixture);
+                Assert.Equal(RootMembershipStatus.Complete, idlePersistence.LedgerStatus);
+                Assert.Equal(fixture.RootIdentity, idlePersistence.LedgerRootIdentity);
+                Assert.False(string.IsNullOrWhiteSpace(idlePersistence.LedgerDigest));
+                await AssertMembersRemainProtectedAsync(fixture, inventoryBefore);
+                AssertNativeEvidenceEqual(inventoryBefore, CaptureFixtureNativeEvidence(fixture));
+
+                var exit = terminateProcess
+                    ? await participant.TerminateAsync(deadline.Token)
+                    : await participant.ReleaseOperationAsync(deadline.Token);
+                if (terminateProcess)
+                    Assert.NotEqual(0, exit.ExitCode);
+                else
+                    Assert.Equal(0, exit.ExitCode);
+
+                var stale = await InspectUseStateAsync(admission, fixture, GraphUseRecordOwnershipState.Stale, deadline.Token);
+                Assert.Equal(live.Record.UseId, stale.Record.UseId);
+                Assert.Equal(live.Record.PayloadDigest, stale.Record.PayloadDigest);
+                Assert.Equal(live.Record.SentinelIdentity, stale.Record.SentinelIdentity);
+                Assert.Equal(live.Record.GraphSnapshot.GenerationId, stale.Record.GraphSnapshot.GenerationId);
+                AssertPersistenceEvidenceEqual(idlePersistence, CapturePersistenceEvidence(fixture));
+                await AssertMembersRemainProtectedAsync(fixture, inventoryBefore);
+                AssertNativeEvidenceEqual(inventoryBefore, CaptureFixtureNativeEvidence(fixture));
+            }
         }
         catch (Exception exception)
         {
@@ -260,6 +327,15 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             actual.Keys.OrderBy(static key => key, StringComparer.Ordinal));
         foreach (var key in expected.Keys)
             Assert.Equal(expected[key], actual[key]);
+    }
+
+    private enum ParticipantGraphUseProcessMode
+    {
+        OrdinaryReconciliation,
+        ParticipantRepeat,
+        ParticipantRepeatReorderedRoster,
+        ParticipantUnscopedGate,
+        ParticipantScopedGate
     }
 
     private sealed record GraphUseProcessRequest(

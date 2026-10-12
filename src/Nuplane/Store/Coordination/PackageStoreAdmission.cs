@@ -18,6 +18,7 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
     private readonly string? _configuredRootBaseLocator;
 
     internal RootMembershipRegistry Registry => _registry;
+    internal IPhysicalStoreFileSystem Files => _files;
     internal IStoreRegistry? SelectedStoreRegistry { get; }
 
     internal PackageStoreAdmission(
@@ -196,9 +197,10 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
 
     internal async ValueTask<PackageStoreSnapshotAdmission> AcquireForActiveSnapshotAsync(
         IReadOnlyCollection<string> installPaths,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        PackageStoreAdmissionKind kind = PackageStoreAdmissionKind.Maintenance)
     {
-        var result = await AcquirePathAdmissionAsync(installPaths, PackageStoreAdmissionKind.Maintenance,
+        var result = await AcquirePathAdmissionAsync(installPaths, kind,
             includeConfiguredStateRoot: true, cancellationToken).ConfigureAwait(false);
         if (result.State is { } state)
             return new PackageStoreSnapshotAdmission(result.Paths, state);
@@ -1151,6 +1153,28 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                 if (!_owners.TryGetValue(root, out var owner))
                     throw Refusal("The path's enrolled root has no retained owner.", root);
                 return owner.BorrowForPath(owner.Owner, installPath);
+            }
+        }
+
+        public PackageStoreOperationBorrow BorrowRootFor(PackageStorePathAdmission admission, string installPath)
+        {
+            ArgumentNullException.ThrowIfNull(admission);
+            ArgumentException.ThrowIfNullOrWhiteSpace(installPath);
+            lock (_gate)
+            {
+                if (!ReferenceEquals(_admission, admission))
+                    throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.ExpiredScope,
+                        "The admission handle does not own this path-control scope.");
+                if (_closing)
+                    throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.ExpiredScope,
+                        "The path admission is closing.");
+                var observation = _observations.FirstOrDefault(item => string.Equals(item.Path, installPath, StringComparison.Ordinal))
+                    ?? throw Refusal("The requested path is not part of this admission.");
+                var root = observation.Resolved.RootIdentity
+                    ?? throw Refusal("An unenrolled path does not receive an enrolled root operation borrow.");
+                if (!_owners.TryGetValue(root, out var owner))
+                    throw Refusal("The path's enrolled root has no retained owner.", root);
+                return owner.Owner.Borrow();
             }
         }
 
