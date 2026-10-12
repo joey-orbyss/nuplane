@@ -154,7 +154,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         {
             nativeReadStarted.TrySetResult();
             await releaseNativeRead.Task.WaitAsync(TimeSpan.FromSeconds(10), token);
-        }), options);
+        }, requiresBorrow: true), options);
         var companion = new ScopedFileSource(fixture.SharedInstallPath, entered: null, release: null, failAfterRead: false);
         using var provider = CreateProvider(fixture.PackageInstallRoot, fixture.StatePaths["first"], source,
             additionalSource: companion);

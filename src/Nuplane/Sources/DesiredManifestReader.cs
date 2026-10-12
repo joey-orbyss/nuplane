@@ -26,8 +26,11 @@ public sealed class DesiredManifestReader
     {
     }
 
-    internal DesiredManifestReader(Func<CancellationToken, Task> afterNativeReadAsync)
-        => _afterNativeReadAsync = afterNativeReadAsync ?? throw new ArgumentNullException(nameof(afterNativeReadAsync));
+    internal DesiredManifestReader(Func<CancellationToken, Task> afterNativeReadAsync, bool requiresBorrow = false)
+    {
+        _afterNativeReadAsync = afterNativeReadAsync ?? throw new ArgumentNullException(nameof(afterNativeReadAsync));
+        _requiresBorrow = requiresBorrow;
+    }
 
     internal DesiredManifestReader(bool requiresBorrow)
         => _requiresBorrow = requiresBorrow;
