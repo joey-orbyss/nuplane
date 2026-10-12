@@ -12,6 +12,12 @@ The tests exercise selected-member routing, protected empty-state ownership, unc
 
 A compiled control suppressed the stale-state comparison for an uncanceled caller. The stale-revision regression failed with the intended missing-refusal assertion. Its unexpected-return branch disposes the scope, preserving teardown even under the defect. Production source was restored byte-for-byte, rebuilt normally, and passed the 81-case gate; the restored assembly hash differs from the mutant. The initial compile's two type/name errors and corrections are retained as unaccepted intermediate evidence.
 
+## First hosted attempt and fixture correction
+
+Exact-head `d5ed266` [Validate38207148078](https://github.com/valence-works/nuplane/actions/runs/38207148078) failed the existing `PostResolutionTargetInspectionFaultClosesTheUntransferredNativeResolution` Store regression. The fault injector matched the generated async method name `AcquireForInstallPathsAsync`; factoring that body into `AcquirePathAdmissionAsync` disabled the injected fault. Unix reported the missing expected exception. On Windows, the unexpectedly returned admission was discarded, so fixture cleanup encountered its still-held native owner. All five native lanes and the full-suite job failed; the shim job succeeded. No hosted acceptance is credited to this attempt.
+
+Root reproduced the original missing-exception failure locally. The test-only correction matches the captured exact target handle and admission component boundary without depending on a generated method name, explicitly asserts that injection occurred, and disposes any unexpected successful return. The handle-closure assertion remains intact. Corrected focused proof passes1/0/0; the full local Store suite passes1,033/0/65 platform skips (1,098 total). Root and independent review confirm the correction changes no production behavior. A fresh exact-head hosted run is still required.
+
 ## Boundaries
 
 Fresh hosted qualification remains pending, and T090/T098 are not yet accepted. The cancellation case does not prove cancellation after native ownership acquisition. Native absent-member empty state and path-identity substitution races are not exercised by these eleven cases. Actual host-integrated graph-use handoff remains T097; raw snapshot paths are never long-lived graph leases. Whole T100/T101, recursive deletion, public pruning activation, release and downstream adoption remain separate unfinished gates.

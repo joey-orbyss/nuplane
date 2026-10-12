@@ -220,7 +220,11 @@ public sealed class PackageStoreAdmissionTests
         var admission = new PackageStoreAdmission(faulting, context.Registry, context.Fixture.PackageInstallRoot);
 
         await Assert.ThrowsAsync<IOException>(async () =>
-            await admission.AcquireForInstallPathsAsync([path], PackageStoreAdmissionKind.Installation));
+        {
+            await using var unexpected = await admission.AcquireForInstallPathsAsync(
+                [path], PackageStoreAdmissionKind.Installation);
+        });
+        Assert.True(faulting.FaultWasInjected);
         Assert.NotNull(faulting.TargetHandle);
         Assert.Throws<PackageStoreAdmissionException>(() => context.Files.InspectHandle(faulting.TargetHandle!));
     }
@@ -513,6 +517,7 @@ public sealed class PackageStoreAdmissionTests
         : DelegatingPhysicalStoreFileSystem(inner)
     {
         internal PhysicalStoreDirectoryHandle? TargetHandle { get; private set; }
+        internal bool FaultWasInjected { get; private set; }
 
         public override PhysicalStoreDirectoryHandle OpenDirectoryChildNoFollow(PhysicalStoreDirectoryHandle parent, string singleName)
         {
@@ -528,9 +533,13 @@ public sealed class PackageStoreAdmissionTests
             if (ReferenceEquals(handle, TargetHandle))
             {
                 var caller = new System.Diagnostics.StackTrace().GetFrame(1)?.GetMethod();
-                if (caller?.Name == "MoveNext" && caller.DeclaringType?.DeclaringType == typeof(PackageStoreAdmission) &&
-                    caller.DeclaringType?.Name.Contains(nameof(PackageStoreAdmission.AcquireForInstallPathsAsync), StringComparison.Ordinal) == true)
+                // Match the admission boundary, not a generated method name that changes when
+                // its async body is factored into another helper.
+                if (caller?.Name == "MoveNext" && caller.DeclaringType?.DeclaringType == typeof(PackageStoreAdmission))
+                {
+                    FaultWasInjected = true;
                     throw new IOException("Injected final-target metadata failure after path resolution.");
+                }
             }
             return Inner.InspectHandle(handle);
         }
