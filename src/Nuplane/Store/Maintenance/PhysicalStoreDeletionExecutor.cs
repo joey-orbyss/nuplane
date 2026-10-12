@@ -141,8 +141,10 @@ internal sealed class PhysicalStoreDeletionExecutor
         revalidateEligibility(cancellationToken);
         if (candidate.InspectOriginalSlot(cancellationToken) is not null)
             throw Refuse(candidate, "The original logical install slot became occupied before quarantine-root removal.");
+        candidate.MarkQuarantineRootRemovalAttempted();
         _deletion.RemoveEmptyDirectoryAt(candidate.PackageParentHandle,
             candidate.Journal.QuarantineBasename, candidate.Journal.Manifest.InstallDirectoryIdentity);
+        candidate.MarkQuarantineRootRemovalReturned();
         _checkpoint?.Invoke(PackageStoreDeletionExecutionPoint.AfterQuarantineRootRemoved, candidate.Journal);
         candidate.VerifyQuarantineRemoved(cancellationToken);
     }

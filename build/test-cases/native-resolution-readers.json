@@ -29,6 +29,6 @@
   "Nuplane.Store.Tests.MultiFeedPackageResolverScopedTests.ScopedAdmissionRefusalFromAcquirerDoesNotFallBackToAnotherFeed",
   "Nuplane.Store.Tests.MultiFeedPackageResolverScopedTests.ScopedResolutionPassesExactBorrowAndUsesItForCompletionAndHashReads",
   "Nuplane.Store.Tests.MultiFeedPackageResolverScopedTests.ScopedResolutionRefusesAnAcquirerWithoutTheScopedContract",
-  "Nuplane.Store.Tests.MultiFeedPackageResolverScopedTests.ScopedResolutionRefusesLocalFeedBeforeIndexingOrFailingOver",
+  "Nuplane.Store.Tests.MultiFeedPackageResolverScopedTests.ScopedResolutionRefusesPathRestrictedBorrowBeforeLocalFeedIndexingOrFailingOver",
   "Nuplane.Store.Tests.PackageInstallStoreAdmissionTests.OrdinaryProbeAndHashRead_CompleteRootRetainsReleasedCompatibility"
 ]

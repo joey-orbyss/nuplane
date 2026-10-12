@@ -48,3 +48,9 @@ authority/admission/package-install suites pass **73**, zero failed, with three
 ext4-only skips on macOS. Independent source/result review found no bounded blocker.
 Hosted native-platform qualification remains required. This evidence does not
 accept full T071 or public maintenance activation.
+
+## Path-restricted borrow regression
+
+The first hosted candidate `fb51265` / [Validate 38246344860](https://github.com/valence-works/nuplane/actions/runs/38246344860) failed its full Store run at the legacy local-feed refusal assertion: it expected `UnsupportedFilesystem`, but actual native routing returned `RootMismatch`. Root and independent source diagnosis confirmed that this test uses `BorrowFor` on one install path. `WithValidatedRootAsync` rejects that path-restricted borrow before entering its native callback, so local-feed enumeration and remote fallback do not occur. Native local-feed support does not expand an install-only borrow into root authority.
+
+The test is renamed from `ScopedResolutionRefusesLocalFeedBeforeIndexingOrFailingOver` to `ScopedResolutionRefusesPathRestrictedBorrowBeforeLocalFeedIndexingOrFailingOver`. It requires `RootMismatch` and the exact path-restriction diagnostic, retaining zero scoped/unscoped acquisition and zero remote enumeration assertions. The strict native-resolution-reader manifest changes that one name, preserving all 32 required cases. No production access check changes. The failed hosted log remains historical evidence; the corrected root Release run passes all 32 strict native-resolution-reader names exactly once without skips. Corrected hosted qualification remains pending.

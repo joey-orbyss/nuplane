@@ -39,7 +39,7 @@ public sealed class MultiFeedPackageResolverScopedTests
     }
 
     [SupportedPhysicalStoreFact]
-    public async Task ScopedResolutionRefusesLocalFeedBeforeIndexingOrFailingOver()
+    public async Task ScopedResolutionRefusesPathRestrictedBorrowBeforeLocalFeedIndexingOrFailingOver()
     {
         using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
         await using var admitted = await CreateAdmission(context).AcquireForInstallPathsAsync(
@@ -57,7 +57,9 @@ public sealed class MultiFeedPackageResolverScopedTests
         var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
             resolver.ResolveAsync(Request(feedName: null), borrow, CancellationToken.None));
 
-        Assert.Equal(PackageStoreAdmissionReason.UnsupportedFilesystem, refusal.Reason);
+        // Local feeds support native root-scoped reads; this install-only borrow cannot expand its authority.
+        Assert.Equal(PackageStoreAdmissionReason.RootMismatch, refusal.Reason);
+        Assert.Contains("restricted to its exactly admitted install path", refusal.Message, StringComparison.Ordinal);
         Assert.Equal(0, acquirer.ScopedCallCount);
         Assert.Equal(0, acquirer.UnscopedCallCount);
         await enumerator.DidNotReceive().EnumerateVersionsAsync(

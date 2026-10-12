@@ -534,6 +534,10 @@ internal sealed class PackageStoreQuarantinedCandidate : IDisposable
     private readonly PhysicalStoreDirectoryHandle[] _ownedParents;
     private readonly Action<CancellationToken> _revalidateOperation;
     private readonly Action<CancellationToken>? _revalidateHeldParent;
+    private PhysicalStoreDeletionPartialObservation? _lastObservation;
+    private PackageStoreDeletionPhase? _lastObservationPhase;
+    private bool _quarantineRootRemovalAttempted;
+    private bool _quarantineRootRemovalReturned;
     private bool _disposed;
 
     internal PackageStoreQuarantinedCandidate(
@@ -575,6 +579,14 @@ internal sealed class PackageStoreQuarantinedCandidate : IDisposable
     internal PackageStoreDeletionJournal Journal { get; private set; }
 
     internal PhysicalStoreDeletionManifest Manifest => Journal.Manifest;
+
+    internal PhysicalStoreDeletionPartialObservation? LastObservation => _lastObservation;
+
+    internal PackageStoreDeletionPhase? LastObservationPhase => _lastObservationPhase;
+
+    internal bool QuarantineRootRemovalAttempted => _quarantineRootRemovalAttempted;
+
+    internal bool QuarantineRootRemovalReturned => _quarantineRootRemovalReturned;
 
     internal PhysicalStoreDirectoryHandle PackageParentHandle
     {
@@ -657,11 +669,28 @@ internal sealed class PackageStoreQuarantinedCandidate : IDisposable
     {
         Revalidate(cancellationToken);
         var quarantine = _quarantine ?? throw Refuse("The quarantine root handle has already been closed.");
-        var observation = _manifests.CapturePartial(quarantine, Journal.OriginalInstall,
+        var journal = Journal;
+        var observation = _manifests.CapturePartial(quarantine, journal.OriginalInstall,
             _packageParent, _packageParentIdentity, _packageParentSemantics,
-            Journal.QuarantineBasename, _quarantineSemantics, Journal.Manifest, cancellationToken);
-        PackageStoreDeletionCandidateBinder.RequirePhaseObservation(Journal, observation);
+            journal.QuarantineBasename, _quarantineSemantics, journal.Manifest, cancellationToken);
+        PackageStoreDeletionCandidateBinder.RequirePhaseObservation(journal, observation);
+        _lastObservation = observation;
+        _lastObservationPhase = journal.Phase;
         return observation;
+    }
+
+    internal void MarkQuarantineRootRemovalAttempted()
+    {
+        if (_quarantineRootRemovalAttempted)
+            throw new InvalidOperationException("The exact quarantine root may be removed only once per candidate execution.");
+        _quarantineRootRemovalAttempted = true;
+    }
+
+    internal void MarkQuarantineRootRemovalReturned()
+    {
+        if (!_quarantineRootRemovalAttempted || _quarantineRootRemovalReturned)
+            throw new InvalidOperationException("A quarantine-root removal receipt requires one active exact removal attempt.");
+        _quarantineRootRemovalReturned = true;
     }
 
     internal void ReleaseMarkerObservation(CancellationToken cancellationToken)

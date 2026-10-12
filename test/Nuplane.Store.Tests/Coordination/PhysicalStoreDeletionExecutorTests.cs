@@ -574,6 +574,308 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
     }
 
     [SupportedPhysicalStoreFact]
+    public async Task ExecuteEligibleCandidates_PreservesFirstDeletionWhenSecondCancels()
+    {
+        const string firstId = "outcome-a";
+        const string secondId = "outcome-b";
+        const string laterId = "outcome-c";
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = false;
+        using var fixture = await ExecutionFixture.CreateAsync(deletionExecutionCheckpoint: (point, journal) =>
+        {
+            if (!cancelled && journal.OriginalInstall.PackageId == secondId &&
+                point == PackageStoreDeletionExecutionPoint.AfterDeletingPublished)
+            {
+                cancelled = true;
+                cancellation.Cancel();
+            }
+        });
+        var firstPath = CreateInactiveInstall(fixture.Context.RootAPath, firstId);
+        File.WriteAllText(Path.Combine(firstPath, "payload.txt"), "first");
+        var secondPath = CreateInactiveInstall(fixture.Context.RootAPath, secondId);
+        File.WriteAllText(Path.Combine(secondPath, "payload.txt"), "second");
+        var laterPath = CreateInactiveInstall(fixture.Context.RootAPath, laterId);
+        File.WriteAllText(Path.Combine(laterPath, "payload.txt"), "later");
+
+        var outcome = await fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0, cancellation.Token);
+
+        Assert.True(cancelled);
+        Assert.Equal(PackageStoreExecutionRequestStatus.Cancelled, outcome.Status);
+        var first = OutcomeFor(outcome, firstId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.Completed, first.Attempt);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.Deleted, first.PhysicalOutcome);
+        var second = OutcomeFor(outcome, secondId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.Cancelled, second.Attempt);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.Quarantined, second.PhysicalOutcome);
+        var later = OutcomeFor(outcome, laterId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.NotAttempted, later.Attempt);
+        Assert.Null(later.PhysicalOutcome);
+
+        Assert.False(Directory.Exists(firstPath));
+        Assert.True(Directory.Exists(laterPath));
+        Assert.Equal("later", File.ReadAllText(Path.Combine(laterPath, "payload.txt")));
+        AssertExecutionLocksReleased(fixture.Context);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task ExecuteEligibleCandidates_PreservesFirstDeletionWhenSecondRemovalThrows()
+    {
+        const string firstId = "outcome-io-a";
+        const string secondId = "outcome-io-b";
+        const string laterId = "outcome-io-c";
+        var native = OperatingSystem.IsWindows()
+            ? (IPhysicalStoreFileSystem)new WindowsPhysicalStoreFileSystem()
+            : new UnixPhysicalStoreFileSystem();
+        var faulting = new RemoveThenThrowFileSystem(native, "second.txt");
+        using var fixture = await ExecutionFixture.CreateAsync(fileSystem: faulting);
+        var firstPath = CreateInactiveInstall(fixture.Context.RootAPath, firstId);
+        File.WriteAllText(Path.Combine(firstPath, "first.txt"), "first");
+        var secondPath = CreateInactiveInstall(fixture.Context.RootAPath, secondId);
+        File.WriteAllText(Path.Combine(secondPath, "second.txt"), "removed before failure");
+        File.WriteAllText(Path.Combine(secondPath, "survivor.txt"), "survivor");
+        var laterPath = CreateInactiveInstall(fixture.Context.RootAPath, laterId);
+        File.WriteAllText(Path.Combine(laterPath, "later.txt"), "later");
+
+        var outcome = await fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0);
+
+        Assert.Equal(PackageStoreExecutionRequestStatus.Failed, outcome.Status);
+        var first = OutcomeFor(outcome, firstId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.Completed, first.Attempt);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.Deleted, first.PhysicalOutcome);
+        var second = OutcomeFor(outcome, secondId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.Failed, second.Attempt);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.PartiallyRemoved, second.PhysicalOutcome);
+        Assert.Contains("second.txt", second.MissingAtLastObservation!.Value);
+        var later = OutcomeFor(outcome, laterId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.NotAttempted, later.Attempt);
+        Assert.Null(later.PhysicalOutcome);
+
+        Assert.False(Directory.Exists(firstPath));
+        var journal = ReadCandidateJournal(fixture.Context.RootAPath, secondId);
+        var quarantinePath = Path.Combine(Path.GetDirectoryName(secondPath)!, journal.QuarantineBasename);
+        Assert.False(File.Exists(Path.Combine(quarantinePath, "second.txt")));
+        Assert.Equal("survivor", File.ReadAllText(Path.Combine(quarantinePath, "survivor.txt")));
+        Assert.True(File.Exists(Path.Combine(quarantinePath, PackageInstallStore.CompletionMarkerFileName)));
+        Assert.Equal("later", File.ReadAllText(Path.Combine(laterPath, "later.txt")));
+        AssertExecutionLocksReleased(fixture.Context);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task ExecuteEligibleCandidates_BeforeAdmissionCancellationRemainsCancellation()
+    {
+        using var fixture = await ExecutionFixture.CreateAsync();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0, cancellation.Token));
+
+        AssertExecutionLocksReleased(fixture.Context);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task ExecuteEligibleCandidates_EpochMismatchRemainsTypedRefusal()
+    {
+        const string packageId = "outcome-epoch-mismatch";
+        using var fixture = await ExecutionFixture.CreateAsync();
+        var originalPath = CreateInactiveInstall(fixture.Context.RootAPath, packageId);
+        File.WriteAllText(Path.Combine(originalPath, "payload.txt"), "payload");
+
+        var refusal = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
+            fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 2, 0));
+
+        Assert.Equal(PackageStoreAdmissionReason.RootMismatch, refusal.Reason);
+        Assert.Equal("payload", File.ReadAllText(Path.Combine(originalPath, "payload.txt")));
+        AssertExecutionLocksReleased(fixture.Context);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task ExecuteEligibleCandidates_QuarantineCheckpointFailureReportsVerifiedQuarantine()
+    {
+        const string packageId = "outcome-quarantine-checkpoint";
+        var interrupted = false;
+        using var fixture = await ExecutionFixture.CreateAsync(deletionExecutionCheckpoint: (point, journal) =>
+        {
+            if (!interrupted && journal.OriginalInstall.PackageId == packageId &&
+                point == PackageStoreDeletionExecutionPoint.AfterQuarantinedPublished)
+            {
+                interrupted = true;
+                throw new IOException("controlled stop after Quarantined publication");
+            }
+        });
+        var originalPath = CreateInactiveInstall(fixture.Context.RootAPath, packageId);
+        File.WriteAllText(Path.Combine(originalPath, "payload.txt"), "payload");
+
+        var outcome = await fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0);
+
+        Assert.True(interrupted);
+        Assert.Equal(PackageStoreExecutionRequestStatus.Failed, outcome.Status);
+        var candidate = OutcomeFor(outcome, packageId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.Failed, candidate.Attempt);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.Quarantined, candidate.PhysicalOutcome);
+        Assert.Equal(PackageStoreDeletionPhase.Quarantined, candidate.JournalPhase);
+        Assert.Empty(candidate.MissingAtLastObservation!.Value);
+        var journal = ReadCandidateJournal(fixture.Context.RootAPath, packageId);
+        var quarantinePath = Path.Combine(Path.GetDirectoryName(originalPath)!, journal.QuarantineBasename);
+        Assert.False(Directory.Exists(originalPath));
+        Assert.Equal("payload", File.ReadAllText(Path.Combine(quarantinePath, "payload.txt")));
+        AssertExecutionLocksReleased(fixture.Context);
+    }
+
+    [SupportedPhysicalStoreTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExecuteEligibleCandidates_VerifiesReturnedRootRemovalBeforeReportingDeleted(bool cancel)
+    {
+        const string packageId = "outcome-root-verified";
+        using var cancellation = new CancellationTokenSource();
+        var interrupted = false;
+        using var fixture = await ExecutionFixture.CreateAsync(deletionExecutionCheckpoint: (point, journal) =>
+        {
+            if (interrupted || journal.OriginalInstall.PackageId != packageId ||
+                point != PackageStoreDeletionExecutionPoint.AfterQuarantineRootRemoved)
+                return;
+            interrupted = true;
+            if (cancel)
+                cancellation.Cancel();
+            else
+                throw new IOException("controlled stop after quarantine-root removal");
+        });
+        var originalPath = CreateInactiveInstall(fixture.Context.RootAPath, packageId);
+        File.WriteAllText(Path.Combine(originalPath, "payload.txt"), "payload");
+
+        var outcome = await fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0, cancellation.Token);
+
+        Assert.True(interrupted);
+        Assert.Equal(cancel ? PackageStoreExecutionRequestStatus.Cancelled : PackageStoreExecutionRequestStatus.Failed,
+            outcome.Status);
+        var candidate = OutcomeFor(outcome, packageId);
+        Assert.Equal(cancel ? PackageStoreExecutionCandidateAttempt.Cancelled : PackageStoreExecutionCandidateAttempt.Failed,
+            candidate.Attempt);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.Deleted, candidate.PhysicalOutcome);
+        Assert.False(Directory.Exists(originalPath));
+        AssertExecutionLocksReleased(fixture.Context);
+
+        var fresh = await fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0);
+        Assert.Equal(PackageStoreExecutionRequestStatus.Completed, fresh.Status);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.AlreadyAbsent, OutcomeFor(fresh, packageId).PhysicalOutcome);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task ExecuteEligibleCandidates_PayloadRemoveThenThrowReportsObservedPartialState()
+    {
+        const string packageId = "outcome-payload-uncertain";
+        var native = OperatingSystem.IsWindows()
+            ? (IPhysicalStoreFileSystem)new WindowsPhysicalStoreFileSystem()
+            : new UnixPhysicalStoreFileSystem();
+        var faulting = new RemoveThenThrowFileSystem(native, "one.txt");
+        using var fixture = await ExecutionFixture.CreateAsync(fileSystem: faulting);
+        var originalPath = CreateInactiveInstall(fixture.Context.RootAPath, packageId);
+        Directory.CreateDirectory(Path.Combine(originalPath, "nested"));
+        File.WriteAllText(Path.Combine(originalPath, "nested", "one.txt"), "removed before exception");
+        File.WriteAllText(Path.Combine(originalPath, "nested", "two.txt"), "survives");
+
+        var outcome = await fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0);
+
+        Assert.Equal(PackageStoreExecutionRequestStatus.Failed, outcome.Status);
+        var candidate = OutcomeFor(outcome, packageId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.Failed, candidate.Attempt);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.PartiallyRemoved, candidate.PhysicalOutcome);
+        Assert.NotNull(candidate.MissingAtStart);
+        Assert.Empty(candidate.MissingAtStart!.Value);
+        Assert.Contains("nested/one.txt", candidate.MissingAtLastObservation!.Value);
+        var journal = ReadCandidateJournal(fixture.Context.RootAPath, packageId);
+        var quarantinePath = Path.Combine(Path.GetDirectoryName(originalPath)!, journal.QuarantineBasename);
+        Assert.False(File.Exists(Path.Combine(quarantinePath, "nested", "one.txt")));
+        Assert.Equal("survives", File.ReadAllText(Path.Combine(quarantinePath, "nested", "two.txt")));
+        Assert.True(File.Exists(Path.Combine(quarantinePath, PackageInstallStore.CompletionMarkerFileName)));
+        AssertExecutionLocksReleased(fixture.Context);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task ExecuteEligibleCandidates_RootRemoveThenThrowDoesNotAttributeDeletion()
+    {
+        const string packageId = "outcome-root-uncertain";
+        var native = OperatingSystem.IsWindows()
+            ? (IPhysicalStoreFileSystem)new WindowsPhysicalStoreFileSystem()
+            : new UnixPhysicalStoreFileSystem();
+        var faulting = new RemoveThenThrowFileSystem(native, throwAfterQuarantineRootRemoval: true);
+        using var fixture = await ExecutionFixture.CreateAsync(fileSystem: faulting);
+        var originalPath = CreateInactiveInstall(fixture.Context.RootAPath, packageId);
+        File.WriteAllText(Path.Combine(originalPath, "payload.txt"), "payload");
+
+        var outcome = await fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0);
+
+        Assert.Equal(PackageStoreExecutionRequestStatus.Failed, outcome.Status);
+        var candidate = OutcomeFor(outcome, packageId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.Failed, candidate.Attempt);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.QuarantineRootAbsentUnattributed, candidate.PhysicalOutcome);
+        Assert.NotEqual(PackageStoreExecutionPhysicalOutcome.Deleted, candidate.PhysicalOutcome);
+        Assert.NotEqual(PackageStoreExecutionPhysicalOutcome.AlreadyAbsent, candidate.PhysicalOutcome);
+        Assert.False(Directory.Exists(originalPath));
+        AssertExecutionLocksReleased(fixture.Context);
+
+        var fresh = await fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.AlreadyAbsent, OutcomeFor(fresh, packageId).PhysicalOutcome);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task ExecuteEligibleCandidates_PostCallbackCatalogRefusalPreservesVerifiedDeletion()
+    {
+        const string packageId = "outcome-post-callback-refusal";
+        Context? nativeContext = null;
+        using var fixture = await ExecutionFixture.CreateAsync(
+            configure: context =>
+            {
+                nativeContext = context;
+                return Task.FromResult(Array.Empty<string>());
+            },
+            deletionExecutionCheckpoint: (point, journal) =>
+            {
+                if (point == PackageStoreDeletionExecutionPoint.AfterQuarantineRootRemoved &&
+                    journal.OriginalInstall.PackageId == packageId)
+                    File.WriteAllText(nativeContext!.SharedStatePath, "corrupt-after-candidate");
+            });
+        var originalPath = CreateInactiveInstall(fixture.Context.RootAPath, packageId);
+        File.WriteAllText(Path.Combine(originalPath, "payload.txt"), "payload");
+
+        var outcome = await fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0);
+
+        Assert.Equal(PackageStoreExecutionRequestStatus.Failed, outcome.Status);
+        Assert.IsType<PackageStoreAdmissionException>(outcome.Diagnostic);
+        var candidate = OutcomeFor(outcome, packageId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.Completed, candidate.Attempt);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.Deleted, candidate.PhysicalOutcome);
+        Assert.False(Directory.Exists(originalPath));
+        AssertExecutionLocksReleased(fixture.Context);
+    }
+
+    [SupportedPhysicalStoreFact]
+    public async Task ExecuteEligibleCandidates_OwnerCloseFailurePreservesVerifiedDeletion()
+    {
+        const string packageId = "outcome-owner-close-failure";
+        var native = OperatingSystem.IsWindows()
+            ? (IPhysicalStoreFileSystem)new WindowsPhysicalStoreFileSystem()
+            : new UnixPhysicalStoreFileSystem();
+        var faulting = new LockReleaseFaultFileSystem(native);
+        using var fixture = await ExecutionFixture.CreateAsync(fileSystem: faulting);
+        var originalPath = CreateInactiveInstall(fixture.Context.RootAPath, packageId);
+        File.WriteAllText(Path.Combine(originalPath, "payload.txt"), "payload");
+        faulting.FailNextRelease();
+
+        var outcome = await fixture.Service.ExecuteEligibleCandidatesAsync("root-0", 1, 0);
+
+        Assert.Equal(PackageStoreExecutionRequestStatus.Failed, outcome.Status);
+        Assert.Contains("release failure after releasing the lock", outcome.Diagnostic!.ToString(), StringComparison.Ordinal);
+        Assert.Equal(1, fixture.Inventory.ReadCalls);
+        var candidate = OutcomeFor(outcome, packageId);
+        Assert.Equal(PackageStoreExecutionCandidateAttempt.Completed, candidate.Attempt);
+        Assert.Equal(PackageStoreExecutionPhysicalOutcome.Deleted, candidate.PhysicalOutcome);
+        Assert.False(Directory.Exists(originalPath));
+        AssertExecutionLocksReleased(fixture.Context);
+    }
+
+    [SupportedPhysicalStoreFact]
     public async Task DeleteEligibleCandidate_NativeFileRemovalCompletesThenThrows_FreshOwnerReconcilesAbsence()
     {
         const string packageId = "executor-remove-then-throw";
@@ -603,16 +905,12 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
         AssertExecutionLocksReleased(fixture.Context);
     }
 
-    private sealed class RemoveThenThrowFileSystem(IPhysicalStoreFileSystem inner, string faultingBasename)
-        : DelegatingDeletionNativeFileSystem(inner), IPhysicalStorePublicationFileSystem,
-            IPhysicalStoreDirectoryPublicationFileSystem, IPhysicalStoreControlRecoveryFileSystem
+    private sealed class RemoveThenThrowFileSystem(
+        IPhysicalStoreFileSystem inner,
+        string? faultingBasename = null,
+        bool throwAfterQuarantineRootRemoval = false)
+        : DelegatingMaintenanceFileSystem(inner)
     {
-        private readonly IPhysicalStorePublicationFileSystem _publication =
-            (IPhysicalStorePublicationFileSystem)inner;
-        private readonly IPhysicalStoreDirectoryPublicationFileSystem _directoryPublication =
-            (IPhysicalStoreDirectoryPublicationFileSystem)inner;
-        private readonly IPhysicalStoreControlRecoveryFileSystem _controlRecovery =
-            (IPhysicalStoreControlRecoveryFileSystem)inner;
         private int _thrown;
 
         public override void RemoveFileAt(PhysicalStoreDirectoryHandle parent, string singleName,
@@ -622,6 +920,54 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
             if (singleName == faultingBasename && Interlocked.Exchange(ref _thrown, 1) == 0)
                 throw new IOException("controlled failure after native removal");
         }
+
+        public override void RemoveEmptyDirectoryAt(PhysicalStoreDirectoryHandle parent, string singleName,
+            PhysicalFileIdentity expectedIdentity)
+        {
+            base.RemoveEmptyDirectoryAt(parent, singleName, expectedIdentity);
+            if (throwAfterQuarantineRootRemoval &&
+                singleName.StartsWith(".nuplane-quarantine-", StringComparison.Ordinal) &&
+                Interlocked.Exchange(ref _thrown, 1) == 0)
+                throw new IOException("controlled failure after quarantine-root removal");
+        }
+    }
+
+    private sealed class LockReleaseFaultFileSystem(IPhysicalStoreFileSystem inner)
+        : DelegatingMaintenanceFileSystem(inner)
+    {
+        private int _failNextRelease;
+
+        internal void FailNextRelease() => Interlocked.Exchange(ref _failNextRelease, 1);
+
+        public override async ValueTask<IAsyncDisposable?> TryAcquireExclusiveLock(PhysicalStoreFileHandle file)
+        {
+            var owner = await base.TryAcquireExclusiveLock(file).ConfigureAwait(false);
+            return owner is null ? null : new FaultAfterReleaseOwner(owner, this);
+        }
+
+        private bool ShouldFailRelease() => Interlocked.Exchange(ref _failNextRelease, 0) == 1;
+
+        private sealed class FaultAfterReleaseOwner(IAsyncDisposable inner, LockReleaseFaultFileSystem parent)
+            : IAsyncDisposable
+        {
+            public async ValueTask DisposeAsync()
+            {
+                await inner.DisposeAsync().ConfigureAwait(false);
+                if (parent.ShouldFailRelease())
+                    throw new IOException("Injected native lock release failure after releasing the lock.");
+            }
+        }
+    }
+
+    private abstract class DelegatingMaintenanceFileSystem(IPhysicalStoreFileSystem inner)
+        : DelegatingDeletionNativeFileSystem(inner), IPhysicalStorePublicationFileSystem,
+            IPhysicalStoreDirectoryPublicationFileSystem, IPhysicalStoreControlRecoveryFileSystem
+    {
+        private readonly IPhysicalStorePublicationFileSystem _publication = (IPhysicalStorePublicationFileSystem)inner;
+        private readonly IPhysicalStoreDirectoryPublicationFileSystem _directoryPublication =
+            (IPhysicalStoreDirectoryPublicationFileSystem)inner;
+        private readonly IPhysicalStoreControlRecoveryFileSystem _controlRecovery =
+            (IPhysicalStoreControlRecoveryFileSystem)inner;
 
         public PhysicalStoreEntryInfo PublishControlFileAt(PhysicalStoreDirectoryHandle parent, string stagedName,
             PhysicalFileIdentity expectedStagedIdentity, string destinationName,
@@ -649,6 +995,11 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
             => _controlRecovery.MoveControlFileNoReplaceAt(parent, sourceName, expectedSourceIdentity,
                 destinationName);
     }
+
+    private static PackageStoreExecutionCandidateOutcome OutcomeFor(
+        PackageStoreExecutionOutcome outcome,
+        string packageId)
+        => Assert.Single(outcome.Candidates, candidate => candidate.Install.PackageId == packageId);
 
     private static Task<PackageStoreDeletionExecutionStatus> DeleteOneAsync(
         ExecutionFixture fixture,

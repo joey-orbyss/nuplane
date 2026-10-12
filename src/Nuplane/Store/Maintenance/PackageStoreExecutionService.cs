@@ -104,6 +104,51 @@ internal sealed class PackageStoreExecutionService(
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    internal async Task<PackageStoreExecutionOutcome> ExecuteEligibleCandidatesAsync(
+        string? rootLabel,
+        long expectedEnrollmentEpoch,
+        int keepNewestInactiveVersionsPerPackage,
+        CancellationToken cancellationToken = default)
+    {
+        var outcomes = new PackageStoreExecutionOutcomeBuilder();
+        try
+        {
+            await PlanAndRunAsync(rootLabel, expectedEnrollmentEpoch, keepNewestInactiveVersionsPerPackage,
+                (context, token) =>
+                {
+                    outcomes.Initialize(context.Snapshot);
+                    var plan = context.Snapshot.RetentionPlan!;
+                    foreach (var row in plan.Entries)
+                    {
+                        if (row.Classification != PackageStoreRetentionClassification.Eligible)
+                            continue;
+
+                        try
+                        {
+                            context.DeleteEligibleCandidate(row, token, outcomes);
+                            outcomes.CompleteCandidate(row);
+                        }
+                        catch (Exception candidateFailure)
+                        {
+                            outcomes.StopCandidate(row, candidateFailure);
+                            throw;
+                        }
+                    }
+
+                    return Task.FromResult(true);
+                }, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception failure)
+        {
+            // Admission failures before the fresh-plan callback remain ordinary exceptions.
+            if (!outcomes.IsInitialized)
+                throw;
+            outcomes.StopRequest(failure, classifyAdmissionAsFailure: !outcomes.HasStoppedCandidate);
+        }
+
+        return outcomes.Build();
+    }
+
     /// <summary>Live planning scope; escaped snapshots remain descriptive and native access expires with the operation.</summary>
     internal sealed class Context(
         RootMembershipRegistry registry,
@@ -387,52 +432,130 @@ internal sealed class PackageStoreExecutionService(
         internal PackageStoreDeletionExecutionStatus DeleteEligibleCandidate(
             PackageStoreRetentionPlanEntry exactRow,
             CancellationToken cancellationToken)
+            => DeleteEligibleCandidate(exactRow, cancellationToken, outcomeBuilder: null);
+
+        internal PackageStoreDeletionExecutionStatus DeleteEligibleCandidate(
+            PackageStoreRetentionPlanEntry exactRow,
+            CancellationToken cancellationToken,
+            PackageStoreExecutionOutcomeBuilder? outcomeBuilder)
         {
             ArgumentNullException.ThrowIfNull(exactRow);
-            RequireEligibleRow(exactRow, cancellationToken);
-
-            if (_executionJoin.TryFind(exactRow.Install, out var existing))
+            PackageStoreQuarantinedCandidate? activeQuarantine = null;
+            try
             {
-                if (existing.QuarantinePositivelyAbsent)
-                {
-                    if (existing.Discovered.Journal.Phase != PackageStoreDeletionPhase.Finalizing ||
-                        exactRow.Classification != PackageStoreRetentionClassification.Eligible)
-                        throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
-                            "Only an Eligible Finalizing candidate may report a quarantine absent before this invocation.");
-                    Revalidate(cancellationToken);
-                    _candidateBinder.VerifyFinalizingQuarantineAbsent(existing.Discovered,
-                        RootHandle, Revalidate, cancellationToken);
-                    return PackageStoreDeletionExecutionStatus.AlreadyAbsent;
-                }
+                RequireEligibleRow(exactRow, cancellationToken);
 
-                if (existing.OriginalAtOriginalName)
+                if (_executionJoin.TryFind(exactRow.Install, out var existing))
                 {
-                    var original = BindEligibleCandidate(exactRow, cancellationToken);
-                    QuarantinePreparedCandidate(original, cancellationToken);
+                    if (existing.QuarantinePositivelyAbsent)
+                    {
+                        if (existing.Discovered.Journal.Phase != PackageStoreDeletionPhase.Finalizing ||
+                            exactRow.Classification != PackageStoreRetentionClassification.Eligible)
+                            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                                "Only an Eligible Finalizing candidate may report a quarantine absent before this invocation.");
+                        Revalidate(cancellationToken);
+                        _candidateBinder.VerifyFinalizingQuarantineAbsent(existing.Discovered,
+                            RootHandle, Revalidate, cancellationToken);
+                        outcomeBuilder?.RecordAlreadyAbsent(exactRow, existing.Discovered.Journal.Phase);
+                        return PackageStoreDeletionExecutionStatus.AlreadyAbsent;
+                    }
+
+                    if (existing.OriginalAtOriginalName)
+                    {
+                        var original = BindEligibleCandidate(exactRow, cancellationToken);
+                        QuarantinePreparedCandidate(original, cancellationToken);
+                    }
+                    else
+                    {
+                        var quarantined = BindEligibleQuarantinedCandidate(exactRow, cancellationToken);
+                        if (quarantined.Journal.Phase == PackageStoreDeletionPhase.Prepared)
+                            AdvancePreparedQuarantine(quarantined, cancellationToken);
+                    }
                 }
                 else
                 {
-                    var quarantined = BindEligibleQuarantinedCandidate(exactRow, cancellationToken);
-                    if (quarantined.Journal.Phase == PackageStoreDeletionPhase.Prepared)
-                        AdvancePreparedQuarantine(quarantined, cancellationToken);
+                    var candidate = BindEligibleCandidate(exactRow, cancellationToken);
+                    PublishPreparedJournal(candidate, cancellationToken);
+                    QuarantinePreparedCandidate(candidate, cancellationToken);
                 }
-            }
-            else
-            {
-                var candidate = BindEligibleCandidate(exactRow, cancellationToken);
-                PublishPreparedJournal(candidate, cancellationToken);
-                QuarantinePreparedCandidate(candidate, cancellationToken);
-            }
 
-            var binding = _executionJoin.RequireQuarantined(exactRow.Install);
-            var quarantine = binding.QuarantinedCandidate
-                ?? throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
-                    "A current eligible deletion candidate has no exact quarantine observation.");
-            new PhysicalStoreDeletionExecutor(_files, _deletionExecutionCheckpoint).Execute(quarantine,
-                PublishDeletingPhase, PublishFinalizingPhase,
-                token => RequireBoundEligibleJournal(binding, quarantine, token),
-                cancellationToken);
-            return PackageStoreDeletionExecutionStatus.Deleted;
+                var binding = _executionJoin.RequireQuarantined(exactRow.Install);
+                var quarantine = binding.QuarantinedCandidate
+                    ?? throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                        "A current eligible deletion candidate has no exact quarantine observation.");
+                activeQuarantine = quarantine;
+                if (outcomeBuilder is not null)
+                {
+                    var initialObservation = quarantine.ObserveCurrentSubset(cancellationToken);
+                    outcomeBuilder.RecordObservation(exactRow, quarantine.Journal.Phase,
+                        initialObservation, invocationStart: true);
+                }
+
+                new PhysicalStoreDeletionExecutor(_files, _deletionExecutionCheckpoint).Execute(quarantine,
+                    PublishDeletingPhase, PublishFinalizingPhase,
+                    token => RequireBoundEligibleJournal(binding, quarantine, token),
+                    cancellationToken);
+                outcomeBuilder?.RecordDeleted(exactRow, quarantine.Manifest);
+                return PackageStoreDeletionExecutionStatus.Deleted;
+            }
+            catch (Exception candidateFailure)
+            {
+                if (activeQuarantine is null &&
+                    candidateFailure is not PackageStoreAdmissionException and not AggregateException)
+                {
+                    try
+                    {
+                        if (_executionJoin.TryFind(exactRow.Install, out var binding))
+                            activeQuarantine = binding.QuarantinedCandidate;
+                    }
+                    catch
+                    {
+                        // Preserve the candidate failure; a refused/expired join must not trigger a new read.
+                    }
+                }
+
+                if (outcomeBuilder is not null && activeQuarantine is not null)
+                {
+                    if (activeQuarantine.LastObservation is { } lastObservation)
+                        outcomeBuilder.RecordObservation(exactRow,
+                            activeQuarantine.LastObservationPhase ?? activeQuarantine.Journal.Phase, lastObservation);
+                    if (candidateFailure is not PackageStoreAdmissionException and not AggregateException)
+                        RecordFailureObservation(activeQuarantine, exactRow, outcomeBuilder);
+                }
+                throw;
+            }
+        }
+
+        private void RecordFailureObservation(
+            PackageStoreQuarantinedCandidate candidate,
+            PackageStoreRetentionPlanEntry row,
+            PackageStoreExecutionOutcomeBuilder outcomeBuilder)
+        {
+            try
+            {
+                // This bounded recovery read is permitted only while the same plan operation and owner are live.
+                Revalidate(CancellationToken.None);
+                if (candidate.QuarantineRootRemovalAttempted)
+                {
+                    if (candidate.LastObservation is { } last)
+                        outcomeBuilder.RecordObservation(row,
+                            candidate.LastObservationPhase ?? candidate.Journal.Phase, last);
+                    candidate.VerifyQuarantineRemoved(CancellationToken.None);
+                    if (candidate.QuarantineRootRemovalReturned)
+                        outcomeBuilder.RecordDeleted(row, candidate.Manifest);
+                    else
+                        outcomeBuilder.RecordRootAbsentWithoutReceipt(row);
+                    return;
+                }
+
+                var afterFailure = candidate.ObserveCurrentSubset(CancellationToken.None);
+                outcomeBuilder.RecordObservation(row,
+                    candidate.LastObservationPhase ?? candidate.Journal.Phase, afterFailure);
+            }
+            catch
+            {
+                // Preserve the primary refusal/failure and the last verified facts. No retry or owner bypass.
+            }
         }
 
         private void PublishDeletingPhase(

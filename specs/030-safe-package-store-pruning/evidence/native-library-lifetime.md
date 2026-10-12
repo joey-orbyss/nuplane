@@ -41,3 +41,27 @@ Windows, Linux and Intel macOS execution remain unqualified at this checkpoint.
 Existing HostIntegrated process-exit lifetime proofs remain separate; this new test
 does not make an actual native call through a HostIntegrated context. Full T086
 acceptance and public pruning activation remain open.
+
+## Windows environment-capture correction
+
+Published `fb51265` / Validate `38246344860` is terminal failure. Its Windows
+retained-Loading run passed 50 cases and failed this native-export case while
+draining redirected VsDevCmd environment output, before MSVC compilation or the
+lifetime assertions. The reason the pipe failed to reach EOF is not established.
+
+Worker `3bfae1ef9e22d4d3b4b7a13ce7b8066293ef7c08`, integrated as `46c9bef`,
+replaces that bootstrap capture with owned environment/setup-log files. The batch
+script is ASCII and receives the resolved script path through the Unicode child
+environment. `cmd /u` produces the environment file; strict UTF-16LE parsing checks
+encoding, duplicate names and nonempty PATH/INCLUDE/LIB before resolving absolute
+`cl.exe`. Actual exit-code checks, the 30-second command limit and five-second
+termination grace remain. The packaged C export and lifetime assertions are
+unchanged; missing compilers still fail this proof.
+
+Final local focused verification passes five cases without failures or skips on
+Darwin arm64: four parser rows plus the real owned-C export lifetime test.
+Independent source/result review confirms those exact rows and finds no bounded
+blocker. Artifacts are retained under
+`catalog-runtime-integration-v1/native-library-lifetime/windows-compiler/` in the
+program artifact directory. This local run does not execute Windows cmd, VsDevCmd
+or MSVC; fresh exact-head hosted Windows qualification remains required.
