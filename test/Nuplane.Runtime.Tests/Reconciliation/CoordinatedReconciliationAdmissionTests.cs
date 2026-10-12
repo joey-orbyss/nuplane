@@ -644,6 +644,49 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         Assert.Equal(0, source.SentinelReadCount);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task UnsupportedParticipant_IsRefusedBeforeSourceOrInjectedCallbackAndPreservesStoreEvidence(
+        bool replaceObserver)
+    {
+        using var fixture = await CompletedMembershipFixture.CreateAsync();
+        var source = new ScopedFileSource(fixture.SharedInstallPath, entered: null, release: null,
+            failAfterRead: false);
+        var observer = new UnscopedRecoveryObserver();
+        var dispatcher = new ObserverEventDispatcher([observer]);
+        var cleanup = new UnscopedCleanupProbe();
+        await using var provider = CreateProvider(fixture.PackageInstallRoot, fixture.StatePaths["first"], source,
+            dispatcherOverride: replaceObserver ? dispatcher : null,
+            cleanupServiceOverride: replaceObserver ? null : cleanup,
+            participantRoster: fixture.StatePaths.Select(static member =>
+                new Nuplane.Builder.PackageStoreMemberDeclaration("default", member.Key, member.Value)).ToArray());
+        Assert.True(provider.GetRequiredService<PackageStoreCompositionSnapshot>().IsParticipant);
+        Assert.Same(provider.GetRequiredService<ReconciliationService>(),
+            provider.GetRequiredService<IReconciliationService>());
+        var evidenceBefore = CaptureFixtureEvidence(fixture.Temp.Path);
+        var admission = provider.GetRequiredService<IPackageStoreAdmission>();
+        var expectedRefusal = replaceObserver ? "observer" : "cleanup";
+        var triggerId = replaceObserver ? "unsupported-observer" : "unsupported-cleanup";
+
+        var error = await Assert.ThrowsAsync<PackageStoreAdmissionException>(() =>
+            provider.GetRequiredService<IReconciliationService>().TriggerAsync(
+                ReconciliationTrigger.Manual(triggerId), CancellationToken.None));
+
+        Assert.Equal(PackageStoreAdmissionReason.UnsupportedParticipant, error.Reason);
+        Assert.Contains(expectedRefusal, error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, source.CallbackCount);
+        Assert.Equal(0, source.SentinelReadCount);
+        Assert.Equal(0, observer.CallbackCount);
+        Assert.Equal(0, cleanup.CallbackCount);
+        Assert.Equal(evidenceBefore.ToArray(), CaptureFixtureEvidence(fixture.Temp.Path).ToArray());
+
+        await using var reopened = await admission.AcquireConfiguredRootOperationAsync(
+            PackageStoreAdmissionKind.Reconciliation, CancellationToken.None);
+        Assert.Equal(PackageStoreAdmissionStatus.Enrolled, reopened.Status);
+        Assert.NotNull(reopened.Owner);
+    }
+
     [Fact]
     public async Task ScopedResolverReturningInstall_GraphReadFailureIsRecordedWithoutActiveTransition()
     {
@@ -868,7 +911,9 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         IReconciliationRetryPolicy? retryPolicyOverride = null,
         LockFileMode? lockFileMode = null,
         IDesiredPackageSource? additionalSource = null,
-        string? additionalPackageStoreRoot = null)
+        string? additionalPackageStoreRoot = null,
+        Nuplane.Store.Cleanup.IPackageCleanupService? cleanupServiceOverride = null,
+        IReadOnlyList<Nuplane.Builder.PackageStoreMemberDeclaration>? participantRoster = null)
     {
         var services = new ServiceCollection();
         services.AddLogging();
@@ -876,6 +921,8 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         {
             if (additionalPackageStoreRoot is not null)
                 builder.AddPackageStoreRoot("peer", additionalPackageStoreRoot);
+            if (participantRoster is not null)
+                builder.UseCoordinatedPackageStore(participantRoster, allClientsParticipate: true);
         });
         services.Configure<FeedResolutionOptions>(options => options.PackageInstallRoot = packageInstallRoot);
         services.Configure<StoreRegistryOptions>(options => options.StateFilePath = stateFilePath);
@@ -912,15 +959,37 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
             services.RemoveAll<IReconciliationRetryPolicy>();
             services.AddSingleton<IReconciliationRetryPolicy>(retryPolicyOverride);
         }
+        if (cleanupServiceOverride is not null)
+        {
+            services.RemoveAll<Nuplane.Store.Cleanup.IPackageCleanupService>();
+            services.AddSingleton<Nuplane.Store.Cleanup.IPackageCleanupService>(cleanupServiceOverride);
+        }
         if (dispatcherOverride is not null)
         {
             services.RemoveAll<IObserverEventDispatcher>();
             services.AddSingleton<IObserverEventDispatcher>(dispatcherOverride);
         }
-        // This component suite deliberately requests protected admission; ordinary AddNuplane
-        // composition no longer opts into the coordination protocol implicitly.
-        services.AddSingleton(ProtectedReconciliationServices.Create);
+        // Existing component cases inject the protected test composition. Cases with an explicit
+        // roster exercise AddNuplane's normal frozen participant registration instead.
+        if (participantRoster is null)
+            services.AddSingleton(ProtectedReconciliationServices.Create);
         return services.BuildServiceProvider();
+    }
+
+    private static IReadOnlyDictionary<string, string> CaptureFixtureEvidence(string rootPath)
+    {
+        var evidence = new SortedDictionary<string, string>(StringComparer.Ordinal);
+        foreach (var path in Directory.EnumerateFileSystemEntries(rootPath, "*", SearchOption.AllDirectories)
+                     .Order(StringComparer.Ordinal))
+        {
+            var relativePath = Path.GetRelativePath(rootPath, path).Replace('\\', '/');
+            var attributes = File.GetAttributes(path);
+            evidence[relativePath] = (attributes & FileAttributes.Directory) != 0
+                ? "directory"
+                : "file:" + Convert.ToBase64String(File.ReadAllBytes(path));
+        }
+
+        return evidence;
     }
 
     private static ServiceProvider CreateAdmissionProvider(
@@ -1239,6 +1308,24 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
             CancellationToken cancellationToken)
         {
             LastPackageVersions = packageVersions.ToArray();
+            return Task.FromResult<IReadOnlyList<CleanupDecision>>([]);
+        }
+    }
+
+    private sealed class UnscopedCleanupProbe : Nuplane.Store.Cleanup.IPackageCleanupService
+    {
+        private int _callbackCount;
+
+        internal int CallbackCount => Volatile.Read(ref _callbackCount);
+
+        public Task<IReadOnlyList<CleanupDecision>> ExecuteAutomaticAsync(
+            IReadOnlyList<Nuplane.Store.Cleanup.PackageVersionEntry> packageVersions,
+            Nuplane.Store.Cleanup.CleanupPolicyOptions options,
+            string correlationId,
+            bool triggerOnSuccessfulReconciliation,
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _callbackCount);
             return Task.FromResult<IReadOnlyList<CleanupDecision>>([]);
         }
     }
