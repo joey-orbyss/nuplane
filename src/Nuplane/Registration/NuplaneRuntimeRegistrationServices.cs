@@ -79,7 +79,19 @@ public static class NuplaneRuntimeRegistrationServices
                 composition.IsParticipant ? sp.GetRequiredService<IPackageStoreAdmission>() : null,
                 coordinatedParticipantMode: composition.IsParticipant);
         });
-        services.AddSingleton<ActivePackageCatalog>();
+        services.AddSingleton<ActivePackageCatalog>(sp =>
+        {
+            var composition = sp.GetRequiredService<PackageStoreCompositionSnapshot>();
+            var storeRegistry = sp.GetRequiredService<IStoreRegistry>();
+            var logger = sp.GetRequiredService<IReconciliationLogger>();
+            var metrics = sp.GetRequiredService<ReconciliationMetrics>();
+            var admission = composition.IsParticipant
+                ? RequireValidatedParticipantAdmission(sp, composition)
+                : null;
+            return composition.IsParticipant
+                ? new ActivePackageCatalog(storeRegistry, logger, metrics, admission)
+                : new ActivePackageCatalog(storeRegistry, logger, metrics);
+        });
         services.AddSingleton<IActivePackageCatalog>(sp => sp.GetRequiredService<ActivePackageCatalog>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IOperationalStateContributor, PackageCatalogOperationalStateContributor>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IOperationalStateContributor, StartupRecoveryOperationalStateContributor>());
@@ -87,20 +99,13 @@ public static class NuplaneRuntimeRegistrationServices
         {
             var composition = sp.GetRequiredService<PackageStoreCompositionSnapshot>();
             var loadingObserver = sp.GetService<ILeasedPackageGraphLoadingObserver>();
-            var admission = composition.IsParticipant ? sp.GetRequiredService<IPackageStoreAdmission>() : null;
             var packageResolver = sp.GetRequiredService<IPackageResolver>();
             var capabilityContributor = sp.GetRequiredService<CapabilityDesiredStateContributor>();
+            var admission = composition.IsParticipant
+                ? RequireValidatedParticipantAdmission(sp, composition)
+                : null;
             if (composition.IsParticipant)
             {
-                PackageStoreCompositionValidator.RequireSupportedParticipantSelection(
-                    composition,
-                    sp.GetRequiredService<IPhysicalStoreFileSystem>(),
-                    sp.GetRequiredService<IStoreRegistry>(),
-                    sp.GetRequiredService<IStoreStateSerializer>(),
-                    admission!,
-                    sp.GetRequiredService<Nuplane.Store.Coordination.ITrustedPackageStoreRootCatalog>(),
-                    sp.GetRequiredService<Nuplane.Store.Coordination.ITrustedPackageStoreMemberDeclarationCatalog>(),
-                    sp.GetRequiredService<IOptions<FeedResolutionOptions>>().Value);
                 PackageStoreCompositionValidator.RequireSupportedParticipantExecutionRoute(
                     composition,
                     packageResolver,
@@ -138,6 +143,23 @@ public static class NuplaneRuntimeRegistrationServices
             composition);
         });
         services.AddSingleton<IReconciliationService>(sp => sp.GetRequiredService<ReconciliationService>());
+    }
+
+    private static IPackageStoreAdmission RequireValidatedParticipantAdmission(
+        IServiceProvider services,
+        PackageStoreCompositionSnapshot composition)
+    {
+        var admission = services.GetRequiredService<IPackageStoreAdmission>();
+        PackageStoreCompositionValidator.RequireSupportedParticipantSelection(
+            composition,
+            services.GetRequiredService<IPhysicalStoreFileSystem>(),
+            services.GetRequiredService<IStoreRegistry>(),
+            services.GetRequiredService<IStoreStateSerializer>(),
+            admission,
+            services.GetRequiredService<ITrustedPackageStoreRootCatalog>(),
+            services.GetRequiredService<ITrustedPackageStoreMemberDeclarationCatalog>(),
+            services.GetRequiredService<IOptions<FeedResolutionOptions>>().Value);
+        return admission;
     }
 
     private static void AddTriggerIngressServices(this IServiceCollection services)

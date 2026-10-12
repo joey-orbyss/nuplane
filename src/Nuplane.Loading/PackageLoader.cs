@@ -116,6 +116,24 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
         return BuildScanCandidatesCore(packageId, installPath);
     }
 
+    internal IReadOnlyList<AssemblyScanCandidate> BuildScanCandidates(
+        ActivePackage package,
+        PackageLoadSession session)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+        ArgumentNullException.ThrowIfNull(session);
+        if (!_requiresGraphUseLease)
+            return BuildScanCandidates(package.PackageId, package.InstallPath);
+
+        // Keep the exact session-to-context join stable until BuildScanCandidates has acquired the
+        // counted lease read pin and finished enumeration. Context replacement uses this same lock.
+        lock (_loadContextSync)
+        {
+            var lease = GetGraphUseLeaseUnderLock(package, session);
+            return BuildScanCandidates(package.PackageId, package.InstallPath, lease);
+        }
+    }
+
     private IReadOnlyList<AssemblyScanCandidate> BuildScanCandidatesCore(string packageId, string installPath)
     {
         var selection = ResolveAssemblySelection(installPath, packageId, _hostTargetFrameworkOverride);
@@ -1672,6 +1690,55 @@ internal sealed class PackageLoader : IPackageLoader, IScopedPackageLoader
         var lease = (context as IGraphUseLeaseBoundLoadContext)?.GraphUseLease;
         if (lease is null)
             RefuseUnscopedRead();
+        return lease;
+    }
+
+    private PackageGraphUseLease GetGraphUseLeaseUnderLock(ActivePackage package, PackageLoadSession session)
+    {
+        var key = BuildKey(package.PackageId, package.Version);
+        if (!_sessions.TryGetValue(key, out var currentSession) || !ReferenceEquals(currentSession, session) ||
+            !session.IsLoaded)
+        {
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.ExpiredScope,
+                "The active package no longer has its exact current load session.");
+        }
+
+        if (!string.Equals(session.PackageId, package.PackageId, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(session.Version, package.Version, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(session.ActiveInstallPath, package.InstallPath, StringComparison.Ordinal))
+        {
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.StateMismatch,
+                "The active package does not match its exact loaded package session.");
+        }
+
+        if (!_contexts.TryGetValue(key, out var context) ||
+            !_loadedPackageProjections.TryGetValue(key, out var projection))
+        {
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.ExpiredScope,
+                "The active package's load context or native install projection has expired.");
+        }
+
+        if (!string.Equals(projection.PackageKey, key, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(projection.InstallPath, package.InstallPath, StringComparison.Ordinal) ||
+            projection.NativeIdentity is null)
+        {
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.StateMismatch,
+                "The active package does not match its captured native install projection.",
+                projection.NativeIdentity?.Root);
+        }
+
+        var lease = GetGraphUseLease(context)
+            ?? throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                "The current participant load context has no graph-use lease.");
+        var identity = lease.GetInstallIdentityForExactPath(session.ActiveInstallPath);
+        if (identity != projection.NativeIdentity ||
+            !string.Equals(identity.PackageId, package.PackageId, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(identity.Version, package.Version, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.StateMismatch,
+                "The active package and captured graph-use identity do not match.", identity.Root);
+        }
+
         return lease;
     }
 
