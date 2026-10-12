@@ -53,7 +53,10 @@ internal static partial class Program
                 "--participant-graph-use-identity-mismatch")
                 return await RunGraphUseIdleAsync(args[1], args[0]).ConfigureAwait(false);
 
-            await WriteDiagnosticAsync("Expected --gate <name>, --membership-publish <request.json>, --membership-recover <request.json>, --membership-initialize <request.json>, --membership-bind <request.json>, --graph-use-idle <request.json>, --participant-graph-use-idle <request.json>, --participant-graph-use-reordered-roster <request.json>, --participant-graph-use-unscoped-gate <request.json>, --participant-graph-use-scoped-gate <request.json>, or --participant-graph-use-identity-mismatch <request.json>.")
+            if (args.Length == 2 && args[0] == "--package-store-execute")
+                return await RunPackageStoreExecutionAsync(args[1]).ConfigureAwait(false);
+
+            await WriteDiagnosticAsync("Expected --gate <name>, --membership-publish <request.json>, --membership-recover <request.json>, --membership-initialize <request.json>, --membership-bind <request.json>, --graph-use-idle <request.json>, --participant-graph-use-idle <request.json>, --participant-graph-use-reordered-roster <request.json>, --participant-graph-use-unscoped-gate <request.json>, --participant-graph-use-scoped-gate <request.json>, --participant-graph-use-identity-mismatch <request.json>, or --package-store-execute <request.json>.")
                 .ConfigureAwait(false);
             return InvalidProtocolExitCode;
         }

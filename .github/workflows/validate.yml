@@ -797,6 +797,19 @@ jobs:
           python3 build/verify-required-trx.py "$RUNNER_TEMP/retained-loading/retained-loading.trx" \
             build/test-cases/retained-loading.json
 
+      - name: Qualify actual process partial deletion and explicit recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet test test/Nuplane.Integration.Tests/Nuplane.Integration.Tests.csproj \
+            --configuration Release --framework net10.0 \
+            --filter "FullyQualifiedName~PackageStorePartialExecutionRecoveryTests" \
+            --blame-hang-timeout 3m \
+            --logger "trx;LogFileName=partial-execution-recovery.trx" \
+            --results-directory "$RUNNER_TEMP/partial-execution-recovery"
+          python3 build/verify-required-trx.py "$RUNNER_TEMP/partial-execution-recovery/partial-execution-recovery.trx" \
+            build/test-cases/partial-execution-recovery.json
+
       - name: Qualify compatible package-content directory and archive reads
         shell: bash
         run: |
@@ -1364,6 +1377,15 @@ jobs:
           if ($alias[0].outcome -eq 'NotExecuted') {
             Write-Host '8.3 aliases are unavailable on this test volume; that scenario remains unqualified.'
           }
+
+      - name: Preserve retained-loading failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: retained-loading-${{ matrix.os }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/retained-loading/
+          if-no-files-found: ignore
+          retention-days: 7
 
   build-test:
     needs:

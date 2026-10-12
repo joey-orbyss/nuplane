@@ -77,6 +77,10 @@ internal sealed class PackageStoreParticipantProcess : IAsyncDisposable
         string operationId, string requestPath, CancellationToken cancellationToken)
         => StartOperationAsync("--participant-graph-use-identity-mismatch", operationId, requestPath, cancellationToken);
 
+    public static Task<PackageStoreParticipantProcess> StartExecutionAsync(
+        string operationId, string requestPath, CancellationToken cancellationToken)
+        => StartOperationAsync("--package-store-execute", operationId, requestPath, cancellationToken);
+
     private static Task<PackageStoreParticipantProcess> StartOperationAsync(
         string command, string operationId, string requestPath, CancellationToken cancellationToken)
     {

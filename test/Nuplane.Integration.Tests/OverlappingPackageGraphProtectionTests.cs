@@ -192,7 +192,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 .ToHashSet(StringComparer.OrdinalIgnoreCase));
     }
 
-    private sealed class GraphUseFixture : IDisposable
+    internal sealed class GraphUseFixture : IDisposable
     {
         private readonly PackageStoreFixture _fixture = new();
         private readonly Dictionary<string, PhysicalStoreDirectoryHandle> _stateParents = new(StringComparer.Ordinal);
@@ -217,6 +217,9 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         internal ResolvedGraphFixture? IndependentGraph { get; private set; }
         internal ResolvedGraphFixture? FreshMemberAGraph { get; private set; }
         internal Dictionary<string, ResolvedGraphFixture> Graphs { get; } = new(StringComparer.Ordinal);
+
+        internal ResolvedPackage CreateAdditionalEligibleInstall(string packageId, string version)
+            => CreateInstall(packageId, version, dependencyId: null, sourceName: "execution-test");
 
         internal static async Task<GraphUseFixture> CreateAsync(
             PackageLoadMode packageLoadMode = PackageLoadMode.Collectible,
@@ -378,6 +381,12 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                     ProtectionDigest.Protection(candidate), closure, closure, [], false)
             };
         }
+
+        internal Task<RootMembershipRecord> PublishProtectedStateAsync(
+            string memberId,
+            StoreStateRecord state,
+            CancellationToken cancellationToken = default)
+            => Registry.PublishStateAsync(Root, _stateParents, memberId, state, cancellationToken);
 
         internal async Task WaitForGraphUseReleaseAsync(IPackageStoreAdmission admission)
         {
@@ -554,7 +563,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         private const long RootMembershipBindingEpoch = 37;
     }
 
-    private sealed record ResolvedGraphFixture(
+    internal sealed record ResolvedGraphFixture(
         ResolvedPackageGraph Graph,
         IReadOnlyList<ResolvedPackage> Packages,
         IReadOnlyList<PackageRequest> Requests)
@@ -565,7 +574,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             => new(Graph, packages ?? Packages, Requests, owner);
     }
 
-    private sealed class MetadataReadBlockingFileSystem(IPhysicalStoreFileSystem inner) :
+    internal sealed class MetadataReadBlockingFileSystem(IPhysicalStoreFileSystem inner) :
         IPhysicalStoreFileSystem,
         IPhysicalStoreNameFileSystem,
         IPhysicalStorePublicationFileSystem,
@@ -809,7 +818,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         }
     }
 
-    private sealed class MetadataReadBarrier
+    internal sealed class MetadataReadBarrier
     {
         private readonly TaskCompletionSource<bool> _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly TaskCompletionSource<bool> _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
