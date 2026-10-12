@@ -26,6 +26,11 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
 
         Assert.Equal(new[] { "Root.First", "Shared.Dependency" },
             snapshot.Packages.Select(static package => package.PackageId).ToArray());
+        var expectedPaths = selected.States["first"].ActivePackageDescriptorsByIdNormalized.Values
+            .Select(static package => package.InstallPath).OrderBy(static path => path, StringComparer.Ordinal);
+        Assert.Equal(expectedPaths,
+            snapshot.Packages.Select(static package => package.InstallPath)
+                .OrderBy(static path => path, StringComparer.Ordinal));
         AssertFixtureEvidenceEqual(before, CaptureFixtureEvidence(selected, peer));
     }
 

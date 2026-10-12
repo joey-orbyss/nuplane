@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -110,19 +111,34 @@ public sealed class PackageStoreCompositionLoadingTests : IDisposable
         var package = new ResolvedPackage("Nuplane.Loading.Tests.Fixtures", "1.0.0", "feed", install.FullName,
             DateTimeOffset.UnixEpoch);
         var loader = provider.GetRequiredService<PackageLoader>();
+        WeakReference? unloadedContext = null;
         try
         {
             var result = await loader.EnsureGraphLoadedAsync([[package]], [], CancellationToken.None);
 
             Assert.Empty(result.FailedByPackageId);
             Assert.Single(result.Loaded);
-            Assert.Contains(provider.GetRequiredService<PackageAssemblyProvider>().GetAssemblies(package.Id, package.Version),
-                assembly => assembly.GetName().Name == package.Id);
+            unloadedContext = VerifyOrdinaryAssemblyQuery(provider, loader, package);
         }
         finally
         {
             loader.UnloadContextsNotActive(new Dictionary<string, string>());
+            if (unloadedContext is not null)
+            {
+                CollectibleContextTestLifetime.CollectUntilGone(unloadedContext);
+                Assert.False(unloadedContext.IsAlive, "The ordinary collectible context must release before fixture deletion.");
+            }
         }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference VerifyOrdinaryAssemblyQuery(
+        ServiceProvider provider, PackageLoader loader, ResolvedPackage package)
+    {
+        Assert.Contains(provider.GetRequiredService<PackageAssemblyProvider>().GetAssemblies(package.Id, package.Version),
+            assembly => assembly.GetName().Name == package.Id);
+        Assert.True(loader.TryGetContext(package.Id, package.Version, out var handle));
+        return new WeakReference(handle!.Context, trackResurrection: true);
     }
 
     private ServiceProvider CreateProvider(bool participant)
