@@ -65,6 +65,32 @@ public sealed class PackageDependencyGraphResolver
         _hostPackageVersionsOverride = hostPackageVersions;
     }
 
+    /// <summary>Creates a callback-only resolver whose graph inputs come from a caller-owned native reader.</summary>
+    /// <remarks>This instance is for exact offline reconstruction and must use the internal callback overload.</remarks>
+    internal static PackageDependencyGraphResolver CreateOffline(IPackageGraphFileReader packageFiles)
+    {
+        ArgumentNullException.ThrowIfNull(packageFiles);
+        return new PackageDependencyGraphResolver(
+            new OfflinePackageResolver(),
+            new OfflineRetryPolicy(),
+            hostProvidedPackagesOptions: null,
+            // Keep offline reconstruction independent of the current process's deps-file paths.
+            hostPackageVersions: new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            packageFiles);
+    }
+
+    private sealed class OfflinePackageResolver : IPackageResolver
+    {
+        public Task<ResolvedPackage> ResolveAsync(PackageRequest request, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("An offline graph resolver cannot acquire packages.");
+    }
+
+    private sealed class OfflineRetryPolicy : IReconciliationRetryPolicy
+    {
+        public Task<T> ExecuteAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("An offline graph resolver cannot invoke feed resolution.");
+    }
+
     private IReadOnlyDictionary<string, string> HostPackageVersionsForResolution =>
         _hostPackageVersionsOverride ?? HostPackageVersionReader.Current.Value.Versions;
 

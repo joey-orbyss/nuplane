@@ -1136,6 +1136,76 @@ internal sealed partial class RootMembershipRegistry
             }
         }
 
+        /// <summary>Uses the held root for one internal graph-input read under bound Incomplete ownership.</summary>
+        /// <remarks>
+        /// This is deliberately narrower than Complete root access: it exposes no general store operation and
+        /// performs the same exact locator/ledger replay on both callback success and failure. The caller must
+        /// not reenter this context from the callback; the callback lifetime remains inside the serialized gate.
+        /// </remarks>
+        internal async Task<TResult> WithBoundIncompleteRootAsync<TResult>(
+            string memberId,
+            PhysicalRootIdentity expectedRoot,
+            long expectedEnrollmentEpoch,
+            Func<IPhysicalStoreFileSystem, PhysicalStoreDirectoryHandle, StoreStateRecord?, CancellationToken, Task<TResult>> callback,
+            CancellationToken cancellationToken)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(memberId);
+            ArgumentNullException.ThrowIfNull(expectedRoot);
+            ArgumentNullException.ThrowIfNull(callback);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_policy != LocatorReplayBindingPolicy.BoundIncomplete)
+                throw Refused("Held-root graph reconstruction requires exact bound Incomplete member ownership.");
+
+            var operationGateAcquired = false;
+            try
+            {
+                await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                operationGateAcquired = true;
+                EnsureValidMap();
+                var ledger = _getLedger();
+                RequireBoundIncompleteLocatorLedger(ledger, expectedRoot, expectedEnrollmentEpoch);
+                if (ledger.PendingGroupPublicationV2 is not null)
+                    throw Refused("A pending group publication must be recovered before bound Incomplete graph reconstruction.");
+                var rootInfo = _files.InspectHandle(_root);
+                if (rootInfo.Kind != PhysicalStoreEntryKind.Directory || rootInfo.Identity != expectedRoot.HandleIdentity)
+                    throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.RootMismatch,
+                        "The retained Incomplete package-store root changed identity.", expectedRoot);
+
+                TResult result;
+                try
+                {
+                    var member = ledger.Members.SingleOrDefault(candidate =>
+                        string.Equals(candidate.MemberId, memberId, StringComparison.Ordinal))
+                        ?? throw Refused("The requested legacy graph member is outside the exact bound Incomplete union.");
+                    if (member.Binding is not RootMemberRecord.ExistingUnprotectedBinding binding ||
+                        !binding.ProtectionMetadataAbsent)
+                        throw Refused("Legacy graph reconstruction requires one exact existing unprotected member binding.");
+                    var location = _locations.TryGetValue(memberId, out var found)
+                        ? found
+                        : throw Refused("The requested legacy graph member is outside the exact bound Incomplete union.");
+                    if (location.Slot != binding.StateSlot || location.ExistingFileIdentity != binding.ObservedStateFileIdentity)
+                        throw Refused("The requested legacy graph member's locked state slot differs from its exact unprotected binding.");
+                    var state = await _readState(memberId, location.Parent, cancellationToken).ConfigureAwait(false);
+                    EnsureValidMap();
+                    result = await callback(_files, _root, state, cancellationToken).ConfigureAwait(false);
+                }
+                catch
+                {
+                    EnsureValidMap();
+                    throw;
+                }
+
+                EnsureValidMap();
+                cancellationToken.ThrowIfCancellationRequested();
+                return result;
+            }
+            finally
+            {
+                if (operationGateAcquired)
+                    _operationGate.Release();
+            }
+        }
+
         /// <summary>Reads and verifies one member state while the complete scoped location map remains locked.</summary>
         internal async Task<StoreStateRecord?> ReadMemberStateAsync(string memberId, CancellationToken cancellationToken)
         {

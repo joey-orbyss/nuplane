@@ -9,11 +9,32 @@ using Nuplane.Store.Coordination.PhysicalFiles;
 namespace Nuplane.Reconciliation.PackageFiles;
 
 /// <summary>Copies graph inputs through no-follow native handles; no filesystem authority escapes the read.</summary>
-internal sealed class NativePackageGraphFileReader(PackageStoreOperationBorrow? borrow = null) : IPackageGraphFileReader
+internal sealed class NativePackageGraphFileReader : IPackageGraphFileReader
 {
     internal const int MaximumEntries = 16384;
     internal const int MaximumDepth = 64;
     internal const int MaximumNuspecBytes = 4 * 1024 * 1024;
+
+    private readonly PackageStoreOperationBorrow? _borrow;
+    private readonly IPhysicalStoreFileSystem? _boundFiles;
+    private readonly PhysicalRootIdentity? _boundRoot;
+    private readonly IReadOnlyDictionary<string, PackageInstallIdentityReader.PackageInstallIdentityObservation>? _boundInstalls;
+    private readonly List<Action> _boundReadReplays = [];
+
+    internal NativePackageGraphFileReader(PackageStoreOperationBorrow? borrow = null) => _borrow = borrow;
+
+    /// <summary>Reads only exact installs retained by the internal bound-Incomplete reconstruction owner.</summary>
+    internal NativePackageGraphFileReader(
+        IPhysicalStoreFileSystem files,
+        PhysicalRootIdentity expectedRoot,
+        IReadOnlyDictionary<string, PackageInstallIdentityReader.PackageInstallIdentityObservation> installs)
+    {
+        _boundFiles = files ?? throw new ArgumentNullException(nameof(files));
+        _boundRoot = expectedRoot ?? throw new ArgumentNullException(nameof(expectedRoot));
+        _boundInstalls = installs ?? throw new ArgumentNullException(nameof(installs));
+        if (installs.Count == 0 || installs.Any(static pair => string.IsNullOrWhiteSpace(pair.Key) || pair.Value is null))
+            throw new ArgumentException("A held-root graph reader requires exact retained install observations.", nameof(installs));
+    }
 
     public InstalledPackageGraphFiles ReadInstallFiles(ResolvedPackage package)
     {
@@ -21,9 +42,29 @@ internal sealed class NativePackageGraphFileReader(PackageStoreOperationBorrow? 
         if (string.IsNullOrWhiteSpace(package.InstallPath))
             return InstalledPackageGraphFiles.Empty;
 
-        if (borrow is not null)
-            return PackageStoreOperationAccess.WithValidatedPackageDirectory(borrow, package.InstallPath,
-                (files, directory) => ReadDirectory(files, directory, borrow.Root));
+        if (_boundInstalls is not null)
+        {
+            if (!_boundInstalls.TryGetValue(package.InstallPath, out var install))
+                throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Offline graph reconstruction requested an install outside its exact active candidate set.", _boundRoot);
+            install.Revalidate();
+            var files = _boundFiles!;
+            var info = files.InspectHandle(install.InstallDirectory);
+            if (info.Kind != PhysicalStoreEntryKind.Directory ||
+                !string.Equals(info.Identity.Provider, _boundRoot!.HandleIdentity.Provider, StringComparison.Ordinal) ||
+                !string.Equals(info.Identity.VolumeOrDeviceId, _boundRoot.HandleIdentity.VolumeOrDeviceId, StringComparison.Ordinal))
+            {
+                throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnknownAuthority,
+                    "The retained graph-input directory is not a same-volume child of the bound Incomplete root.", _boundRoot);
+            }
+            var graphFiles = ReadDirectory(files, install.InstallDirectory, _boundRoot, _boundReadReplays);
+            install.Revalidate();
+            return graphFiles;
+        }
+
+        if (_borrow is not null)
+            return PackageStoreOperationAccess.WithValidatedPackageDirectory(_borrow, package.InstallPath,
+                (files, directory) => ReadDirectory(files, directory, _borrow.Root));
 
         return PackageStoreRuntimeAdmission.WithUnenrolledPackageDirectory(package.InstallPath,
             (files, status, directory) => status == UnenrolledPackageDirectoryStatus.Missing
@@ -31,8 +72,24 @@ internal sealed class NativePackageGraphFileReader(PackageStoreOperationBorrow? 
                 : ReadDirectory(files, directory!, root: null));
     }
 
+    /// <summary>Replays every exact install path and graph-input tree retained during offline reconstruction.</summary>
+    internal void RevalidateBoundReads()
+    {
+        if (_boundInstalls is null)
+            throw new InvalidOperationException("Only a held-root graph reader has retained offline observations.");
+        foreach (var install in _boundInstalls.Values)
+            install.Revalidate();
+        foreach (var replay in _boundReadReplays)
+            replay();
+        foreach (var install in _boundInstalls.Values)
+            install.Revalidate();
+    }
+
     private static InstalledPackageGraphFiles ReadDirectory(
-        IPhysicalStoreFileSystem files, PhysicalStoreDirectoryHandle directory, PhysicalRootIdentity? root)
+        IPhysicalStoreFileSystem files,
+        PhysicalStoreDirectoryHandle directory,
+        PhysicalRootIdentity? root,
+        ICollection<Action>? retainedReplays = null)
     {
         var enumeration = files as IPhysicalStoreDirectoryEnumerationFileSystem
             ?? throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedFilesystem,
@@ -47,6 +104,7 @@ internal sealed class NativePackageGraphFileReader(PackageStoreOperationBorrow? 
         var snapshots = new Dictionary<string, DirectorySnapshot>(StringComparer.Ordinal);
         Walk(directory, relative: "", depth: 0);
         Replay(directory, relative: "");
+        retainedReplays?.Add(() => Replay(directory, relative: ""));
         return new InstalledPackageGraphFiles(nuspec,
             Array.AsReadOnly(assets.OrderBy(static asset => asset, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(static asset => asset, StringComparer.Ordinal).ToArray()));
