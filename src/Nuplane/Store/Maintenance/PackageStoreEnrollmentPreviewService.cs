@@ -75,8 +75,16 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
             if (candidate is null)
             {
                 rootResolution.Revalidate();
-                return await PreviewUnenrolledAsync(authority, configuredRoot, label, selectedDeclarations,
-                    rootResolution.RootIdentity, cancellationToken).ConfigureAwait(false);
+                // An unenrolled root has no authority identity. Report only the held directory's
+                // observed identity for an explicit future cutover confirmation, never admission.
+                var observedRoot = !rootResolution.IsProspectiveMissingSuffix &&
+                                   rootResolution.Target is PhysicalStoreDirectoryHandle directory
+                    ? new PhysicalRootIdentity(_files.InspectHandle(directory).Identity)
+                    : null;
+                var preview = await PreviewUnenrolledAsync(authority, configuredRoot, label, selectedDeclarations,
+                    observedRoot, cancellationToken).ConfigureAwait(false);
+                rootResolution.Revalidate();
+                return preview;
             }
 
             if (candidate.Status == RootMembershipStatus.Complete && candidate.PendingStateCommit is null &&
@@ -163,7 +171,7 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
         var mismatch = CompareDeclarations(declarations, candidate);
         if (mismatch is not null)
             return Snapshot(label, candidate.RootIdentity, MapMembership(candidate.Status),
-                candidate.LedgerDigest, [], mismatch);
+                candidate.LedgerDigest, [], mismatch, candidate.EnrollmentEpoch);
 
         var resolved = ResolveDeclarations(authority, declarations, cancellationToken);
         Exception? operationFailure = null;
@@ -171,7 +179,7 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
         {
             if (resolved.Diagnostic is not null)
                 return Snapshot(label, candidate.RootIdentity, MapMembership(candidate.Status),
-                    candidate.LedgerDigest, [], resolved.Diagnostic);
+                    candidate.LedgerDigest, [], resolved.Diagnostic, candidate.EnrollmentEpoch);
             var members = new List<PackageStoreEnrollmentPreviewMember>(declarations.Count);
             var pending = candidate.PendingStateCommit is not null || candidate.PendingGroupPublicationV2 is not null;
             for (var index = 0; index < declarations.Count; index++)
@@ -214,7 +222,8 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
             }
             return new PackageStoreEnrollmentPreviewSnapshot(label, candidate.RootIdentity,
                 MapMembership(candidate.Status), candidate.LedgerDigest, true, members,
-                pending ? ["Pending local or group publication requires recovery review; no next-slot binding was inferred."] : []);
+                pending ? ["Pending local or group publication requires recovery review; no next-slot binding was inferred."] : [],
+                candidate.EnrollmentEpoch);
         }
         catch (Exception exception)
         {
@@ -356,7 +365,7 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
 
         return new PackageStoreEnrollmentPreviewSnapshot(label, rootIdentity,
             MapMembership(candidate.Status), ledgerDigest, true, members,
-            failure is null ? [] : [failure]);
+            failure is null ? [] : [failure], candidate.EnrollmentEpoch);
     }
 
     private (ResolvedStatePayloadReferent[] Referents, string? Diagnostic) ResolveDeclarations(
@@ -612,8 +621,9 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
         PackageStoreEnrollmentPreviewMembership? membership,
         string? ledgerDigest,
         IEnumerable<PackageStoreEnrollmentPreviewMember> members,
-        string diagnostic)
-        => new(label, root, membership, ledgerDigest, true, members, [diagnostic]);
+        string diagnostic,
+        long? enrollmentEpoch = null)
+        => new(label, root, membership, ledgerDigest, true, members, [diagnostic], enrollmentEpoch);
 
     private static PackageStoreEnrollmentPreviewObservation Map(NativeStoreStatePayloadStatus status)
         => status switch

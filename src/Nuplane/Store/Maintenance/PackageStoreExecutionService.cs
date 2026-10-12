@@ -10,7 +10,7 @@ namespace Nuplane.Store.Maintenance;
 /// This internal boundary accepts explicit epoch and retention inputs, never a preview as authority.
 /// Candidate work must independently bind and revalidate native install evidence before any mutation.
 /// Verified Prepared and Quarantined records participate in fresh planning and bounded quarantine recovery.
-/// Recursive deletion remains internal to this fresh operation and has no public caller.
+/// Optional Admin execution delegates to this boundary; native deletion authority remains internal.
 /// </remarks>
 internal sealed class PackageStoreExecutionService(
     RootMembershipRegistry registry,
@@ -26,9 +26,10 @@ internal sealed class PackageStoreExecutionService(
     internal async Task<TResult> PlanAndRunAsync<TResult>(
         string? rootLabel,
         long expectedEnrollmentEpoch,
-        int keepNewestInactiveVersionsPerPackage,
+        int? keepNewestInactiveVersionsPerPackage,
         Func<Context, CancellationToken, Task<TResult>> candidateWork,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        PhysicalRootIdentity? expectedRootIdentity = null)
     {
         ArgumentNullException.ThrowIfNull(candidateWork);
         if (expectedEnrollmentEpoch <= 0)
@@ -45,6 +46,9 @@ internal sealed class PackageStoreExecutionService(
             if (selectedRoot.EnrollmentEpoch != expectedEnrollmentEpoch)
                 throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.RootMismatch,
                     "Execution confirmation does not match the current enrollment epoch.", selectedRoot.RootIdentity);
+            if (expectedRootIdentity is not null && selectedRoot.RootIdentity != expectedRootIdentity)
+                throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.RootMismatch,
+                    "Execution confirmation does not match the configured physical root.", selectedRoot.RootIdentity);
 
             var journalStore = _journalStore.Value;
             var rootHandle = selectedRoot.PrimaryResolution.AuthorityRoot
@@ -107,8 +111,9 @@ internal sealed class PackageStoreExecutionService(
     internal async Task<PackageStoreExecutionOutcome> ExecuteEligibleCandidatesAsync(
         string? rootLabel,
         long expectedEnrollmentEpoch,
-        int keepNewestInactiveVersionsPerPackage,
-        CancellationToken cancellationToken = default)
+        int? keepNewestInactiveVersionsPerPackage,
+        CancellationToken cancellationToken = default,
+        PhysicalRootIdentity? expectedRootIdentity = null)
     {
         var outcomes = new PackageStoreExecutionOutcomeBuilder();
         try
@@ -136,7 +141,7 @@ internal sealed class PackageStoreExecutionService(
                     }
 
                     return Task.FromResult(true);
-                }, cancellationToken).ConfigureAwait(false);
+                }, cancellationToken, expectedRootIdentity).ConfigureAwait(false);
         }
         catch (Exception failure)
         {

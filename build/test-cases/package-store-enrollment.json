@@ -1,0 +1,5 @@
+[
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentServiceTests.EnrollAsync_InitialAbsentLedgerUsesHeldRootIdentityAndPublishesCompleteEmptyState",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentServiceTests.EnrollAsync_NonemptyLegacyStateWithoutVerifiedClosureStaysIncomplete",
+  "Nuplane.Store.Tests.Coordination.PackageStoreEnrollmentServiceTests.RecoverEnrollmentAsync_ExactIncompleteBoundRosterCompletesUnderNativeOwner"
+]

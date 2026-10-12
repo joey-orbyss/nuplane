@@ -184,7 +184,8 @@ internal sealed class PackageStoreEnrollmentPreviewSnapshot
         string? ledgerDigest,
         bool isNonQuiescentObservation,
         IEnumerable<PackageStoreEnrollmentPreviewMember> members,
-        IEnumerable<string>? diagnostics = null)
+        IEnumerable<string>? diagnostics = null,
+        long? enrollmentEpoch = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootLabel);
         ArgumentNullException.ThrowIfNull(members);
@@ -192,6 +193,9 @@ internal sealed class PackageStoreEnrollmentPreviewSnapshot
         RootIdentity = rootIdentity is null ? null : new PhysicalRootIdentity(new PhysicalFileIdentity(
             rootIdentity.HandleIdentity.Provider, rootIdentity.HandleIdentity.VolumeOrDeviceId, rootIdentity.HandleIdentity.FileId));
         Membership = membership;
+        if (enrollmentEpoch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(enrollmentEpoch));
+        EnrollmentEpoch = enrollmentEpoch;
         LedgerDigest = ledgerDigest;
         IsNonQuiescentObservation = isNonQuiescentObservation;
         Members = Array.AsReadOnly(members.ToArray());
@@ -201,6 +205,7 @@ internal sealed class PackageStoreEnrollmentPreviewSnapshot
     internal string RootLabel { get; }
     internal PhysicalRootIdentity? RootIdentity { get; }
     internal PackageStoreEnrollmentPreviewMembership? Membership { get; }
+    internal long? EnrollmentEpoch { get; }
     internal string? LedgerDigest { get; }
     internal bool IsNonQuiescentObservation { get; }
     internal IReadOnlyList<PackageStoreEnrollmentPreviewMember> Members { get; }
