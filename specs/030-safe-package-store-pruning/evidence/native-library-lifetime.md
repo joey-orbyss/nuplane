@@ -14,7 +14,7 @@ LKG graphs before the **first** invocation of the packaged native export.
 
 The export returns its input-dependent expected result. The retained Type still
 belongs to the exact old context; its whole-graph use remains Live and its sentinel
-cannot be acquired. Clearing that Type permits actual collectible weak death,
+cannot be acquired. Ending the helper scope containing that Type permits actual collectible weak death,
 followed by direct acquisition of the same native sentinel before maintenance
 inspection. The subsequent inspection reports Stale; state, use-record bytes and
 install evidence remain unchanged.
@@ -65,3 +65,41 @@ blocker. Artifacts are retained under
 `catalog-runtime-integration-v1/native-library-lifetime/windows-compiler/` in the
 program artifact directory. This local run does not execute Windows cmd, VsDevCmd
 or MSVC; fresh exact-head hosted Windows qualification remains required.
+
+## Lifetime scope and complete owned cleanup correction
+
+Published `9c5e4bf` / Validate `38257498196` completed with six successful jobs and
+one failed Windows job. All four Unix native lanes passed the strict 51-case
+retained-Loading gate and the 13-case actual-process partial recovery gate. The
+Windows retained-Loading TRX contains 50 passes and one failure, with no skipped,
+aborted or timed-out rows. The native-export lifetime row reports an IOException
+while fixture disposal deletes a graph-use sentinel. Cleanup may have masked an
+earlier assertion failure; the run does not establish its underlying cause.
+Later Windows native qualification steps were skipped.
+
+The test now confines the strong reflected Type and native invocation to a separate
+non-inlined helper. The returned receipt contains a weak context reference and
+immutable evidence, with no Type, Assembly or load-context reference. Weak-death
+and exact sentinel-release checks execute after that helper finishes. Owned
+cleanup unloads and drains every context, including the newer reconciled
+generation, while the passive observer remains available, then disposes the
+provider and fixture. Original assertion and cleanup failures are preserved
+individually or together. No production code, timeout or strict test manifest is
+changed.
+
+On Darwin arm64, the restored focused native-export test passes once without
+skips. A deliberate control retains the reflected Type in the receipt across the
+weak-death check: it fails with both the original collection assertion and the
+cleanup drain diagnostic. The reviewed source is restored byte-for-byte after
+that control. Artifacts are retained under
+`catalog-runtime-integration-v1/native-library-lifetime/windows-cleanup/`.
+The affected Release/net10.0 integration run completed with **283 passed, one
+failed, zero skipped**. Every exact row in retained-Loading51 and partial-recovery13
+passed once. The sole failure was the unchanged source-precedence test waiting
+30 seconds for a real directory-watcher probe. Machine load rose from 12.30 to
+26.81 on eight cores; this is timing context, not proof of its cause. The full
+suite is not accepted as green. Independent source/control review found no
+bounded blocker in the lifetime correction.
+
+A successful new Windows run and green whole CI are still required; this test
+correction does not accept T086, T118 or the full pruning feature.
