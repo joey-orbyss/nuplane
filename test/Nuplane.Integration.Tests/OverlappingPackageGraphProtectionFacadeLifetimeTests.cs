@@ -177,7 +177,9 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             _ => throw new Xunit.Sdk.XunitException($"Unexpected facade result type {facadeResult.GetType()}.")
         };
         Assert.Same(context, AssemblyLoadContext.GetLoadContext(resultAssembly));
-        return new WeakReference(context);
+        // Short weak references clear before finalization; track resurrection so this probe observes
+        // completed collectible-context unload. The native-file removal assertion is separate.
+        return new WeakReference(context, trackResurrection: true);
     }
 
     private static async Task WaitForWeakTargetDeathAsync(WeakReference weakReference)

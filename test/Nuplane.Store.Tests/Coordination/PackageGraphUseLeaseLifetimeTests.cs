@@ -141,6 +141,39 @@ public sealed class PackageGraphUseLeaseLifetimeTests
     }
 
     [Fact]
+    public async Task TransferToCollectibleLifetime_RetainsLeaseUntilFinalizationCompletes()
+    {
+        await using var observer = new PackageGraphUseLifetimeObserver();
+        var held = new TrackingOwnership();
+        var (owner, _) = CreateOwner(held, observer);
+        var (weakLifetime, finalizationGate) = TransferAndDropFinalizableLifetime(owner);
+
+        try
+        {
+            await owner.DisposeAsync();
+            GC.Collect();
+            await finalizationGate.Started.Task.WaitAsync(WaitLimit);
+
+            // Give the passive observer multiple poll opportunities while the target is still
+            // finalizing. A short weak reference would already have been cleared here.
+            await Task.Delay(TimeSpan.FromSeconds(2.5));
+            Assert.True(IsLifetimeAlive(weakLifetime));
+            Assert.Equal(0, held.DisposeCalls);
+        }
+        finally
+        {
+            finalizationGate.AllowFinalization();
+        }
+
+        await finalizationGate.Completed.Task.WaitAsync(WaitLimit);
+        await ForceCollectionAsync(weakLifetime);
+        await held.DisposeCompleted.Task.WaitAsync(WaitLimit);
+
+        Assert.False(IsLifetimeAlive(weakLifetime));
+        Assert.Equal(1, held.DisposeCalls);
+    }
+
+    [Fact]
     public async Task DisposingObserver_DoesNotReleaseLiveTransferredLifetime()
     {
         var disposedObserver = new PackageGraphUseLifetimeObserver();
@@ -373,6 +406,17 @@ public sealed class PackageGraphUseLeaseLifetimeTests
         return weak;
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static (WeakReference<object> WeakLifetime, FinalizationGate Gate) TransferAndDropFinalizableLifetime(
+        PackageGraphUseLeaseOwner owner)
+    {
+        var gate = new FinalizationGate();
+        var lifetime = new FinalizableLifetime(gate);
+        var weakLifetime = new WeakReference<object>(lifetime, trackResurrection: true);
+        owner.TransferToLifetime(lifetime, isCollectible: true);
+        return (weakLifetime, gate);
+    }
+
     private static async Task ForceCollectionAsync(WeakReference<object> weakLifetime)
     {
         for (var attempt = 0; attempt < 40 && IsLifetimeAlive(weakLifetime); attempt++)
@@ -547,6 +591,31 @@ public sealed class PackageGraphUseLeaseLifetimeTests
             DisposeCompleted.TrySetResult(true);
             return _disposeFailure is null ? ValueTask.CompletedTask : ValueTask.FromException(_disposeFailure);
         }
+    }
+
+    private sealed class FinalizationGate
+    {
+        private readonly TaskCompletionSource<bool> _allowFinalization =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal TaskCompletionSource<bool> Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource<bool> Completed { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal void BlockFinalizer()
+        {
+            Started.TrySetResult(true);
+            _allowFinalization.Task.GetAwaiter().GetResult();
+            Completed.TrySetResult(true);
+        }
+
+        internal void AllowFinalization() => _allowFinalization.TrySetResult(true);
+    }
+
+    private sealed class FinalizableLifetime(FinalizationGate gate)
+    {
+        ~FinalizableLifetime() => gate.BlockFinalizer();
     }
 
     private sealed class NativeLockOwnership(PhysicalStoreFileHandle file, IAsyncDisposable nativeLock) : IAsyncDisposable

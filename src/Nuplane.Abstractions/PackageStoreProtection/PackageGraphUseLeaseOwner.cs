@@ -28,7 +28,7 @@ public sealed class PackageGraphUseLeaseOwner : IAsyncDisposable
     /// Transfers release authority to a weakly observed reader lifetime.
     /// </summary>
     /// <param name="lifetime">The object whose actual lifetime controls release.</param>
-    /// <param name="isCollectible">Whether weak death may release this lease; noncollectible lifetimes remain protected until process exit.</param>
+    /// <param name="isCollectible">Whether collection after finalization may release this lease; noncollectible lifetimes remain protected until process exit.</param>
     /// <exception cref="InvalidOperationException">The owner is disposed or was already transferred.</exception>
     public void TransferToLifetime(object lifetime, bool isCollectible)
     {
@@ -38,7 +38,9 @@ public sealed class PackageGraphUseLeaseOwner : IAsyncDisposable
             if (_disposeRequested || _transferred)
                 throw new InvalidOperationException("Lease release authority is no longer owned by this caller.");
 
-            var weakLifetime = new WeakReference<object>(lifetime);
+            // A short weak reference clears before finalization. Collectible load-context finalization
+            // completes native-library release, so observe resurrection before releasing the graph lease.
+            var weakLifetime = new WeakReference<object>(lifetime, trackResurrection: isCollectible);
             _control.TransferToLifetime(this, weakLifetime, isCollectible);
             _transferred = true;
         }

@@ -103,3 +103,41 @@ bounded blocker in the lifetime correction.
 
 A successful new Windows run and green whole CI are still required; this test
 correction does not accept T086, T118 or the full pruning feature.
+
+## Windows mapped-native cleanup correction
+
+Validate `38262605678` completed with six successful jobs and one failed Windows
+job. The Windows retained-Loading TRX has 50 passed, one failed and zero skipped
+rows. The failed row is the deferred native-export test; the direct failure is
+`UnauthorizedAccessException` deleting the fixture's exact
+`NuplaneDeferredNativeProbe.dll` during `PackageStoreFixture.Dispose`. The test's
+cleanup helper collects the body failure and every cleanup failure, throwing an
+aggregate if more than one occurred. The direct fixture-delete exception therefore
+shows the complete test body and earlier cleanup steps passed. The exact denial is
+consistent with the native DLL remaining mapped, but the TRX alone does not identify
+which runtime owner still held the module.
+
+The lifetime owner and passive observer used a short weak reference. Short weak
+references clear before finalization, while collectible `AssemblyLoadContext`
+finalization initiates asynchronous unload. Microsoft documents unload as
+asynchronous and uses a resurrection-tracking weak reference plus GC/finalizer waits
+to detect completed unload before deleting a managed assembly file:
+[How to use and debug assembly unloadability](https://learn.microsoft.com/en-us/dotnet/standard/assembly/unloadability).
+Nuplane resolves this probe through `PackageGraphLoadContext.LoadUnmanagedDll`,
+which calls `LoadUnmanagedDllFromPath`; the .NET runtime implementation of that
+method calls `NativeLibrary.Load`:
+[runtime `AssemblyLoadContext.cs`](https://github.com/dotnet/runtime/blob/main/src/libraries/System.Private.CoreLib/src/System/Runtime/Loader/AssemblyLoadContext.cs).
+Those sources establish the asynchronous ALC lifetime and how this path loads the
+native module, but do not independently guarantee when a Windows native handle stops
+blocking deletion.
+The production owner now uses resurrection tracking for collectible targets, and
+the integration probe waits on the same completion boundary. A focused finalizer
+gate regression ensures the observer cannot claim/release a collectible lease while
+its target is finalizing. The unload coordinator also uses resurrection tracking,
+matching its `Unloaded` contract (“fully unloaded and garbage collected”).
+Noncollectible lifetime retention is unchanged.
+
+The end-to-end test continues to delete the fixture tree directly with no retry or
+suppression, so passing Windows CI remains the required native-handle proof. Local
+focused results and exact source hashes are recorded under
+`resume-2026-10-12/windows-native-finalize/` in the program artifact directory.
