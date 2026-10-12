@@ -237,7 +237,8 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
         private ExecutionFixture(Context context, string[] additionalRoots,
             Func<PackageStoreInventorySnapshot, PackageStoreInventorySnapshot>? transform,
             Action<PackageStoreDeletionJournalPublicationPoint, PackageStoreDeletionJournal>? journalPublicationCheckpoint,
-            Action<PackageStoreQuarantineTransitionPoint, PackageStoreDeletionJournal>? quarantineTransitionCheckpoint)
+            Action<PackageStoreQuarantineTransitionPoint, PackageStoreDeletionJournal>? quarantineTransitionCheckpoint,
+            Action<PackageStoreDeletionExecutionPoint, PackageStoreDeletionJournal>? deletionExecutionCheckpoint)
         {
             Context = context;
             AdditionalRoots = additionalRoots;
@@ -249,7 +250,7 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
             Planner = new ExecutionPlanner(AssertAllLocksHeld);
             Inspection = new PackageStoreInspectionService(context.Files, registry, catalog, resolver, Inventory, Planner);
             Service = new PackageStoreExecutionService(registry, Inspection, journalPublicationCheckpoint,
-                quarantineTransitionCheckpoint);
+                quarantineTransitionCheckpoint, deletionExecutionCheckpoint);
         }
 
         internal Context Context { get; }
@@ -264,18 +265,20 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
             Func<PackageStoreInventorySnapshot, PackageStoreInventorySnapshot>? transform = null,
             bool withCrossRootGraph = true,
             Action<PackageStoreDeletionJournalPublicationPoint, PackageStoreDeletionJournal>? journalPublicationCheckpoint = null,
-            Action<PackageStoreQuarantineTransitionPoint, PackageStoreDeletionJournal>? quarantineTransitionCheckpoint = null)
+            Action<PackageStoreQuarantineTransitionPoint, PackageStoreDeletionJournal>? quarantineTransitionCheckpoint = null,
+            Action<PackageStoreDeletionExecutionPoint, PackageStoreDeletionJournal>? deletionExecutionCheckpoint = null,
+            IPhysicalStoreFileSystem? fileSystem = null)
         {
             var context = withCrossRootGraph
-                ? await Context.CreateWithGraphAsync()
-                : await Context.CreateAsync();
+                ? await Context.CreateWithGraphAsync(fileSystem)
+                : await Context.CreateAsync(fileSystem: fileSystem);
             try
             {
                 await context.Registry().PublishNativeGroupAsync(context.Descriptor, context.Requests,
                     context.NextState, CancellationToken.None);
                 var additional = configure is null ? [] : await configure(context);
                 return new ExecutionFixture(context, additional, transform, journalPublicationCheckpoint,
-                    quarantineTransitionCheckpoint);
+                    quarantineTransitionCheckpoint, deletionExecutionCheckpoint);
             }
             catch
             {

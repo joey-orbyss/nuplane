@@ -422,7 +422,7 @@ internal sealed class PackageStoreAuthorityResolver
 
         var path = ParseRequest(exactLocator, exactBaseLocator);
         return ResolveParsed(path, PhysicalStorePathTarget.DesiredSourceDirectoryAllowMissingSuffix,
-            requiredRoot: scope?.RootIdentity, memberLocatorScope: scope);
+            requiredRoot: null, memberLocatorScope: scope);
     }
 
     /// <summary>Replays one persisted absolute member-state locator under an active registry lock scope.</summary>
@@ -1936,6 +1936,10 @@ internal sealed class PackageStoreAuthorityResolver
                 return;
             if (MemberLocatorScope is { } scope)
             {
+                if (observedRoot != scope.RootIdentity || candidate.RootIdentity != scope.RootIdentity)
+                    throw Refusal(PackageStoreAdmissionReason.RootMismatch,
+                        "The configured path encountered a different physical authority root.", scope.RootIdentity);
+
                 scope.RequireCandidate(observedRoot, candidate);
                 return;
             }

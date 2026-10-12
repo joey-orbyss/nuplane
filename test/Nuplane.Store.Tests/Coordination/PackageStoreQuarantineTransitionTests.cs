@@ -613,7 +613,7 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
 
     private abstract class DelegatingDeletionNativeFileSystem(IPhysicalStoreFileSystem inner)
         : IPhysicalStoreFileSystem, IPhysicalStoreNameFileSystem, IPhysicalStoreDirectoryNameFileSystem,
-            IPhysicalStoreDirectoryEnumerationFileSystem
+            IPhysicalStoreDirectoryEnumerationFileSystem, IPhysicalStoreDeletionFileSystem
     {
         protected IPhysicalStoreFileSystem Inner { get; } = inner;
         private readonly IPhysicalStoreNameFileSystem _names = (IPhysicalStoreNameFileSystem)inner;
@@ -621,6 +621,7 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
             (IPhysicalStoreDirectoryNameFileSystem)inner;
         private readonly IPhysicalStoreDirectoryEnumerationFileSystem _enumeration =
             (IPhysicalStoreDirectoryEnumerationFileSystem)inner;
+
 
         public virtual PhysicalStoreDirectoryHandle OpenNamespaceRoot(string anchor) => Inner.OpenNamespaceRoot(anchor);
         public virtual PhysicalStoreEntryInfo? InspectChildNoFollow(PhysicalStoreDirectoryHandle parent, string singleName)
@@ -658,5 +659,12 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
             => _directories.ObserveCanonicalDirectoryNameNoFollow(parent, singleName, expectedDirectoryIdentity);
         public IReadOnlyList<string> EnumerateChildNamesNoFollow(PhysicalStoreDirectoryHandle parent, int maximumEntries)
             => _enumeration.EnumerateChildNamesNoFollow(parent, maximumEntries);
+        public virtual void RemoveFileAt(PhysicalStoreDirectoryHandle parent, string singleName,
+            PhysicalFileIdentity expectedIdentity)
+            => ((IPhysicalStoreDeletionFileSystem)Inner).RemoveFileAt(parent, singleName, expectedIdentity);
+        public virtual void RemoveEmptyDirectoryAt(PhysicalStoreDirectoryHandle parent, string singleName,
+            PhysicalFileIdentity expectedIdentity)
+            => ((IPhysicalStoreDeletionFileSystem)Inner).RemoveEmptyDirectoryAt(parent, singleName, expectedIdentity);
+
     }
 }

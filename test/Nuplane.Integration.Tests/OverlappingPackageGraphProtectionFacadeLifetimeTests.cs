@@ -161,10 +161,12 @@ public sealed partial class OverlappingPackageGraphProtectionTests
     private static WeakReference CaptureFacadeContextWeakReference(
         IServiceProvider provider,
         PackageGraphUseLease lease,
-        object facadeResult)
+        object facadeResult,
+        string packageId = "Root.First",
+        string version = "1.0.0")
     {
         Assert.True(provider.GetRequiredService<PackageLoader>()
-            .TryGetContext("Root.First", "1.0.0", out var handle));
+            .TryGetContext(packageId, version, out var handle));
         var context = Assert.IsAssignableFrom<AssemblyLoadContext>(handle!.Context);
         Assert.Same(lease, Assert.IsAssignableFrom<IGraphUseLeaseBoundLoadContext>(context).GraphUseLease);
 

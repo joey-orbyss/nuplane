@@ -15,7 +15,7 @@ namespace Nuplane.Feeds;
 /// </remarks>
 internal static class NativePackageInstallSession
 {
-    private const int MaximumArchiveBytes = 128 * 1024 * 1024;
+    internal const long MaximumArchiveBytes = NativePackageArchiveStreamLimits.MaximumPackageArchiveBytes;
     private const int MaximumArchiveEntries = 10_000;
     private const long MaximumExpandedBytes = 512L * 1024 * 1024;
     private const long MaximumEntryBytes = 128L * 1024 * 1024;
@@ -43,6 +43,24 @@ internal static class NativePackageInstallSession
         string installDirectory,
         PackageStoreOperationBorrow borrow,
         Func<Stream, CancellationToken, Task> writeArchive,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(writeArchive);
+        return await AcquireAsync(
+            installRoot,
+            installDirectory,
+            borrow,
+            (_, _, destination, token) => writeArchive(destination, token),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Acquires one native install directory and exposes its already-validated root only to the archive callback.</summary>
+    /// <remarks>The overload is internal to the resolver so a native local-feed read can share, not re-enter, the held root callback.</remarks>
+    internal static async Task<string> AcquireAsync(
+        string installRoot,
+        string installDirectory,
+        PackageStoreOperationBorrow borrow,
+        Func<IPhysicalStoreFileSystem, PhysicalStoreDirectoryHandle, Stream, CancellationToken, Task> writeArchive,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(installRoot);
@@ -77,7 +95,7 @@ internal static class NativePackageInstallSession
         PhysicalStoreDirectoryHandle root,
         InstallTarget target,
         PackageStoreOperationBorrow borrow,
-        Func<Stream, CancellationToken, Task> writeArchive,
+        Func<IPhysicalStoreFileSystem, PhysicalStoreDirectoryHandle, Stream, CancellationToken, Task> writeArchive,
         CancellationToken cancellationToken)
     {
         var streams = files as IPhysicalStorePackageStreamFileSystem
@@ -156,7 +174,7 @@ internal static class NativePackageInstallSession
                              files.InspectHandle(stagingDirectory.Handle), MaximumArchiveBytes))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                await writeArchive(output, cancellationToken).ConfigureAwait(false);
+                await writeArchive(files, root, output, cancellationToken).ConfigureAwait(false);
                 cancellationToken.ThrowIfCancellationRequested();
                 await output.FlushAsync(cancellationToken).ConfigureAwait(false);
             }

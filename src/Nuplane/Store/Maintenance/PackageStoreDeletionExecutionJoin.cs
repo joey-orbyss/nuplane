@@ -97,14 +97,24 @@ internal sealed class PackageStoreDeletionExecutionJoin : IDisposable
 
             if (!hasQ)
             {
-                if (journal.Phase != PackageStoreDeletionPhase.Prepared || originalRows.Length != 1 ||
-                    originalRows[0].Kind != PackageStoreInventoryEntryKind.CompletedInstallCandidate ||
-                    originalRows[0].InstallIdentity != journal.OriginalInstall)
-                    throw Refuse("A Prepared journal has neither its exact original completed install nor its quarantine tree.");
-
                 _store.VerifyDiscovered(_rootHandle, _root, binding.Discovered, cancellationToken);
-                _binder.VerifyPreparedOriginal(binding.Discovered, _rootHandle, EnsureLive, cancellationToken);
-                binding.OriginalAtOriginalName = true;
+                if (journal.Phase == PackageStoreDeletionPhase.Prepared && originalRows.Length == 1 &&
+                    originalRows[0].Kind == PackageStoreInventoryEntryKind.CompletedInstallCandidate &&
+                    originalRows[0].InstallIdentity == journal.OriginalInstall)
+                {
+                    _binder.VerifyPreparedOriginal(binding.Discovered, _rootHandle, EnsureLive, cancellationToken);
+                    binding.OriginalAtOriginalName = true;
+                }
+                else if (journal.Phase == PackageStoreDeletionPhase.Finalizing && originalRows.Length == 0)
+                {
+                    _binder.VerifyFinalizingQuarantineAbsent(binding.Discovered, _rootHandle, EnsureLive, cancellationToken);
+                    binding.QuarantinePositivelyAbsent = true;
+                    overlays.Add(journal.OriginalInstall);
+                }
+                else
+                {
+                    throw Refuse("The journal has neither its exact original Prepared install nor the phase-allowed quarantine tree.");
+                }
                 continue;
             }
 
@@ -132,8 +142,6 @@ internal sealed class PackageStoreDeletionExecutionJoin : IDisposable
                     throw Refuse("The original logical slot contains an unverified, incomplete, or contradictory replacement.");
             }
 
-            if (journal.Phase is not (PackageStoreDeletionPhase.Prepared or PackageStoreDeletionPhase.Quarantined))
-                throw Refuse("The quarantine journal phase is not supported by the current execution join.");
             overlays.Add(journal.OriginalInstall);
         }
 
@@ -220,8 +228,10 @@ internal sealed class PackageStoreDeletionExecutionJoin : IDisposable
         ArgumentNullException.ThrowIfNull(published);
         EnsureLive(CancellationToken.None);
         if (!_bindings.Contains(binding) || published.Journal.CandidateId != binding.Discovered.Journal.CandidateId ||
-            published.Journal.Phase != PackageStoreDeletionPhase.Quarantined)
+            !IsNextPhase(binding.Discovered.Journal.Phase, published.Journal.Phase))
             throw Refuse("The phase replacement does not belong to this exact discovered quarantine candidate.");
+
+        binding.QuarantinedCandidate?.AdvanceJournal(published.Journal, CancellationToken.None);
 
         binding.Discovered = new PackageStoreDeletionJournalStore.DiscoveredJournal(
             published.Journal,
@@ -233,6 +243,12 @@ internal sealed class PackageStoreDeletionExecutionJoin : IDisposable
             published.ControlDirectorySemantics);
         binding.OriginalAtOriginalName = false;
     }
+
+    private static bool IsNextPhase(PackageStoreDeletionPhase prior, PackageStoreDeletionPhase next)
+        => (prior, next) is
+            (PackageStoreDeletionPhase.Prepared, PackageStoreDeletionPhase.Quarantined) or
+            (PackageStoreDeletionPhase.Quarantined, PackageStoreDeletionPhase.Deleting) or
+            (PackageStoreDeletionPhase.Deleting, PackageStoreDeletionPhase.Finalizing);
 
     public void Dispose()
     {
@@ -274,6 +290,7 @@ internal sealed class PackageStoreDeletionExecutionJoin : IDisposable
     {
         internal PackageStoreDeletionJournalStore.DiscoveredJournal Discovered { get; set; } = discovered;
         internal bool OriginalAtOriginalName { get; set; }
+        internal bool QuarantinePositivelyAbsent { get; set; }
         internal PackageStoreDeletionCandidate? PreparedCandidate { get; set; }
         internal PackageStoreQuarantinedCandidate? QuarantinedCandidate { get; set; }
     }

@@ -1,3 +1,4 @@
+using System.Collections.Immutable;
 using Nuplane.Abstractions.PackageStoreProtection;
 using Nuplane.Feeds;
 using Nuplane.Store.Coordination.DeletionRecords;
@@ -37,12 +38,41 @@ internal sealed class PhysicalStoreDeletionManifestReader
         PhysicalStoreDirectoryHandle installDirectory,
         PackageInstallIdentity expectedInstall,
         CancellationToken cancellationToken)
-        => CaptureCore(installDirectory, expectedInstall, boundLocation: null, cancellationToken);
+        => CaptureCore(installDirectory, expectedInstall, boundLocation: null, requireCompletionMarker: true, cancellationToken);
+
+    /// <summary>Captures a complete current namespace and proves which immutable baseline rows are absent.</summary>
+    /// <remarks>Absence is derived only after bounded no-follow enumeration of every surviving directory.</remarks>
+    internal PhysicalStoreDeletionPartialObservation CapturePartial(
+        PhysicalStoreDirectoryHandle directory,
+        PackageInstallIdentity expectedInstall,
+        PhysicalStoreDirectoryHandle expectedPackageParent,
+        PhysicalFileIdentity expectedPackageParentIdentity,
+        PhysicalStoreNameSemantics expectedPackageParentSemantics,
+        string expectedDirectoryBasename,
+        PhysicalStoreNameSemantics expectedDirectorySemantics,
+        PhysicalStoreDeletionManifest baseline,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(baseline);
+        var observed = CaptureCore(directory, expectedInstall,
+            new BoundPackageParent(expectedPackageParent, expectedPackageParentIdentity,
+                expectedPackageParentSemantics, expectedDirectoryBasename, expectedDirectorySemantics),
+            requireCompletionMarker: false, cancellationToken);
+        baseline.RequireExactSubset(observed);
+        var observedPaths = observed.Entries
+            .Select(static entry => PhysicalStoreDeletionManifest.GetPathKey(entry.RelativeComponents))
+            .ToHashSet(StringComparer.Ordinal);
+        var absent = baseline.Entries
+            .Where(entry => !observedPaths.Contains(PhysicalStoreDeletionManifest.GetPathKey(entry.RelativeComponents)))
+            .ToImmutableArray();
+        return new PhysicalStoreDeletionPartialObservation(observed, absent);
+    }
 
     private PhysicalStoreDeletionManifest CaptureCore(
         PhysicalStoreDirectoryHandle installDirectory,
         PackageInstallIdentity expectedInstall,
         BoundPackageParent? boundLocation,
+        bool requireCompletionMarker,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(installDirectory);
@@ -70,8 +100,9 @@ internal sealed class PhysicalStoreDeletionManifestReader
 
         var marker = entries.SingleOrDefault(entry => entry.RelativeComponents.Length == 1 &&
             entry.RelativeComponents[0] == PackageInstallStore.CompletionMarkerFileName);
-        if (marker is null || marker.Kind != PhysicalStoreEntryKind.RegularFile ||
-            ProtectionDigest.PackageInstallCompletionIdentity(marker.Identity) != expectedInstall.CompletionIdentity)
+        if (requireCompletionMarker &&
+            (marker is null || marker.Kind != PhysicalStoreEntryKind.RegularFile ||
+             ProtectionDigest.PackageInstallCompletionIdentity(marker.Identity) != expectedInstall.CompletionIdentity))
             throw Unknown("The captured completion marker does not match the original install identity.");
         RequireHeldDirectory(installDirectory, installInfo.Identity, semantics);
         RequireHeldDirectory(parent, parentInfo.Identity, parentSemantics);
@@ -225,6 +256,7 @@ internal sealed class PhysicalStoreDeletionManifestReader
         return CaptureCore(installDirectory, expectedInstall,
             new BoundPackageParent(expectedPackageParent, expectedPackageParentIdentity,
                 expectedPackageParentSemantics, expectedInstallBasename, expectedInstallDirectorySemantics),
+            requireCompletionMarker: true,
             cancellationToken);
     }
 
@@ -285,3 +317,7 @@ internal sealed class PhysicalStoreDeletionManifestReader
     private static PackageStoreAdmissionException Unsupported(string message)
         => new(PackageStoreAdmissionReason.UnsupportedFilesystem, message);
 }
+
+internal sealed record PhysicalStoreDeletionPartialObservation(
+    PhysicalStoreDeletionManifest Manifest,
+    ImmutableArray<PhysicalStoreDeletionManifestEntry> PositivelyAbsentEntries);

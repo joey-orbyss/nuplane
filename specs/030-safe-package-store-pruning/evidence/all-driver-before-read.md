@@ -22,6 +22,12 @@ The corrected focused case passes1/0/0. The new exact Runtime manifest preserves
 
 The existing `Reconciliation_AcquiresMissingAuthenticatedPackage_NativelyProtectsAndLoadsExactGraph` case now explicitly selects the public participant composition and normal registered reconciliation service. Its actual authenticated loopback feed, archive hash, native installed bytes, persisted Active/LKG graph and exact loaded context assertions are retained. The focused public-route run passes1/0/0; its existing retained-loading manifest name is unchanged. This supplies successful public acquisition→publication→Loading proof alongside the native instrumented component and public refusal/cancellation scenarios.
 
+## Exact-head hosted acceptance
+
+Root and independent source/task/raw-log reviews accept T097/T099/T100/T101 at `ed0cad218a63d33785473c5bb7bd524f0c0d5a0e`: [Validate 38230260898](https://github.com/valence-works/nuplane/actions/runs/38230260898), attempt 2. Every one of the five native lanes passed all 84 required coordinated-runtime and 40 retained-Loading cases without skips, with earlier gates preserved. All 253 frozen candidate-head pin hashes matched. The full solution passed 2,581 tests, zero failures and 70 declared platform skips (2,651 total).
+
+Windows alone was executed again in attempt 2. GitHub reused the other six successful attempt-1 executions under new IDs; root and independent audits matched their raw logs byte for byte. Attempt 1's Windows retained-Loading abort remains failed historical evidence. Its named active test does not establish the cause, and no dump-based diagnosis is claimed. The retry changed neither source nor the original three-minute blame deadline.
+
 ## Acceptance boundary
 
-T100/T101 remain unchecked pending fresh five-platform qualification of this candidate and root acceptance of that complete mapping. The existing [driver obligations](../contracts/admission.md#driver-obligations) remain unchanged. No recursive deletion or public execution is enabled by this increment.
+T100/T101 are accepted against their existing before-read regression criteria and distinct exact suite mappings. At the hosted `ed0cad2` checkpoint above, a borrowed local directory feed refused safely before indexing. The later [native local-feed routing increment](native-local-feed-routing.md) supplies bounded positive local proof; the combined retained-Loading run now passes all 51 required cases without skips. Full T071 acceptance and current-head hosted platform qualification remain open. The existing [driver obligations](../contracts/admission.md#driver-obligations) remain unchanged. This before-read increment does not enable recursive deletion or public execution.

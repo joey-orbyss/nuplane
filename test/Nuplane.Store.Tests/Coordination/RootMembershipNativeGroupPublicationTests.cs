@@ -839,8 +839,8 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
             IPhysicalStoreFileSystem? fileSystem = null)
             => Task.FromResult(new Context(false, nonEmptyActiveMapsWithKnownEmptyRows, fileSystem));
 
-        internal static Task<Context> CreateWithGraphAsync()
-            => Task.FromResult(new Context(false, false, withCrossRootGraph: true));
+        internal static Task<Context> CreateWithGraphAsync(IPhysicalStoreFileSystem? fileSystem = null)
+            => Task.FromResult(new Context(false, false, fileSystem, withCrossRootGraph: true));
 
         internal static Task<Context> CreateProspectiveAsync()
             => Task.FromResult(new Context(true, false));

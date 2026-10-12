@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -220,12 +221,15 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         internal static async Task<GraphUseFixture> CreateAsync(
             PackageLoadMode packageLoadMode = PackageLoadMode.Collectible,
             bool includeIndependentGraph = false,
-            bool includeFreshMemberAGraph = false)
+            bool includeFreshMemberAGraph = false,
+            Action<string>? beforeSharedDependencyCompletionMarker = null,
+            bool emitNativeProbeOnRootSecondV1 = false)
         {
             var fixture = new GraphUseFixture(packageLoadMode);
             try
             {
-                await fixture.InitializeAsync(includeIndependentGraph, includeFreshMemberAGraph);
+                await fixture.InitializeAsync(includeIndependentGraph, includeFreshMemberAGraph,
+                    beforeSharedDependencyCompletionMarker, emitNativeProbeOnRootSecondV1);
                 return fixture;
             }
             catch
@@ -238,8 +242,10 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         internal ServiceProvider CreateProvider(string memberId, IPackageActivationGate? activationGate = null,
             IReadOnlyList<PackageRequest>? desiredRequests = null,
             FeedDefinition? remoteFeed = null,
+            IReadOnlyList<FeedDefinition>? additionalFeeds = null,
             bool participant = false,
-            INuplaneObserver? observer = null)
+            INuplaneObserver? observer = null,
+            Action<IServiceCollection>? configureServices = null)
         {
             var services = new ServiceCollection();
             services.AddLogging();
@@ -257,7 +263,11 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             {
                 services.AddSingleton<IDesiredPackageSource>(new StaticDesiredSource(desiredRequests));
                 services.Configure<FeedResolutionOptions>(options =>
-                    options.Feeds.Add(remoteFeed ?? new FeedDefinition("feed", new Uri("https://unused.invalid/v3/index.json"))));
+                {
+                    options.Feeds.Add(remoteFeed ?? new FeedDefinition("feed", new Uri("https://unused.invalid/v3/index.json")));
+                    if (additionalFeeds is not null)
+                        options.Feeds.AddRange(additionalFeeds);
+                });
                 if (remoteFeed?.ServiceIndex.Scheme == Uri.UriSchemeHttp)
                 {
                     services.Remove(services.Single(descriptor =>
@@ -283,6 +293,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 // Production participant composition rejects wrapped filesystem providers.
                 services.AddSingleton(ProtectedReconciliationServices.Create);
             }
+            configureServices?.Invoke(services);
             return services.BuildServiceProvider();
         }
 
@@ -397,7 +408,11 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 $"Collectible graph-use records did not become stale after their load contexts were unloaded.{detail}");
         }
 
-        private async Task InitializeAsync(bool includeIndependentGraph, bool includeFreshMemberAGraph)
+        private async Task InitializeAsync(
+            bool includeIndependentGraph,
+            bool includeFreshMemberAGraph,
+            Action<string>? beforeSharedDependencyCompletionMarker,
+            bool emitNativeProbeOnRootSecondV1)
         {
             Root = OwnedProcessDirectory.Open(Files, RootPath);
             RootIdentity = new PhysicalRootIdentity(Files.InspectHandle(Root).Identity);
@@ -420,9 +435,11 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 .Select(pair => new RootMemberRecord(pair.Key, pair.Value,
                     new RootMemberRecord.DeclaredBinding())).ToArray();
             // Resolve migration inputs before enrollment; incomplete roots intentionally refuse package reads.
-            var shared = CreateInstall("Shared.Dependency", "2.1.0", dependencyId: null, sourceName: "feed");
+            var shared = CreateInstall("Shared.Dependency", "2.1.0", dependencyId: null, sourceName: "feed",
+                beforeCompletionMarker: beforeSharedDependencyCompletionMarker);
             var firstRoot = CreateInstall("Root.First", "1.0.0", "Shared.Dependency", "member-a");
-            var secondV1Root = CreateInstall("Root.Second", "1.0.0", "Shared.Dependency", "member-b");
+            var secondV1Root = CreateInstall("Root.Second", "1.0.0", "Shared.Dependency", "member-b",
+                emitNativeProbe: emitNativeProbeOnRootSecondV1);
             var secondV2Root = CreateInstall("Root.Second", "2.0.0", "Shared.Dependency", "member-b");
             Graphs.Add("member-a", await ResolveGraphAsync("member-a", firstRoot, shared));
             Graphs.Add("member-b", await ResolveGraphAsync("member-b", secondV1Root, shared));
@@ -457,7 +474,13 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 quiescentCutoverConfirmed: true, CancellationToken.None);
         }
 
-        private ResolvedPackage CreateInstall(string packageId, string version, string? dependencyId, string sourceName)
+        private ResolvedPackage CreateInstall(
+            string packageId,
+            string version,
+            string? dependencyId,
+            string sourceName,
+            Action<string>? beforeCompletionMarker = null,
+            bool emitNativeProbe = false)
         {
             var path = _fixture.CreateDirectory($"packages/feed/{packageId}/{version}");
             using (var packageDirectory = OwnedProcessDirectory.Open(Files, path))
@@ -467,19 +490,36 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 : $"<dependencies><dependency id=\"{dependencyId}\" version=\"[2.1.0]\" /></dependencies>";
             File.WriteAllText(Path.Combine(path, packageId + ".nuspec"),
                 $"<package><metadata><id>{packageId}</id><version>{version}</version>{dependency}</metadata></package>");
-            EmitPackageAssembly(packageId, Path.Combine(path, packageId + ".dll"));
+            EmitPackageAssembly(packageId, Path.Combine(path, packageId + ".dll"), emitNativeProbe);
             File.WriteAllText(Path.Combine(path, Nuplane.Metadata.NuplanePackageMetadataReader.MetadataFileName),
                 $"{{\"schemaVersion\":2,\"loading\":{{\"loadMode\":\"{_packageLoadMode}\",\"scope\":\"DependencyClosure\"}}}}");
+            beforeCompletionMarker?.Invoke(path);
             File.WriteAllBytes(Path.Combine(path, PackageInstallStore.CompletionMarkerFileName), []);
             return new ResolvedPackage(packageId, version, "feed", path, DateTimeOffset.UnixEpoch, sourceName);
         }
 
-        private static void EmitPackageAssembly(string assemblyName, string assemblyPath)
+        private static void EmitPackageAssembly(string assemblyName, string assemblyPath, bool emitNativeProbe = false)
         {
             var assembly = new PersistedAssemblyBuilder(
                 new AssemblyName(assemblyName) { Version = new Version(1, 0, 0, 0) }, typeof(object).Assembly);
             var module = assembly.DefineDynamicModule(assemblyName);
-            module.DefineType($"{assemblyName}.Marker", TypeAttributes.Public | TypeAttributes.Class).CreateType();
+            var marker = module.DefineType($"{assemblyName}.Marker", TypeAttributes.Public | TypeAttributes.Class);
+            if (emitNativeProbe)
+            {
+                var method = marker.DefinePInvokeMethod(
+                    NativeLibraryFixtureCompiler.MethodName,
+                    NativeLibraryFixtureCompiler.LibraryName,
+                    NativeLibraryFixtureCompiler.ExportName,
+                    MethodAttributes.Public | MethodAttributes.Static | MethodAttributes.PinvokeImpl,
+                    CallingConventions.Standard,
+                    typeof(int),
+                    [typeof(int)],
+                    CallingConvention.Cdecl,
+                    CharSet.Ansi);
+                method.SetImplementationFlags(MethodImplAttributes.PreserveSig);
+            }
+
+            marker.CreateType();
             assembly.Save(assemblyPath);
         }
 

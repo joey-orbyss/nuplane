@@ -54,6 +54,58 @@ internal static class DesiredSourceDirectoryAccess
             cancellationToken);
     }
 
+    /// <summary>Runs a directory callback under a root callback that already owns the exact borrow.</summary>
+    /// <remarks>
+    /// This narrow entry point is for native operations, such as archive acquisition, that already run
+    /// under <see cref="PackageStoreOperationAccess.WithValidatedRootAsync{TResult}"/>. Re-entering that
+    /// serialized root callback would wait on its own gate.
+    /// </remarks>
+    internal static async Task<TResult> WithDirectoryInValidatedRootAsync<TResult>(
+        string exactLocator,
+        PackageStoreOperationBorrow borrow,
+        IPhysicalStoreFileSystem files,
+        PhysicalStoreDirectoryHandle heldRoot,
+        Func<DesiredSourceDirectorySession, Task<TResult>> callback,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(exactLocator);
+        ArgumentNullException.ThrowIfNull(borrow);
+        ArgumentNullException.ThrowIfNull(files);
+        ArgumentNullException.ThrowIfNull(heldRoot);
+        ArgumentNullException.ThrowIfNull(callback);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var locked = PackageStoreOperationAccess.GetLockedMemberLocations(borrow);
+        if (locked.Ledger.RootIdentity != borrow.Root ||
+            locked.Ledger.Status != RootMembershipStatus.Complete ||
+            locked.Ledger.PendingStateCommit is not null)
+        {
+            throw Refuse(PackageStoreAdmissionReason.IncompleteEnrollment,
+                "The directory source requires the exact borrowed Complete root with no pending state commit.",
+                borrow.Root);
+        }
+
+        var heldRootInfo = files.InspectHandle(heldRoot);
+        if (heldRootInfo.Kind != PhysicalStoreEntryKind.Directory ||
+            heldRootInfo.Identity != borrow.Root.HandleIdentity)
+        {
+            throw Refuse(PackageStoreAdmissionReason.RootMismatch,
+                "The validated native root does not match the exact borrowed root.", borrow.Root);
+        }
+
+        var exactBaseLocator = Path.IsPathFullyQualified(exactLocator) ? null : Directory.GetCurrentDirectory();
+        var scope = new RootMembershipRegistry.MemberLocatorReplayScope(locked.Ledger);
+        try
+        {
+            return await RunAsync(files, exactLocator, exactBaseLocator, scope, callback, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            scope.Expire();
+        }
+    }
+
     private static async Task<TResult> RunAsync<TResult>(
         IPhysicalStoreFileSystem files,
         string exactLocator,
@@ -111,7 +163,7 @@ internal static class DesiredSourceDirectoryAccess
         resolved.Revalidate();
 
         using var session = new DesiredSourceDirectorySession(
-            enumeration, candidateProbe, textReads, resolved, directory, directoryInfo, profile, missing);
+            files, enumeration, candidateProbe, textReads, resolved, directory, directoryInfo, profile, missing);
         try
         {
             var result = await callback(session).ConfigureAwait(false);
@@ -136,6 +188,7 @@ internal static class DesiredSourceDirectoryAccess
 /// <summary>Retains one resolved directory and confines enumeration and child sampling to that exact native evidence.</summary>
 internal sealed class DesiredSourceDirectorySession : IDisposable
 {
+    private readonly IPhysicalStoreFileSystem _files;
     private readonly IPhysicalStoreDirectoryEnumerationFileSystem _enumeration;
     private readonly IPhysicalStoreDirectoryCandidateProbeFileSystem _candidateProbe;
     private readonly IPhysicalStoreDesiredSourceTextReadFileSystem _textReads;
@@ -146,6 +199,7 @@ internal sealed class DesiredSourceDirectorySession : IDisposable
     private bool _disposed;
 
     internal DesiredSourceDirectorySession(
+        IPhysicalStoreFileSystem files,
         IPhysicalStoreDirectoryEnumerationFileSystem enumeration,
         IPhysicalStoreDirectoryCandidateProbeFileSystem candidateProbe,
         IPhysicalStoreDesiredSourceTextReadFileSystem textReads,
@@ -155,6 +209,7 @@ internal sealed class DesiredSourceDirectorySession : IDisposable
         PhysicalStoreNameSemantics? profile,
         bool isMissing)
     {
+        _files = files;
         _enumeration = enumeration;
         _candidateProbe = candidateProbe;
         _textReads = textReads;
@@ -168,6 +223,9 @@ internal sealed class DesiredSourceDirectorySession : IDisposable
     internal bool IsMissing { get; }
 
     internal PhysicalStoreNameSemantics? Profile { get; }
+
+    internal PhysicalFileIdentity DirectoryIdentity
+        => _directoryInfo?.Identity ?? throw new InvalidOperationException("A missing source directory has no native identity.");
 
     internal async ValueTask<PhysicalStoreDesiredSourceTextReadResult> ReadDesiredSourceTextAsync(
         string singleName,
@@ -208,8 +266,18 @@ internal sealed class DesiredSourceDirectorySession : IDisposable
     }
 
     internal IReadOnlyList<string> EnumeratePackageCandidates()
+        => EnumeratePackageCandidates(
+            OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal,
+            CancellationToken.None);
+
+    internal IReadOnlyList<string> EnumeratePackageCandidates(
+        StringComparison extensionComparison,
+        CancellationToken cancellationToken)
     {
         EnsureActive();
+        cancellationToken.ThrowIfCancellationRequested();
         if (IsMissing)
             return [];
 
@@ -218,14 +286,174 @@ internal sealed class DesiredSourceDirectorySession : IDisposable
         {
             _resolved.Revalidate();
             var names = _enumeration.EnumerateChildNamesNoFollow(directory, int.MaxValue);
-            // Preserve Directory.EnumerateFiles("*.nupkg")'s PlatformDefault matching. This is
-            // a managed enumeration compatibility rule, not the native directory lookup profile.
-            var comparison = OperatingSystem.IsWindows() || OperatingSystem.IsMacOS()
-                ? StringComparison.OrdinalIgnoreCase
-                : StringComparison.Ordinal;
-            var candidates = names.Where(name => name.EndsWith(".nupkg", comparison)).ToArray();
+            var candidates = new List<string>();
+            foreach (var name in names)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (name.EndsWith(".nupkg", extensionComparison))
+                    candidates.Add(name);
+            }
+
             _resolved.Revalidate();
+            cancellationToken.ThrowIfCancellationRequested();
             return candidates;
+        }
+        catch
+        {
+            _resolved.Revalidate();
+            throw;
+        }
+    }
+
+    internal void RevalidatePackageCandidate(
+        string singleName,
+        PhysicalFileIdentity expectedParentIdentity,
+        PhysicalStoreNameSemantics expectedProfile,
+        PhysicalFileIdentity expectedFileIdentity,
+        long expectedLength)
+    {
+        EnsureExpectedParent(expectedParentIdentity);
+        EnsureExpectedProfile(expectedProfile);
+        EnsureArchiveLength(expectedLength, NativePackageArchiveStreamLimits.MaximumPackageArchiveBytes);
+        // A fresh session must acquire its own provider-owned native pin before comparing it with
+        // the selection snapshot; Windows cannot safely replay an identity without that pin.
+        var sample = SamplePackageCandidate(singleName);
+        RequireSelectedRegularFile(sample, expectedFileIdentity, expectedLength);
+        EnsureExpectedProfile(expectedProfile);
+        _resolved.Revalidate();
+    }
+
+    internal async Task CopyPackageArchiveToAsync(
+        string singleName,
+        PhysicalFileIdentity expectedParentIdentity,
+        PhysicalStoreNameSemantics expectedProfile,
+        PhysicalFileIdentity expectedFileIdentity,
+        long expectedLength,
+        Stream destination,
+        long maximumArchiveBytes,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        EnsureActive();
+        cancellationToken.ThrowIfCancellationRequested();
+        EnsureExpectedParent(expectedParentIdentity);
+        EnsureExpectedProfile(expectedProfile);
+        EnsureArchiveLength(expectedLength, maximumArchiveBytes);
+
+        var directory = _directory ?? throw new InvalidOperationException("A present source directory has no retained native directory.");
+        var directoryInfo = _directoryInfo ?? throw new InvalidOperationException("A present source directory has no retained native identity.");
+        var streams = _files as IPhysicalStorePackageStreamFileSystem
+            ?? throw Refuse(PackageStoreAdmissionReason.UnsupportedFilesystem,
+                "The filesystem cannot open a bounded native package archive stream.", _resolved.RootIdentity);
+
+        try
+        {
+            _resolved.Revalidate();
+            var sample = SamplePackageCandidate(singleName);
+            RequireSelectedRegularFile(sample, expectedFileIdentity, expectedLength);
+
+            PhysicalStoreEntryInfo beforeOpen;
+            try
+            {
+                beforeOpen = RequireSelectedEntry(
+                    _files.InspectChildNoFollow(directory, singleName), expectedFileIdentity, expectedLength);
+            }
+            catch (PackageStoreAdmissionException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "The selected local package archive could not be reopened by its exact native identity.",
+                    _resolved.RootIdentity, exception);
+            }
+
+            PhysicalStoreFileHandle file;
+            try
+            {
+                file = _files.OpenFileChildNoFollow(directory, singleName, FileAccess.Read);
+            }
+            catch (PackageStoreAdmissionException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "The selected local package archive could not be reopened by its exact native identity.",
+                    _resolved.RootIdentity, exception);
+            }
+
+            using (file)
+            {
+                PhysicalStoreEntryInfo opened;
+                Stream archiveStream;
+                try
+                {
+                    opened = RequireSelectedEntry(_files.InspectHandle(file), expectedFileIdentity, expectedLength);
+                    RequireSameSelectedEntry(beforeOpen, opened);
+                    archiveStream = streams.OpenPackageArchiveReadStream(
+                        directory, singleName, file, directoryInfo, opened, maximumArchiveBytes);
+                }
+                catch (PackageStoreAdmissionException)
+                {
+                    throw;
+                }
+                catch (Exception exception) when (exception is not OperationCanceledException)
+                {
+                    throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                        "The selected local package archive could not be opened through its exact native identity.",
+                        _resolved.RootIdentity, exception);
+                }
+
+                await using var archive = archiveStream;
+                var buffer = new byte[64 * 1024];
+                long copiedBytes = 0;
+                while (true)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    int read;
+                    try
+                    {
+                        read = await archive.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (PackageStoreAdmissionException)
+                    {
+                        throw;
+                    }
+                    catch (Exception exception)
+                    {
+                        throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                            "The selected local package archive could not be read through its exact native identity.",
+                            _resolved.RootIdentity, exception);
+                    }
+
+                    if (read == 0)
+                        break;
+                    copiedBytes = checked(copiedBytes + read);
+                    if (copiedBytes > expectedLength || copiedBytes > maximumArchiveBytes)
+                        throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                            "The selected local package archive changed length while it was being copied.",
+                            _resolved.RootIdentity);
+                    await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                }
+
+                if (copiedBytes != expectedLength)
+                    throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                        "The selected local package archive changed length while it was being copied.",
+                        _resolved.RootIdentity);
+
+                EnsureExpectedProfile(expectedProfile);
+                _candidateProbe.RevalidatePackageCandidate(directory, singleName, expectedFileIdentity,
+                    _sampledCandidates[singleName].Pin);
+                _resolved.Revalidate();
+                cancellationToken.ThrowIfCancellationRequested();
+            }
         }
         catch
         {
@@ -321,6 +549,73 @@ internal sealed class DesiredSourceDirectorySession : IDisposable
             candidate.Pin?.Dispose();
     }
 
+    private void EnsureExpectedParent(PhysicalFileIdentity expectedParentIdentity)
+    {
+        EnsureActive();
+        ArgumentNullException.ThrowIfNull(expectedParentIdentity);
+        if (IsMissing || _directoryInfo?.Identity != expectedParentIdentity)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The local feed directory identity changed after version selection.", _resolved.RootIdentity);
+    }
+
+    private void EnsureExpectedProfile(PhysicalStoreNameSemantics expectedProfile)
+    {
+        ArgumentNullException.ThrowIfNull(expectedProfile);
+        if (Profile != expectedProfile)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The local feed directory name profile changed after version selection.", _resolved.RootIdentity);
+    }
+
+    private void EnsureArchiveLength(long expectedLength, long maximumArchiveBytes)
+    {
+        if (expectedLength <= 0 || expectedLength > maximumArchiveBytes)
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The selected local package archive is empty or exceeds the native archive byte limit.",
+                _resolved.RootIdentity);
+    }
+
+    private void RequireSelectedRegularFile(
+        PhysicalStoreDirectoryCandidateSample sample,
+        PhysicalFileIdentity expectedIdentity,
+        long expectedLength)
+    {
+        if (sample.Kind != PhysicalStoreDirectoryCandidateKind.RegularFile ||
+            sample.Identity != expectedIdentity ||
+            sample.Length != expectedLength)
+        {
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The selected local package candidate is missing, linked, non-regular, or changed identity.",
+                _resolved.RootIdentity);
+        }
+    }
+
+    private PhysicalStoreEntryInfo RequireSelectedEntry(
+        PhysicalStoreEntryInfo? entry,
+        PhysicalFileIdentity expectedIdentity,
+        long expectedLength)
+    {
+        if (entry is not { Kind: PhysicalStoreEntryKind.RegularFile, LinkCount: 1 } selected ||
+            selected.Identity != expectedIdentity || selected.Length != expectedLength)
+        {
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The selected local package archive is not the same regular single-link file.",
+                _resolved.RootIdentity);
+        }
+
+        return selected;
+    }
+
+    private void RequireSameSelectedEntry(PhysicalStoreEntryInfo first, PhysicalStoreEntryInfo second)
+    {
+        if (first.Kind != second.Kind || first.Identity != second.Identity ||
+            first.LinkCount != second.LinkCount || first.Length != second.Length)
+        {
+            throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                "The selected local package archive changed while it was being reopened.",
+                _resolved.RootIdentity);
+        }
+    }
+
     internal void Revalidate()
     {
         EnsureActive();
@@ -348,6 +643,7 @@ internal sealed class DesiredSourceDirectorySession : IDisposable
     private static PackageStoreAdmissionException Refuse(
         PackageStoreAdmissionReason reason,
         string message,
-        PhysicalRootIdentity? root)
-        => new(reason, message, root);
+        PhysicalRootIdentity? root,
+        Exception? innerException = null)
+        => new(reason, message, root, innerException);
 }

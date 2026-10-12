@@ -6,7 +6,7 @@ using Nuplane.Store.Coordination.PhysicalFiles;
 
 namespace Nuplane.Store.Coordination;
 
-/// <summary>Discovers bounded Prepared/Quarantined journals and publishes their exact native control-file transitions.</summary>
+/// <summary>Discovers bounded deletion journals and publishes their exact native control-file transitions.</summary>
 /// <remarks>
 /// The journal is descriptive data. This store accepts only a live execution caller's callbacks for fresh
 /// candidate validation and returns readback evidence only after reopening the exact canonical bytes.
@@ -78,7 +78,7 @@ internal sealed class PackageStoreDeletionJournalStore
 
             if (journal.CandidateId != artifact.CandidateId || journal.StoreRoot != expectedRoot ||
                 journal.EnrollmentEpoch != expectedEnrollmentEpoch ||
-                journal.Phase is not (PackageStoreDeletionPhase.Prepared or PackageStoreDeletionPhase.Quarantined))
+                !IsKnownPhase(journal.Phase))
             {
                 throw Refuse("A reserved canonical prune journal is not a supported current-root/current-epoch record.", expectedRoot);
             }
@@ -208,18 +208,58 @@ internal sealed class PackageStoreDeletionJournalStore
         Action<CancellationToken> requireCurrentCandidate,
         Action<CancellationToken> requireCurrentQuarantine,
         CancellationToken cancellationToken)
+        => PublishPhase(heldRoot, expectedRoot, prior, PackageStoreDeletionPhase.Prepared,
+            PackageStoreDeletionPhase.Quarantined, requireCurrentCandidate, requireCurrentQuarantine,
+            PackageStoreDeletionJournalPublicationPoint.BeforeQuarantinedPhasePublish,
+            PackageStoreDeletionJournalPublicationPoint.AfterQuarantinedPhasePublish, cancellationToken);
+
+    internal PublishedJournal PublishDeletingPhase(
+        PhysicalStoreDirectoryHandle heldRoot,
+        PhysicalRootIdentity expectedRoot,
+        DiscoveredJournal prior,
+        Action<CancellationToken> requireCurrentCandidate,
+        Action<CancellationToken> requireCurrentQuarantine,
+        CancellationToken cancellationToken)
+        => PublishPhase(heldRoot, expectedRoot, prior, PackageStoreDeletionPhase.Quarantined,
+            PackageStoreDeletionPhase.Deleting, requireCurrentCandidate, requireCurrentQuarantine,
+            PackageStoreDeletionJournalPublicationPoint.BeforeDeletingPhasePublish,
+            PackageStoreDeletionJournalPublicationPoint.AfterDeletingPhasePublish, cancellationToken);
+
+    internal PublishedJournal PublishFinalizingPhase(
+        PhysicalStoreDirectoryHandle heldRoot,
+        PhysicalRootIdentity expectedRoot,
+        DiscoveredJournal prior,
+        Action<CancellationToken> requireCurrentCandidate,
+        Action<CancellationToken> requireCurrentQuarantine,
+        CancellationToken cancellationToken)
+        => PublishPhase(heldRoot, expectedRoot, prior, PackageStoreDeletionPhase.Deleting,
+            PackageStoreDeletionPhase.Finalizing, requireCurrentCandidate, requireCurrentQuarantine,
+            PackageStoreDeletionJournalPublicationPoint.BeforeFinalizingPhasePublish,
+            PackageStoreDeletionJournalPublicationPoint.AfterFinalizingPhasePublish, cancellationToken);
+
+    private PublishedJournal PublishPhase(
+        PhysicalStoreDirectoryHandle heldRoot,
+        PhysicalRootIdentity expectedRoot,
+        DiscoveredJournal prior,
+        PackageStoreDeletionPhase expectedPhase,
+        PackageStoreDeletionPhase nextPhase,
+        Action<CancellationToken> requireCurrentCandidate,
+        Action<CancellationToken> requireCurrentQuarantine,
+        PackageStoreDeletionJournalPublicationPoint beforePublishPoint,
+        PackageStoreDeletionJournalPublicationPoint afterPublishPoint,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(prior);
         ArgumentNullException.ThrowIfNull(requireCurrentCandidate);
         ArgumentNullException.ThrowIfNull(requireCurrentQuarantine);
         var publication = RequirePublication();
-        if (prior.Journal.Phase != PackageStoreDeletionPhase.Prepared || prior.Journal.StoreRoot != expectedRoot)
-            throw Refuse("Only the exact Prepared journal for the held root can advance to Quarantined.", expectedRoot);
+        if (prior.Journal.Phase != expectedPhase || prior.Journal.StoreRoot != expectedRoot)
+            throw Refuse($"Only the exact {expectedPhase} journal for the held root can advance to {nextPhase}.", expectedRoot);
 
-        var updated = prior.Journal.WithPhase(PackageStoreDeletionPhase.Quarantined);
+        var updated = prior.Journal.WithPhase(nextPhase);
         var payload = _serializer.Serialize(updated);
         if (payload.Length > PackageStoreDeletionJournalSerializer.MaximumPayloadBytes)
-            throw Refuse("The Quarantined journal exceeds the per-record payload limit.", expectedRoot);
+            throw Refuse($"The {nextPhase} journal exceeds the per-record payload limit.", expectedRoot);
 
         cancellationToken.ThrowIfCancellationRequested();
         requireCurrentCandidate(cancellationToken);
@@ -227,7 +267,7 @@ internal sealed class PackageStoreDeletionJournalStore
         VerifyDiscovered(heldRoot, expectedRoot, prior, cancellationToken);
         var currentSet = Discover(heldRoot, expectedRoot, prior.Journal.EnrollmentEpoch, cancellationToken);
         if (currentSet.Count(item => item.Journal.CandidateId == prior.Journal.CandidateId) != 1)
-            throw Refuse("The exact Prepared journal is no longer uniquely discoverable.", expectedRoot);
+            throw Refuse($"The exact {expectedPhase} journal is no longer uniquely discoverable.", expectedRoot);
 
         var rootSemantics = VerifyRoot(heldRoot, expectedRoot);
         if (rootSemantics != prior.RootSemantics)
@@ -282,9 +322,9 @@ internal sealed class PackageStoreDeletionJournalStore
             verifyUnpublished: () => VerifyUnpublishedUpdateInControl(heldRoot, expectedRoot,
                 rootSemantics, control, controlIdentity, controlSemantics, prior, stagedName,
                 stagedIdentity, payload, updated),
-            beforePublishPoint: PackageStoreDeletionJournalPublicationPoint.BeforeQuarantinedPhasePublish,
-            afterPublishPoint: PackageStoreDeletionJournalPublicationPoint.AfterQuarantinedPhasePublish,
-            refusalMessage: "Quarantined phase replacement ended in an unknown native state; all artifacts were preserved.");
+            beforePublishPoint,
+            afterPublishPoint,
+            refusalMessage: $"{nextPhase} phase replacement ended in an unknown native state; all artifacts were preserved.");
     }
 
     internal void VerifyPublished(
@@ -465,7 +505,7 @@ internal sealed class PackageStoreDeletionJournalStore
             }
 
             if (existing.CandidateId != artifact.CandidateId ||
-                existing.Phase is not (PackageStoreDeletionPhase.Prepared or PackageStoreDeletionPhase.Quarantined) ||
+                !IsKnownPhase(existing.Phase) ||
                 existing.StoreRoot != expectedRoot || existing.EnrollmentEpoch != requested.EnrollmentEpoch)
             {
                 throw Refuse("An existing prune journal is unknown to this publisher and was preserved.", expectedRoot);
@@ -842,6 +882,10 @@ internal sealed class PackageStoreDeletionJournalStore
         => string.Equals(left.Provider, right.Provider, StringComparison.Ordinal) &&
            string.Equals(left.VolumeOrDeviceId, right.VolumeOrDeviceId, StringComparison.Ordinal);
 
+    private static bool IsKnownPhase(PackageStoreDeletionPhase phase)
+        => phase is PackageStoreDeletionPhase.Prepared or PackageStoreDeletionPhase.Quarantined or
+            PackageStoreDeletionPhase.Deleting or PackageStoreDeletionPhase.Finalizing;
+
     private static PackageStoreAdmissionException Unsupported(string message)
         => new(PackageStoreAdmissionReason.UnsupportedFilesystem, message);
 
@@ -878,5 +922,9 @@ internal enum PackageStoreDeletionJournalPublicationPoint
     BeforeNativePublish,
     AfterNativePublish,
     BeforeQuarantinedPhasePublish,
-    AfterQuarantinedPhasePublish
+    AfterQuarantinedPhasePublish,
+    BeforeDeletingPhasePublish,
+    AfterDeletingPhasePublish,
+    BeforeFinalizingPhasePublish,
+    AfterFinalizingPhasePublish
 }

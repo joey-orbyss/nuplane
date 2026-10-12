@@ -10,13 +10,14 @@ namespace Nuplane.Store.Maintenance;
 /// This internal boundary accepts explicit epoch and retention inputs, never a preview as authority.
 /// Candidate work must independently bind and revalidate native install evidence before any mutation.
 /// Verified Prepared and Quarantined records participate in fresh planning and bounded quarantine recovery.
-/// Recursive deletion, finalization, and public execution are not implemented by this boundary.
+/// Recursive deletion remains internal to this fresh operation and has no public caller.
 /// </remarks>
 internal sealed class PackageStoreExecutionService(
     RootMembershipRegistry registry,
     PackageStoreInspectionService inspection,
     Action<PackageStoreDeletionJournalPublicationPoint, PackageStoreDeletionJournal>? journalPublicationCheckpoint = null,
-    Action<PackageStoreQuarantineTransitionPoint, PackageStoreDeletionJournal>? quarantineTransitionCheckpoint = null)
+    Action<PackageStoreQuarantineTransitionPoint, PackageStoreDeletionJournal>? quarantineTransitionCheckpoint = null,
+    Action<PackageStoreDeletionExecutionPoint, PackageStoreDeletionJournal>? deletionExecutionCheckpoint = null)
 {
     private readonly PackageStoreDeletionCandidateBinder _candidateBinder = new(registry.Files);
     private readonly Lazy<PackageStoreDeletionJournalStore> _journalStore =
@@ -71,7 +72,8 @@ internal sealed class PackageStoreExecutionService(
                     selectedRoot.RootIdentity);
 
             var context = new Context(registry, borrow, operation, configuredRoot, snapshot,
-                _candidateBinder, _journalStore, executionJoin, quarantineTransitionCheckpoint);
+                _candidateBinder, _journalStore, executionJoin, quarantineTransitionCheckpoint,
+                deletionExecutionCheckpoint);
             TResult result;
             try
             {
@@ -112,13 +114,15 @@ internal sealed class PackageStoreExecutionService(
         PackageStoreDeletionCandidateBinder candidateBinder,
         Lazy<PackageStoreDeletionJournalStore> journalStore,
         PackageStoreDeletionExecutionJoin executionJoin,
-        Action<PackageStoreQuarantineTransitionPoint, PackageStoreDeletionJournal>? quarantineTransitionCheckpoint) : IDisposable
+        Action<PackageStoreQuarantineTransitionPoint, PackageStoreDeletionJournal>? quarantineTransitionCheckpoint,
+        Action<PackageStoreDeletionExecutionPoint, PackageStoreDeletionJournal>? deletionExecutionCheckpoint) : IDisposable
     {
         private readonly PackageStoreDeletionCandidateBinder _candidateBinder = candidateBinder;
         private readonly Lazy<PackageStoreDeletionJournalStore> _journalStore = journalStore;
         private readonly PackageStoreDeletionExecutionJoin _executionJoin = executionJoin;
         private readonly IPhysicalStoreFileSystem _files = registry.Files;
         private readonly Action<PackageStoreQuarantineTransitionPoint, PackageStoreDeletionJournal>? _quarantineTransitionCheckpoint = quarantineTransitionCheckpoint;
+        private readonly Action<PackageStoreDeletionExecutionPoint, PackageStoreDeletionJournal>? _deletionExecutionCheckpoint = deletionExecutionCheckpoint;
         private readonly object _gate = new();
         private readonly List<PackageStoreDeletionCandidate> _candidates = [];
         private readonly HashSet<PackageStoreRetentionPlanEntry> _boundRows = new(ReferenceEqualityComparer.Instance);
@@ -197,9 +201,10 @@ internal sealed class PackageStoreExecutionService(
             ArgumentNullException.ThrowIfNull(exactRow);
             RequireEligibleRow(exactRow, cancellationToken);
             var binding = _executionJoin.RequireQuarantined(exactRow.Install);
-            if (binding.Discovered.Journal.Phase is not (PackageStoreDeletionPhase.Prepared or PackageStoreDeletionPhase.Quarantined))
+            if (binding.Discovered.Journal.Phase is not (PackageStoreDeletionPhase.Prepared or PackageStoreDeletionPhase.Quarantined or
+                PackageStoreDeletionPhase.Deleting or PackageStoreDeletionPhase.Finalizing))
                 throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
-                    "Only a current Prepared or Quarantined record can bind its verified quarantine.");
+                    "Only a current known deletion phase can bind its verified quarantine.");
 
             lock (_gate)
             {
@@ -321,6 +326,8 @@ internal sealed class PackageStoreExecutionService(
                     },
                     cancellationToken);
                 _executionJoin.Advance(binding, published);
+                _deletionExecutionCheckpoint?.Invoke(
+                    PackageStoreDeletionExecutionPoint.AfterQuarantinedPublished, published.Journal);
                 return published;
             }
             catch (Exception transitionFailure)
@@ -374,6 +381,149 @@ internal sealed class PackageStoreExecutionService(
                 cancellationToken);
             _executionJoin.Advance(binding, published);
             return published;
+        }
+
+        /// <summary>Deletes one exact currently Eligible install through the internal marker-last quarantine protocol.</summary>
+        internal PackageStoreDeletionExecutionStatus DeleteEligibleCandidate(
+            PackageStoreRetentionPlanEntry exactRow,
+            CancellationToken cancellationToken)
+        {
+            ArgumentNullException.ThrowIfNull(exactRow);
+            RequireEligibleRow(exactRow, cancellationToken);
+
+            if (_executionJoin.TryFind(exactRow.Install, out var existing))
+            {
+                if (existing.QuarantinePositivelyAbsent)
+                {
+                    if (existing.Discovered.Journal.Phase != PackageStoreDeletionPhase.Finalizing ||
+                        exactRow.Classification != PackageStoreRetentionClassification.Eligible)
+                        throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                            "Only an Eligible Finalizing candidate may report a quarantine absent before this invocation.");
+                    Revalidate(cancellationToken);
+                    _candidateBinder.VerifyFinalizingQuarantineAbsent(existing.Discovered,
+                        RootHandle, Revalidate, cancellationToken);
+                    return PackageStoreDeletionExecutionStatus.AlreadyAbsent;
+                }
+
+                if (existing.OriginalAtOriginalName)
+                {
+                    var original = BindEligibleCandidate(exactRow, cancellationToken);
+                    QuarantinePreparedCandidate(original, cancellationToken);
+                }
+                else
+                {
+                    var quarantined = BindEligibleQuarantinedCandidate(exactRow, cancellationToken);
+                    if (quarantined.Journal.Phase == PackageStoreDeletionPhase.Prepared)
+                        AdvancePreparedQuarantine(quarantined, cancellationToken);
+                }
+            }
+            else
+            {
+                var candidate = BindEligibleCandidate(exactRow, cancellationToken);
+                PublishPreparedJournal(candidate, cancellationToken);
+                QuarantinePreparedCandidate(candidate, cancellationToken);
+            }
+
+            var binding = _executionJoin.RequireQuarantined(exactRow.Install);
+            var quarantine = binding.QuarantinedCandidate
+                ?? throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "A current eligible deletion candidate has no exact quarantine observation.");
+            new PhysicalStoreDeletionExecutor(_files, _deletionExecutionCheckpoint).Execute(quarantine,
+                PublishDeletingPhase, PublishFinalizingPhase,
+                token => RequireBoundEligibleJournal(binding, quarantine, token),
+                cancellationToken);
+            return PackageStoreDeletionExecutionStatus.Deleted;
+        }
+
+        private void PublishDeletingPhase(
+            PackageStoreQuarantinedCandidate candidate,
+            CancellationToken cancellationToken)
+        {
+            var binding = _executionJoin.RequireQuarantined(candidate.Journal.OriginalInstall);
+            RequireSameBoundCandidate(binding, candidate, PackageStoreDeletionPhase.Quarantined, cancellationToken);
+            var observation = candidate.ObserveCurrentSubset(cancellationToken);
+            if (!observation.PositivelyAbsentEntries.IsEmpty)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "The Quarantined phase requires its complete baseline before Deleting publication.");
+            var published = _journalStore.Value.PublishDeletingPhase(
+                RootHandle, Snapshot.Root!, binding.Discovered,
+                token => RequireSameBoundCandidate(binding, candidate, PackageStoreDeletionPhase.Quarantined, token),
+                token =>
+                {
+                    candidate.Revalidate(token);
+                    if (candidate.InspectOriginalSlot(token) is not null)
+                        throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                            "The original logical install slot is occupied before Deleting publication.");
+                }, cancellationToken);
+            _executionJoin.Advance(binding, published);
+        }
+
+        private void PublishFinalizingPhase(
+            PackageStoreQuarantinedCandidate candidate,
+            CancellationToken cancellationToken)
+        {
+            var binding = _executionJoin.RequireQuarantined(candidate.Journal.OriginalInstall);
+            RequireSameBoundCandidate(binding, candidate, PackageStoreDeletionPhase.Deleting, cancellationToken);
+            var observation = candidate.ObserveCurrentSubset(cancellationToken);
+            if (observation.Manifest.Entries.Length != 1 ||
+                observation.Manifest.Entries[0].RelativeComponents.Length != 1 ||
+                !string.Equals(observation.Manifest.Entries[0].RelativeComponents[0],
+                    PackageStoreDeletionJournal.CompletionMarkerName, StringComparison.Ordinal))
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Finalizing publication requires a complete native observation of the exact marker as the sole child.");
+            var published = _journalStore.Value.PublishFinalizingPhase(
+                RootHandle, Snapshot.Root!, binding.Discovered,
+                token => RequireSameBoundCandidate(binding, candidate, PackageStoreDeletionPhase.Deleting, token),
+                token =>
+                {
+                    candidate.Revalidate(token);
+                    if (candidate.InspectOriginalSlot(token) is not null)
+                        throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                            "The original logical install slot is occupied before Finalizing publication.");
+                }, cancellationToken);
+            _executionJoin.Advance(binding, published);
+        }
+
+        private void RequireBoundEligibleRow(PackageInstallIdentity install, CancellationToken cancellationToken)
+        {
+            var row = FindCurrentRow(install);
+            RequireEligibleRow(row, cancellationToken);
+            if (!IsRowBound(row))
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Deletion requires the exact current Eligible row to remain bound in this operation.");
+        }
+
+        private void RequireSameBoundCandidate(
+            PackageStoreDeletionExecutionJoin.JournalBinding binding,
+            PackageStoreQuarantinedCandidate candidate,
+            PackageStoreDeletionPhase phase,
+            CancellationToken cancellationToken)
+        {
+            RequireBoundEligibleRow(candidate.Journal.OriginalInstall, cancellationToken);
+            Revalidate(cancellationToken);
+            if (!ReferenceEquals(binding.QuarantinedCandidate, candidate) || binding.Discovered.Journal.Phase != phase ||
+                candidate.Journal.Phase != phase)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Deletion phase advancement requires the exact bound candidate at the expected current phase.");
+            _journalStore.Value.VerifyDiscovered(RootHandle, Snapshot.Root!, binding.Discovered, cancellationToken);
+            candidate.Revalidate(cancellationToken);
+            if (candidate.InspectOriginalSlot(cancellationToken) is not null)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "The original logical install slot must remain positively absent during deletion.");
+        }
+
+        private void RequireBoundEligibleJournal(
+            PackageStoreDeletionExecutionJoin.JournalBinding binding,
+            PackageStoreQuarantinedCandidate candidate,
+            CancellationToken cancellationToken)
+        {
+            RequireBoundEligibleRow(candidate.Journal.OriginalInstall, cancellationToken);
+            var phase = candidate.Journal.Phase;
+            if (!ReferenceEquals(binding.QuarantinedCandidate, candidate) ||
+                binding.Discovered.Journal.Phase != phase)
+                throw Refuse(PackageStoreAdmissionReason.UnknownAuthority,
+                    "Native removal requires the exact current journal-bound candidate at its discovered phase.");
+            _journalStore.Value.VerifyDiscovered(RootHandle, Snapshot.Root!, binding.Discovered, cancellationToken);
         }
 
         private PackageStoreRetentionPlan RequireEligibleRow(
@@ -609,4 +759,10 @@ internal enum PackageStoreQuarantineTransitionPoint
 {
     BeforeDirectoryMove,
     AfterDirectoryMove
+}
+
+internal enum PackageStoreDeletionExecutionStatus
+{
+    Deleted,
+    AlreadyAbsent
 }

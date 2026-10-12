@@ -2,6 +2,12 @@ using Nuplane.Store.Coordination.PhysicalFiles;
 
 namespace Nuplane.Store.Coordination;
 
+/// <summary>Shared archive byte limit for native package installation and source reads.</summary>
+internal static class NativePackageArchiveStreamLimits
+{
+    internal const long MaximumPackageArchiveBytes = 128L * 1024 * 1024;
+}
+
 /// <summary>Provides explicit-limit streams for package archives and newly created package files.</summary>
 /// <remarks>
 /// A stream remains bound to the exact held parent and file handles supplied at creation. The provider
