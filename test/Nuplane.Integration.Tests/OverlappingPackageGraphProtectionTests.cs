@@ -233,7 +233,8 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         internal ServiceProvider CreateProvider(string memberId, IPackageActivationGate? activationGate = null,
             IReadOnlyList<PackageRequest>? desiredRequests = null,
             FeedDefinition? remoteFeed = null,
-            bool participant = false)
+            bool participant = false,
+            INuplaneObserver? observer = null)
         {
             var services = new ServiceCollection();
             services.AddLogging();
@@ -244,6 +245,8 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                     nuplane.UseCoordinatedPackageStore(CompleteRoster, true);
                 nuplane.AutoloadPackages(loading => loading.WithDefaultLoadMode(_packageLoadMode));
             });
+            if (observer is not null)
+                services.AddSingleton<INuplaneObserver>(observer);
             services.Configure<FeedResolutionOptions>(options => options.PackageInstallRoot = RootPath);
             if (desiredRequests is not null)
             {
@@ -280,8 +283,10 @@ public sealed partial class OverlappingPackageGraphProtectionTests
 
         internal IReadOnlyDictionary<string, string> StatePaths { get; private set; } = null!;
 
-        internal Nuplane.Builder.PackageStoreMemberDeclaration[] CompleteRoster => StatePaths.Select(pair =>
-            new Nuplane.Builder.PackageStoreMemberDeclaration("default", pair.Key, pair.Value)).ToArray();
+        internal Nuplane.Builder.PackageStoreMemberDeclaration[] CompleteRoster => StatePaths
+            .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+            .Select(pair =>
+                new Nuplane.Builder.PackageStoreMemberDeclaration("default", pair.Key, pair.Value)).ToArray();
 
         internal StoreStateRecord BuildProtectedState(
             string memberId,
@@ -384,8 +389,9 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 _stateParents.Add(pair.Key, OwnedProcessDirectory.Open(Files, Path.GetDirectoryName(pair.Value)!));
             }
 
-            var declarations = paths.Select(pair => new RootMemberRecord(pair.Key, pair.Value,
-                new RootMemberRecord.DeclaredBinding())).ToArray();
+            var declarations = paths.OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => new RootMemberRecord(pair.Key, pair.Value,
+                    new RootMemberRecord.DeclaredBinding())).ToArray();
             // Resolve migration inputs before enrollment; incomplete roots intentionally refuse package reads.
             var shared = CreateInstall("Shared.Dependency", "2.1.0", dependencyId: null, sourceName: "feed");
             var firstRoot = CreateInstall("Root.First", "1.0.0", "Shared.Dependency", "member-a");
@@ -409,7 +415,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 RootMembershipBindingEpoch, quiescentCutoverConfirmed: true,
                 async (locked, token) =>
                 {
-                    foreach (var memberId in paths.Keys)
+                    foreach (var memberId in paths.Keys.OrderBy(static memberId => memberId, StringComparer.Ordinal))
                         await locked.PublishStateAsync(memberId, memberId == "member-a" ? stateA : stateB, token);
                     return true;
                 }, CancellationToken.None);
@@ -503,9 +509,14 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         private int _activeMemberLocks;
         private int _successfulRootLockAcquisitions;
         private int _successfulMemberLockAcquisitions;
+        private int _packageFileAccessAttempts;
 
         internal int SuccessfulRootLockAcquisitions => Volatile.Read(ref _successfulRootLockAcquisitions);
         internal int SuccessfulMemberLockAcquisitions => Volatile.Read(ref _successfulMemberLockAcquisitions);
+        internal int PackageFileAccessAttempts => Volatile.Read(ref _packageFileAccessAttempts);
+
+        internal void ResetPackageFileAccessAttempts()
+            => Volatile.Write(ref _packageFileAccessAttempts, 0);
 
         internal void RegisterPackageDirectory(PhysicalStoreDirectoryHandle directory)
             => _packageDirectories.TryAdd(inner.InspectHandle(directory).Identity, 0);
@@ -608,7 +619,11 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             PhysicalStoreDirectoryHandle parent,
             string singleName,
             PhysicalFileIdentity expectedFileIdentity)
-            => ((IPhysicalStoreNameFileSystem)inner).ObserveCanonicalFileNameNoFollow(parent, singleName, expectedFileIdentity);
+        {
+            PauseBeforePackageFileAccess(parent, singleName);
+            return ((IPhysicalStoreNameFileSystem)inner)
+                .ObserveCanonicalFileNameNoFollow(parent, singleName, expectedFileIdentity);
+        }
         public PhysicalStoreEntryInfo PublishControlFileAt(
             PhysicalStoreDirectoryHandle parent,
             string stagedName,
@@ -680,8 +695,11 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         {
             var parentIdentity = inner.InspectHandle(parent).Identity;
             if (_packageDirectories.ContainsKey(parentIdentity))
+            {
+                Interlocked.Increment(ref _packageFileAccessAttempts);
                 Volatile.Read(ref _packageFileOpenBarrier)?.PauseBeforeOpen(
                     parentIdentity, singleName, Volatile.Read(ref _activeRootLocks), Volatile.Read(ref _activeMemberLocks));
+            }
         }
 
         private void RememberOperationLockFile(string singleName, PhysicalStoreFileHandle file)
