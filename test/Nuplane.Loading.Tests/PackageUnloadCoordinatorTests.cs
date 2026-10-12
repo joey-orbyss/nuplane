@@ -54,9 +54,9 @@ public sealed class PackageUnloadCoordinatorTests : IDisposable
     {
         var (unload, contextWeakReference) = await UnloadAndDropContext();
 
-        if (unload.Outcome == UnloadOutcome.Unloaded)
-            Assert.False(contextWeakReference.IsAlive,
-                "An unload cannot be reported complete while the collectible context is finalizing.");
+        Assert.Equal(UnloadOutcome.Unloaded, unload.Outcome);
+        Assert.False(contextWeakReference.IsAlive,
+            "An unload cannot be reported complete while the collectible context is finalizing.");
     }
 
     [Fact]

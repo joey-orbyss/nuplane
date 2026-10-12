@@ -38,8 +38,8 @@ public sealed class PackageGraphUseLeaseOwner : IAsyncDisposable
             if (_disposeRequested || _transferred)
                 throw new InvalidOperationException("Lease release authority is no longer owned by this caller.");
 
-            // A short weak reference clears before finalization. Collectible load-context finalization
-            // completes native-library release, so observe resurrection before releasing the graph lease.
+            // A short weak reference clears before finalization. Observe collectible context death only
+            // after finalization, so the graph lease remains tied to its actual context lifetime.
             var weakLifetime = new WeakReference<object>(lifetime, trackResurrection: isCollectible);
             _control.TransferToLifetime(this, weakLifetime, isCollectible);
             _transferred = true;
