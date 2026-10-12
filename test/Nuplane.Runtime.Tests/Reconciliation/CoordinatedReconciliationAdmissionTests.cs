@@ -1254,7 +1254,9 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         internal Dictionary<string, StoreStateRecord> States { get; } = new(StringComparer.Ordinal);
         private bool _includeLoadableAssemblies;
 
-        internal static async Task<CompletedMembershipFixture> CreateAsync(bool includeLoadableAssemblies = false)
+        internal static async Task<CompletedMembershipFixture> CreateAsync(
+            bool includeLoadableAssemblies = false,
+            bool firstMemberProtectedEmpty = false)
         {
             var fixture = new CompletedMembershipFixture
             {
@@ -1276,7 +1278,9 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
                     new RootMemberRecord.DeclaredBinding())).ToArray();
                 // Migration inputs are read while positively Unenrolled, before declaring authority.
                 fixture.SharedInstallPath = fixture.Install("Shared.Dependency", "2.1.0", dependencyId: null);
-                fixture.States.Add("first", await fixture.BuildProtectedStateAsync("first", "Root.First"));
+                fixture.States.Add("first", firstMemberProtectedEmpty
+                    ? fixture.BuildProtectedEmptyState("first")
+                    : await fixture.BuildProtectedStateAsync("first", "Root.First"));
                 fixture.States.Add("second", await fixture.BuildProtectedStateAsync("second", "Root.Second"));
                 registry.InitializeIncomplete(root, fixture.RootIdentity, 1, declarations, true, CancellationToken.None);
 
@@ -1316,6 +1320,17 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         {
             var registry = new StoreRegistry(new StoreStateSerializer(), StatePaths[memberId]);
             return await registry.GetStateAsync(CancellationToken.None);
+        }
+
+        private StoreStateRecord BuildProtectedEmptyState(string memberId)
+        {
+            var state = StoreStateRecord.Empty();
+            var closure = new PackageProtectionClosure(PackageProtectionClosureKnowledge.Known, null, []);
+            var candidate = new PackageProtectionRecord(1, RootIdentity, 1, memberId, 1,
+                ProtectionDigest.StateBody(state), new string('0', 64), closure, closure, [], false);
+            var protection = new PackageProtectionRecord(1, RootIdentity, 1, memberId, 1,
+                candidate.StateBodyDigest, ProtectionDigest.Protection(candidate), closure, closure, [], false);
+            return state with { ProtectionRecord = protection };
         }
 
         private async Task<StoreStateRecord> BuildProtectedStateAsync(string memberId, string rootPackageId)

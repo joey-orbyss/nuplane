@@ -141,6 +141,21 @@ public static class NuplaneRuntimeRegistrationServices
                 : new ActivePackageCatalog(storeRegistry, logger, metrics);
         });
         services.AddSingleton<IActivePackageCatalog>(sp => sp.GetRequiredService<ActivePackageCatalog>());
+        services.TryAddSingleton<NuplaneStoreSnapshotAccess>(sp =>
+        {
+            var composition = sp.GetRequiredService<PackageStoreCompositionSnapshot>();
+            if (!composition.IsParticipant)
+                throw new PackageStoreAdmissionException(PackageStoreAdmissionReason.UnsupportedParticipant,
+                    "An admitted active snapshot is available only from a coordinated participant composition.");
+
+            var admission = RequireValidatedParticipantAdmission(sp, composition) as PackageStoreAdmission
+                ?? throw UnsupportedParticipantRecovery("The selected snapshot route has no built-in native admission.");
+            var registry = sp.GetRequiredService<IStoreRegistry>() as StoreRegistry
+                ?? throw UnsupportedParticipantRecovery("The selected snapshot route has no built-in coordinated registry.");
+            var serializer = sp.GetRequiredService<IStoreStateSerializer>() as StoreStateSerializer
+                ?? throw UnsupportedParticipantRecovery("The selected snapshot route has no built-in protection serializer.");
+            return new NuplaneStoreSnapshotAccess(registry, serializer, admission);
+        });
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IOperationalStateContributor, PackageCatalogOperationalStateContributor>());
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IOperationalStateContributor, StartupRecoveryOperationalStateContributor>());
         services.AddSingleton(sp =>

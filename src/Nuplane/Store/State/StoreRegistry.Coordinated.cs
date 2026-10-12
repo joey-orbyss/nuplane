@@ -189,7 +189,7 @@ public sealed partial class StoreRegistry
         return state with { ProtectionRecord = protection };
     }
 
-    private static StoreStateRecord CopyState(StoreStateRecord state)
+    internal static StoreStateRecord CopyState(StoreStateRecord state)
     {
         ArgumentNullException.ThrowIfNull(state);
         return new StoreStateRecord(

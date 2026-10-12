@@ -118,7 +118,8 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         CompletedMembershipFixture selected,
         CompletedMembershipFixture peer,
         IStoreRegistry? registryOverride = null,
-        IPackageStoreAdmission? admissionOverride = null)
+        IPackageStoreAdmission? admissionOverride = null,
+        string selectedStateMemberId = "first")
     {
         var members = selected.StatePaths.Select(pair =>
                 new PackageStoreMemberDeclaration("default", pair.Key, pair.Value))
@@ -130,7 +131,7 @@ public sealed partial class CoordinatedReconciliationAdmissionTests
         services.AddNuplane(builder =>
         {
             builder.AddPackageStoreRoot("peer", peer.PackageInstallRoot);
-            builder.WithStateFile(selected.StatePaths["first"]);
+            builder.WithStateFile(selected.StatePaths[selectedStateMemberId]);
             builder.UseCoordinatedPackageStore(members, allClientsParticipate: true);
         });
         services.Configure<FeedResolutionOptions>(options => options.PackageInstallRoot = selected.PackageInstallRoot);

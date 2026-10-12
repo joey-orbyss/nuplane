@@ -191,6 +191,36 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
         IReadOnlyCollection<string> installPaths,
         PackageStoreAdmissionKind kind,
         CancellationToken cancellationToken = default)
+        => (await AcquirePathAdmissionAsync(installPaths, kind, includeConfiguredStateRoot: false, cancellationToken)
+            .ConfigureAwait(false)).Paths;
+
+    internal async ValueTask<PackageStoreSnapshotAdmission> AcquireForActiveSnapshotAsync(
+        IReadOnlyCollection<string> installPaths,
+        CancellationToken cancellationToken)
+    {
+        var result = await AcquirePathAdmissionAsync(installPaths, PackageStoreAdmissionKind.Maintenance,
+            includeConfiguredStateRoot: true, cancellationToken).ConfigureAwait(false);
+        if (result.State is { } state)
+            return new PackageStoreSnapshotAdmission(result.Paths, state);
+
+        var invariantFailure = new InvalidOperationException(
+            "Snapshot admission did not reread the selected state member.");
+        try { await result.Paths.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception cleanupFailure)
+        {
+            throw new AggregateException(
+                "Snapshot admission failed its selected-state invariant and its retained path owners did not release cleanly.",
+                invariantFailure, cleanupFailure);
+        }
+
+        throw invariantFailure;
+    }
+
+    private async ValueTask<PathAdmissionResult> AcquirePathAdmissionAsync(
+        IReadOnlyCollection<string> installPaths,
+        PackageStoreAdmissionKind kind,
+        bool includeConfiguredStateRoot,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(installPaths);
         if (!Enum.IsDefined(kind))
@@ -205,6 +235,7 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
         var groups = new Dictionary<PhysicalRootIdentity, RootGroup>();
         var owners = new List<RootOwnerEntry>();
         CatalogRuntimeOperationSession? catalogSession = null;
+        ResolvedPackageStorePath? stateRootObservation = null;
         var transferred = false;
         Exception? admissionError = null;
         try
@@ -254,12 +285,40 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                 group.Paths.Add(observation);
             }
 
+            if (includeConfiguredStateRoot)
+            {
+                if (_trustedCatalog is null || SelectedStoreRegistry is not ICoordinatedStoreRegistry)
+                    throw Refusal("An admitted active snapshot requires the selected coordinated registry and trusted complete catalog.");
+
+                stateRootObservation = _resolver.ResolveCatalogAdmissionCandidate(_configuredRootLocator,
+                    PhysicalStorePathTarget.ConfiguredRootDirectoryAllowMissingSuffix,
+                    exactBaseLocator: _configuredRootBaseLocator);
+                var stateRoot = stateRootObservation.RootIdentity
+                    ?? throw Refusal("The selected state member's configured root has no retained enrolled identity.");
+                var stateCandidate = stateRootObservation.MembershipCandidate
+                    ?? throw Refusal("The selected state member's configured root has no retained membership candidate.");
+                var stateLedgerIdentity = stateRootObservation.MembershipLedgerIdentity
+                    ?? throw Refusal("The selected state member's configured root has no retained ledger identity.");
+                if (!groups.TryGetValue(stateRoot, out var stateGroup))
+                {
+                    groups.Add(stateRoot, new RootGroup(stateRoot, stateCandidate.EnrollmentEpoch,
+                        stateCandidate.LedgerDigest, stateLedgerIdentity, stateRootObservation.AuthorityRoot!));
+                }
+                else if (stateGroup.Epoch != stateCandidate.EnrollmentEpoch ||
+                         !string.Equals(stateGroup.LedgerDigest, stateCandidate.LedgerDigest, StringComparison.Ordinal) ||
+                         stateGroup.LedgerIdentity != stateLedgerIdentity)
+                {
+                    throw Refusal("The selected state root and requested install paths observed conflicting membership evidence.", stateRoot);
+                }
+            }
+
             var orderedGroups = groups.Values.OrderBy(static group => group.Root, PhysicalRootIdentityComparer.Instance).ToArray();
             owners.EnsureCapacity(orderedGroups.Length);
             if (_trustedCatalog is not null && orderedGroups.Length > 0)
             {
                 catalogSession = await AcquireCatalogRuntimeSessionAsync(kind, cancellationToken).ConfigureAwait(false);
-                catalogSession.RevalidateRequestObservations(observations.Select(static observation => observation.Resolved));
+                catalogSession.RevalidateRequestObservations(observations.Select(static observation => observation.Resolved)
+                    .Concat(stateRootObservation is null ? [] : [stateRootObservation]));
 
                 foreach (var group in orderedGroups)
                 {
@@ -278,7 +337,8 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                             await StalePackageGraphUseRecovery.RecoverAsync(_files,
                                 retainedProjection.LockedMemberLocations, group.Root, verifiedLedger,
                                 cancellationToken).ConfigureAwait(false);
-                        catalogSession.RevalidateRequestObservations(observations.Select(static observation => observation.Resolved));
+                        catalogSession.RevalidateRequestObservations(observations.Select(static observation => observation.Resolved)
+                            .Concat(stateRootObservation is null ? [] : [stateRootObservation]));
                         var expectedIdentities = group.Paths
                             .GroupBy(static observation => observation.Path, StringComparer.Ordinal)
                             .ToDictionary(static paths => paths.Key,
@@ -418,8 +478,25 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
             var pathControl = new PathAdmissionControl(ownerByRoot, retainedOwners, observations);
             var admission = new PackageStorePathAdmission(entries, pathControl);
             pathControl.Bind(admission);
+
+            StoreStateRecord? snapshotState = null;
+            if (includeConfiguredStateRoot)
+            {
+                var selectedStateObservation = stateRootObservation
+                    ?? throw new InvalidOperationException("The selected state root observation was not retained.");
+                var stateRoot = selectedStateObservation.RootIdentity!;
+                var stateOwner = owners.Single(owner => owner.Group.Root == stateRoot).State!.Owner;
+                using var borrow = stateOwner.Borrow();
+                snapshotState = await ((ICoordinatedStoreRegistry)SelectedStoreRegistry!).ReadCoordinatedStateAsync(
+                    borrow, cancellationToken).ConfigureAwait(false);
+                catalogSession!.RevalidateRequestObservations(observations.Select(static observation => observation.Resolved)
+                    .Concat([selectedStateObservation]));
+                selectedStateObservation.Dispose();
+                stateRootObservation = null;
+            }
+
             transferred = true;
-            return admission;
+            return new PathAdmissionResult(admission, snapshotState);
         }
         catch (Exception exception)
         {
@@ -457,6 +534,12 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
                     catch (Exception cleanupError) { AddDistinctCleanupErrors(cleanupErrors, cleanupError, admissionError); }
                 }
 
+                if (stateRootObservation is not null)
+                {
+                    try { stateRootObservation.Dispose(); }
+                    catch (Exception exception) { cleanupErrors.Add(exception); }
+                }
+
                 if (cleanupErrors.Count > 0)
                 {
                     var failures = admissionError is null ? cleanupErrors : new[] { admissionError }.Concat(cleanupErrors);
@@ -467,6 +550,10 @@ internal sealed class PackageStoreAdmission : IPackageStoreAdmission
             }
         }
     }
+
+    private sealed record PathAdmissionResult(PackageStorePathAdmission Paths, StoreStateRecord? State);
+
+    internal sealed record PackageStoreSnapshotAdmission(PackageStorePathAdmission Paths, StoreStateRecord State);
 
     private async Task<RootMembershipRegistry.CompleteMemberLocationsOwner> AcquireVerifiedOwnerAsync(
         PhysicalStoreDirectoryHandle root,
