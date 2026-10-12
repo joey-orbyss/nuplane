@@ -222,7 +222,7 @@ public sealed class NupkgFileStabilityProbeTests
         bool stable;
         try
         {
-            stable = await probe.IsStableAsync(filePath);
+            stable = await probe.IsStableGuardedAsync(filePath);
         }
         finally
         {
