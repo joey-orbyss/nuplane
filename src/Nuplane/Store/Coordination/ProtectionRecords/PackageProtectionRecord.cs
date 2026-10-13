@@ -25,6 +25,7 @@ public sealed class PackageProtectionRecord
     /// <param name="recoverableClosure">The independent recovery-selectable graph closure.</param>
     /// <param name="retiredGraphs">Explicit historical evidence for graphs no longer recoverable.</param>
     /// <param name="legacyUnknownRecovery">Whether an unresolved legacy recovery promise remains.</param>
+    /// <param name="legacyRecoveryRetirementEvidence">Source-bound evidence for explicitly retired legacy LKG entries.</param>
     /// <exception cref="ArgumentException">A closure or retirement list is inconsistent.</exception>
     /// <exception cref="ArgumentNullException">A required argument is null.</exception>
     internal PackageProtectionRecord(
@@ -38,7 +39,8 @@ public sealed class PackageProtectionRecord
         PackageProtectionClosure activeClosure,
         PackageProtectionClosure recoverableClosure,
         IEnumerable<RetiredGraphEvidence> retiredGraphs,
-        bool legacyUnknownRecovery)
+        bool legacyUnknownRecovery,
+        LegacyRecoveryRetirementEvidence? legacyRecoveryRetirementEvidence = null)
     {
         if (schemaVersion != CurrentSchemaVersion)
             throw new ArgumentOutOfRangeException(nameof(schemaVersion), "The protection schema version is unsupported.");
@@ -81,6 +83,12 @@ public sealed class PackageProtectionRecord
         }
         if (copiedRetired.Any(retired => retired.RetiringEpoch > enrollmentEpoch || retired.RetiringRevision > revision))
             throw new ArgumentException("Retirement evidence cannot come from a future epoch or state revision.", nameof(retiredGraphs));
+        var copiedLegacyRetirement = legacyRecoveryRetirementEvidence?.Copy();
+        if (copiedLegacyRetirement is not null &&
+            (!string.Equals(copiedLegacyRetirement.MemberId, memberId, StringComparison.Ordinal) ||
+             legacyUnknownRecovery || copiedLegacyRetirement.RetiringEpoch > enrollmentEpoch ||
+             copiedLegacyRetirement.RetiringRevision > revision))
+            throw new ArgumentException("Legacy recovery retirement evidence must be resolved and cannot come from a future epoch or revision.", nameof(legacyRecoveryRetirementEvidence));
 
         SchemaVersion = schemaVersion;
         RootIdentity = ProtectionRecordValueCopies.CopyRoot(rootIdentity);
@@ -93,6 +101,7 @@ public sealed class PackageProtectionRecord
         RecoverableClosure = recoverableClosure.Copy();
         RetiredGraphs = new ReadOnlyCollection<RetiredGraphEvidence>(copiedRetired);
         LegacyUnknownRecovery = legacyUnknownRecovery;
+        LegacyRecoveryRetirementEvidence = copiedLegacyRetirement;
     }
 
     /// <summary>Gets the protection-record schema version.</summary>
@@ -128,6 +137,9 @@ public sealed class PackageProtectionRecord
     /// <summary>Gets whether an unresolved legacy recovery promise remains in addition to known records.</summary>
     public bool LegacyUnknownRecovery { get; }
 
+    /// <summary>Gets source-bound evidence for an explicit retirement of unresolved legacy LKG history.</summary>
+    internal LegacyRecoveryRetirementEvidence? LegacyRecoveryRetirementEvidence { get; }
+
     internal bool HasSamePayloadAs(PackageProtectionRecord other)
         => SchemaVersion == other.SchemaVersion && RootIdentity == other.RootIdentity &&
            EnrollmentEpoch == other.EnrollmentEpoch && string.Equals(MemberId, other.MemberId, StringComparison.Ordinal) &&
@@ -135,6 +147,9 @@ public sealed class PackageProtectionRecord
            string.Equals(ProtectionDigest, other.ProtectionDigest, StringComparison.Ordinal) &&
            LegacyUnknownRecovery == other.LegacyUnknownRecovery &&
            ActiveClosure.HasSamePayloadAs(other.ActiveClosure) && RecoverableClosure.HasSamePayloadAs(other.RecoverableClosure) &&
+           (LegacyRecoveryRetirementEvidence is null
+               ? other.LegacyRecoveryRetirementEvidence is null
+               : other.LegacyRecoveryRetirementEvidence is not null && LegacyRecoveryRetirementEvidence.HasSamePayloadAs(other.LegacyRecoveryRetirementEvidence)) &&
            RetiredGraphs.Count == other.RetiredGraphs.Count &&
            RetiredGraphs.OrderBy(static graph => graph.SnapshotId)
                .Zip(other.RetiredGraphs.OrderBy(static graph => graph.SnapshotId))

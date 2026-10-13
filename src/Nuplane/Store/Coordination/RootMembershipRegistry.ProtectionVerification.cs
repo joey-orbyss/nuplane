@@ -141,7 +141,8 @@ internal sealed partial class RootMembershipRegistry
         RootMembershipStatus requiredStatus,
         Func<string, CancellationToken, Task<StoreStateRecord?>> readMember,
         Action revalidateMembers,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        RootMembershipRecord? authorityLedger = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         revalidateMembers();
@@ -156,7 +157,7 @@ internal sealed partial class RootMembershipRegistry
         var result = new Dictionary<string, StoreStateRecord>(StringComparer.Ordinal);
         var observations = new List<IDisposable>();
         var revalidations = new List<Action>();
-        var scope = new MemberLocatorReplayScope(ledger);
+        var scope = new MemberLocatorReplayScope(authorityLedger ?? ledger);
         try
         {
             foreach (var member in ledger.Members)

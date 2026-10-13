@@ -15,7 +15,8 @@ internal static class PackageStoreProtectionRecordFactory
         PackageProtectionClosure activeClosure,
         PackageProtectionClosure recoverableClosure,
         IEnumerable<RetiredGraphEvidence>? retiredGraphs = null,
-        bool legacyUnknownRecovery = false)
+        bool legacyUnknownRecovery = false,
+        LegacyRecoveryRetirementEvidence? legacyRecoveryRetirementEvidence = null)
     {
         ArgumentNullException.ThrowIfNull(state);
         ArgumentNullException.ThrowIfNull(root);
@@ -25,15 +26,16 @@ internal static class PackageStoreProtectionRecordFactory
         ArgumentNullException.ThrowIfNull(activeClosure);
         ArgumentNullException.ThrowIfNull(recoverableClosure);
 
+        var effectiveLegacyRetirement = legacyRecoveryRetirementEvidence ?? state.ProtectionRecord?.LegacyRecoveryRetirementEvidence;
         var candidate = new PackageProtectionRecord(PackageProtectionRecord.CurrentSchemaVersion,
             root, epoch, memberId, revision, ProtectionDigest.StateBody(state), new string('0', 64),
-            activeClosure, recoverableClosure, retiredGraphs ?? [], legacyUnknownRecovery);
+            activeClosure, recoverableClosure, retiredGraphs ?? [], legacyUnknownRecovery, effectiveLegacyRetirement);
         return state with
         {
             ProtectionRecord = new PackageProtectionRecord(candidate.SchemaVersion, candidate.RootIdentity,
                 candidate.EnrollmentEpoch, candidate.MemberId, candidate.Revision, candidate.StateBodyDigest,
                 ProtectionDigest.Protection(candidate), candidate.ActiveClosure, candidate.RecoverableClosure,
-                candidate.RetiredGraphs, candidate.LegacyUnknownRecovery),
+                candidate.RetiredGraphs, candidate.LegacyUnknownRecovery, candidate.LegacyRecoveryRetirementEvidence),
             ProtectionBundle = null
         };
     }

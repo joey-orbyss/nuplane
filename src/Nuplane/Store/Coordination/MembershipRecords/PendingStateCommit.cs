@@ -20,7 +20,8 @@ internal sealed class PendingStateCommit
         PackageProtectionRecord nextProtectionRecord,
         PhysicalFileIdentity? stagedStateFileIdentity = null,
         PhysicalFileIdentity? backupStateFileIdentity = null,
-        PendingStateCommitResolution resolution = PendingStateCommitResolution.Unresolved)
+        PendingStateCommitResolution resolution = PendingStateCommitResolution.Unresolved,
+        PendingMembershipMigration? pendingMembershipMigration = null)
     {
         ArgumentNullException.ThrowIfNull(rootIdentity);
         if (enrollmentEpoch <= 0)
@@ -63,7 +64,7 @@ internal sealed class PendingStateCommit
 
         var expectedNextRevision = prior switch
         {
-            RootMemberRecord.ProspectiveBinding => 1,
+            RootMemberRecord.ProspectiveBinding => GetMovedSourceNextRevision(member.MemberId, pendingMembershipMigration) ?? 1,
             RootMemberRecord.ExistingUnprotectedBinding => 1,
             RootMemberRecord.AcknowledgedBinding acknowledged => GetNextRevision(acknowledged),
             _ => throw new ArgumentException("A pending state commit requires a prospective, existing-unprotected, or acknowledged member binding.", nameof(member))
@@ -142,5 +143,18 @@ internal sealed class PendingStateCommit
         {
             throw new ArgumentException("The prior protection revision cannot be incremented.", nameof(acknowledged), exception);
         }
+    }
+
+    private static long? GetMovedSourceNextRevision(
+        string memberId,
+        PendingMembershipMigration? migration)
+    {
+        if (migration is null || !migration.MovedMemberIds.Contains(memberId, StringComparer.Ordinal))
+            return null;
+        var source = migration.PriorCompleteLedger.Members.SingleOrDefault(member =>
+            string.Equals(member.MemberId, memberId, StringComparison.Ordinal));
+        return source?.Binding is RootMemberRecord.AcknowledgedBinding acknowledged
+            ? GetNextRevision(acknowledged)
+            : throw new ArgumentException("A moved migration member must retain its acknowledged prior protection.", nameof(migration));
     }
 }

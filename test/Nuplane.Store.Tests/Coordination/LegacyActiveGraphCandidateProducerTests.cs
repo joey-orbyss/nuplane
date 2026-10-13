@@ -15,7 +15,7 @@ using Nuplane.Tests.Shared;
 namespace Nuplane.Store.Tests.Coordination;
 
 [Trait("Platform", "Native")]
-public sealed class LegacyActiveGraphCandidateProducerTests
+public sealed partial class LegacyActiveGraphCandidateProducerTests
 {
     private const string MemberId = "legacy-member";
     private const long EnrollmentEpoch = 23;
@@ -315,7 +315,7 @@ public sealed class LegacyActiveGraphCandidateProducerTests
         }
     }
 
-    private sealed class CandidateFixture : IDisposable
+    internal sealed class CandidateFixture : IDisposable
     {
         private static readonly (string Id, string Version, string Dependency)[] Packages =
         [
@@ -527,6 +527,9 @@ public sealed class LegacyActiveGraphCandidateProducerTests
                     break;
                 case "active-outside-lkg":
                     lkg.Remove("Shared.Dependency");
+                    break;
+                case "extra-lkg":
+                    lkg["Legacy.Recovery"] = "9.9.9";
                     break;
                 case "missing-install":
                     Directory.Delete(sharedInstallPath, recursive: true);

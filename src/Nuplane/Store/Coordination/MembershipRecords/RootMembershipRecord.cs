@@ -15,6 +15,7 @@ internal sealed class RootMembershipRecord
     /// <summary>The current root-membership record schema.</summary>
     internal const int CurrentSchemaVersion = 1;
     internal const int BundleSchemaVersion = 2;
+    internal const int MigrationSchemaVersion = 3;
 
     internal RootMembershipRecord(
         int schemaVersion,
@@ -26,9 +27,10 @@ internal sealed class RootMembershipRecord
         IEnumerable<RootMemberRetirementEvidence> retiredMembers,
         PendingStateCommit? pendingStateCommit,
         string ledgerDigest,
-        PendingGroupPublicationV2? pendingGroupPublicationV2 = null)
+        PendingGroupPublicationV2? pendingGroupPublicationV2 = null,
+        PendingMembershipMigration? pendingMembershipMigration = null)
     {
-        if (schemaVersion is not (CurrentSchemaVersion or BundleSchemaVersion))
+        if (schemaVersion is not (CurrentSchemaVersion or BundleSchemaVersion or MigrationSchemaVersion))
             throw new ArgumentOutOfRangeException(nameof(schemaVersion), "The root-membership schema version is unsupported.");
         ArgumentNullException.ThrowIfNull(rootIdentity);
         if (enrollmentEpoch <= 0)
@@ -140,6 +142,97 @@ internal sealed class RootMembershipRecord
                 throw new ArgumentException("A pending group tuple must preserve the exact local prior member binding.", nameof(pendingGroupPublicationV2));
         }
 
+        if (pendingMembershipMigration is not null)
+        {
+            var prior = pendingMembershipMigration.PriorCompleteLedger;
+            if (schemaVersion != MigrationSchemaVersion || status != RootMembershipStatus.Incomplete ||
+                pendingGroupPublicationV2 is not null || prior.RootIdentity != copiedRoot ||
+                prior.EnrollmentEpoch == long.MaxValue || prior.EnrollmentEpoch + 1 != enrollmentEpoch)
+                throw new ArgumentException("A pending membership migration requires one schema-3 Incomplete ledger immediately after its prior Complete epoch.", nameof(pendingMembershipMigration));
+
+            ProtectionDigest.ValidateCanonicalDigest(prior.LedgerDigest);
+            if (!string.Equals(ProtectionDigest.Ledger(prior), prior.LedgerDigest, StringComparison.Ordinal))
+                throw new ArgumentException("A migration marker must retain a digest-valid prior Complete ledger.", nameof(pendingMembershipMigration));
+
+            var priorMembers = prior.Members.ToDictionary(static member => member.MemberId, StringComparer.Ordinal);
+            var priorRetired = prior.RetiredMembers.ToDictionary(static item => item.MemberId, StringComparer.Ordinal);
+            var targetMembers = copiedTargets.ToHashSet(StringComparer.Ordinal);
+            var expectedUnion = priorMembers.Keys.Concat(targetMembers).ToHashSet(StringComparer.Ordinal);
+            var expectedRetired = prior.RetiredMembers.Select(static item => item.MemberId)
+                .Concat(priorMembers.Keys.Where(id => !targetMembers.Contains(id)))
+                .ToHashSet(StringComparer.Ordinal);
+            if (!memberIds.SetEquals(expectedUnion) ||
+                !copiedRetired.Select(static item => item.MemberId).ToHashSet(StringComparer.Ordinal).SetEquals(expectedRetired))
+                throw new ArgumentException("A migration must retain the exact prior/target member union and explicit removed-member set.", nameof(pendingMembershipMigration));
+
+            foreach (var retired in copiedRetired)
+            {
+                if (priorMembers.TryGetValue(retired.MemberId, out var priorMember))
+                {
+                    if (priorMember.Binding is not RootMemberRecord.AcknowledgedBinding priorBinding ||
+                        !BindingsEqual(priorBinding, retired.PriorBinding))
+                        throw new ArgumentException("Retirement evidence must preserve the exact migration-source acknowledgement.", nameof(retiredMembers));
+                }
+                else if (!priorRetired.TryGetValue(retired.MemberId, out var inherited) ||
+                         !BindingsEqual(inherited.PriorBinding, retired.PriorBinding))
+                {
+                    throw new ArgumentException("A migration may preserve only an inherited retirement binding or retire a prior live acknowledgement.", nameof(retiredMembers));
+                }
+            }
+
+            foreach (var inherited in prior.RetiredMembers)
+            {
+                var retained = copiedRetired.SingleOrDefault(item => string.Equals(item.MemberId, inherited.MemberId, StringComparison.Ordinal));
+                if (retained is null || !BindingsEqual(retained.PriorBinding, inherited.PriorBinding))
+                    throw new ArgumentException("A migration must preserve prior retirement bindings.", nameof(retiredMembers));
+            }
+
+            var expectedMoved = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var targetId in targetMembers)
+            {
+                if (!priorMembers.TryGetValue(targetId, out var priorMember))
+                    continue;
+                if (priorMember.Binding is not RootMemberRecord.AcknowledgedBinding priorBinding)
+                    throw new ArgumentException("A migration source member must retain its acknowledged Complete binding.", nameof(pendingMembershipMigration));
+                var targetMember = copiedMembers.Single(member => string.Equals(member.MemberId, targetId, StringComparison.Ordinal));
+                var targetSlot = targetMember.Binding switch
+                {
+                    RootMemberRecord.ProspectiveBinding prospective => new StateSlotIdentity(
+                        prospective.VerifiedParentIdentity, prospective.NameSemantics, prospective.RequestedBasename),
+                    RootMemberRecord.ExistingUnprotectedBinding unprotected => unprotected.StateSlot,
+                    RootMemberRecord.AcknowledgedBinding acknowledged => acknowledged.StateSlot,
+                    RootMemberRecord.BundleAcknowledgedBinding bundle => bundle.StateSlot,
+                    _ => throw new ArgumentException("A migration target must have an exact bound state slot.", nameof(pendingMembershipMigration))
+                };
+                if (targetSlot != priorBinding.StateSlot)
+                    expectedMoved.Add(targetId);
+            }
+            if (!pendingMembershipMigration.MovedMemberIds.ToHashSet(StringComparer.Ordinal).SetEquals(expectedMoved))
+                throw new ArgumentException("The migration marker must list exactly the retained members whose state slots move.", nameof(pendingMembershipMigration));
+
+            foreach (var movedId in pendingMembershipMigration.MovedMemberIds)
+            {
+                if (!targetMembers.Contains(movedId) || !priorMembers.TryGetValue(movedId, out var priorMember) ||
+                    priorMember.Binding is not RootMemberRecord.AcknowledgedBinding priorBinding)
+                    throw new ArgumentException("A state-slot move must identify one retained prior acknowledged member.", nameof(pendingMembershipMigration));
+                var targetMember = copiedMembers.SingleOrDefault(member => string.Equals(member.MemberId, movedId, StringComparison.Ordinal));
+                var targetSlot = targetMember?.Binding switch
+                {
+                    RootMemberRecord.ProspectiveBinding prospective => new StateSlotIdentity(
+                        prospective.VerifiedParentIdentity, prospective.NameSemantics, prospective.RequestedBasename),
+                    RootMemberRecord.ExistingUnprotectedBinding unprotected => unprotected.StateSlot,
+                    RootMemberRecord.AcknowledgedBinding acknowledged => acknowledged.StateSlot,
+                    _ => null
+                };
+                if (targetSlot is null || targetSlot == priorBinding.StateSlot)
+                    throw new ArgumentException("A state-slot move must retain a distinct target binding and its prior source binding.", nameof(pendingMembershipMigration));
+            }
+        }
+        else if (schemaVersion == MigrationSchemaVersion)
+        {
+            throw new ArgumentException("Schema-3 membership is reserved for a durable pending migration.", nameof(pendingMembershipMigration));
+        }
+
         if (status == RootMembershipStatus.Complete)
         {
             if (pendingStateCommit is not null)
@@ -179,6 +272,7 @@ internal sealed class RootMembershipRecord
         RetiredMembers = new ReadOnlyCollection<RootMemberRetirementEvidence>(copiedRetired);
         PendingStateCommit = pendingStateCommit;
         PendingGroupPublicationV2 = pendingGroupPublicationV2?.Copy();
+        PendingMembershipMigration = pendingMembershipMigration;
         LedgerDigest = ledgerDigest;
     }
 
@@ -199,6 +293,8 @@ internal sealed class RootMembershipRecord
     internal PendingStateCommit? PendingStateCommit { get; }
 
     internal PendingGroupPublicationV2? PendingGroupPublicationV2 { get; }
+
+    internal PendingMembershipMigration? PendingMembershipMigration { get; }
 
     internal string LedgerDigest { get; }
 

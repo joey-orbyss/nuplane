@@ -385,7 +385,8 @@ internal sealed partial class RootMembershipRegistry
         var memberIds = ledger.Members.Select(member => member.MemberId).ToHashSet(StringComparer.Ordinal);
         var targetIds = ledger.TargetMemberIds.ToHashSet(StringComparer.Ordinal);
         if (ledger.Members.Count == 0 || memberIds.Count != ledger.Members.Count ||
-            (policy == LocatorReplayBindingPolicy.Enrollment
+            (policy == LocatorReplayBindingPolicy.Enrollment ||
+             policy == LocatorReplayBindingPolicy.PendingStateRecovery && ledger.PendingMembershipMigration is not null
                 ? targetIds.Count == 0 || !targetIds.IsSubsetOf(memberIds)
                 : !memberIds.SetEquals(targetIds)))
             throw Refused("Every locator replay requires the exact non-empty member and target union.");
@@ -683,12 +684,18 @@ internal sealed partial class RootMembershipRegistry
         long expectedEnrollmentEpoch,
         CatalogRuntimeOperationSession? catalogSession = null,
         Func<RootMembershipRecord, Task>? afterOwnedPublication = null,
-        Action? revalidateProjectionRoot = null)
+        Action? revalidateProjectionRoot = null,
+        MigrationSourceLocations? migrationSources = null)
     {
         Func<LockedMemberLocations, CancellationToken, Task<RootMembershipRecord>>? completeEnrollment =
             policy == LocatorReplayBindingPolicy.Enrollment
                 ? (context, token) => CompleteEnrollmentUnderOwnerAsync(transaction, root, context,
                     expectedRoot, expectedEnrollmentEpoch, token)
+                : null;
+        Func<LockedMemberLocations, CancellationToken, Task<RootMembershipRecord>>? completeMigration =
+            policy == LocatorReplayBindingPolicy.Enrollment && migrationSources is not null
+                ? (context, token) => CompleteMembershipMigrationUnderOwnerAsync(transaction, root, context,
+                    expectedRoot, expectedEnrollmentEpoch, migrationSources.PriorLedger, token)
                 : null;
         return new LockedMemberLocations(
             _files,
@@ -727,7 +734,77 @@ internal sealed partial class RootMembershipRegistry
             catalogSession,
             afterOwnedPublication,
             revalidateProjectionRoot,
-            completeEnrollment);
+            completeEnrollment,
+            migrationSources?.PriorLedger,
+            migrationSources?.Scope,
+            migrationSources?.Locations,
+            migrationSources is null ? null : (memberId, token) => ReadMigrationSourceStateAsync(
+                transaction, migrationSources.PriorLedger, migrationSources.Locations, memberId, token),
+            completeMigration);
+    }
+
+    private sealed record MigrationSourceLocations(
+        RootMembershipRecord PriorLedger,
+        MemberLocatorReplayScope Scope,
+        IReadOnlyDictionary<string, ResolvedMemberStateLocation> Locations);
+
+    private async Task<StoreStateRecord?> ReadMigrationSourceStateAsync(
+        Transaction transaction,
+        RootMembershipRecord priorLedger,
+        IReadOnlyDictionary<string, ResolvedMemberStateLocation> locations,
+        string memberId,
+        CancellationToken cancellationToken)
+    {
+        var current = transaction.ReadCurrent();
+        if (current.PendingMembershipMigration is not { } migration ||
+            !string.Equals(migration.PriorCompleteLedger.LedgerDigest, priorLedger.LedgerDigest, StringComparison.Ordinal))
+            throw Refused("The retained migration source no longer matches the durable pending marker.");
+        var priorMember = priorLedger.Members.SingleOrDefault(member =>
+            string.Equals(member.MemberId, memberId, StringComparison.Ordinal))
+            ?? throw Refused("The requested migration source is absent from the prior Complete roster.");
+        if (priorMember.Binding is not RootMemberRecord.AcknowledgedBinding)
+            throw Refused("A migration source must retain its exact prior Complete acknowledgement.");
+        var location = locations.TryGetValue(memberId, out var found)
+            ? found
+            : throw Refused("The requested state-slot move has no separately retained source location.");
+        location.Revalidate();
+        return (await ReadPriorAsync(priorMember.Binding, location.Parent, cancellationToken).ConfigureAwait(false))?.State;
+    }
+
+    private static void RevalidateMigrationSourceMap(
+        RootMembershipRecord current,
+        RootMembershipRecord? priorLedger,
+        MemberLocatorReplayScope? sourceScope,
+        IReadOnlyDictionary<string, ResolvedMemberStateLocation> sourceLocations)
+    {
+        if (priorLedger is null || sourceScope is null)
+        {
+            if (sourceLocations.Count != 0)
+                throw Refused("Migration source locations require their retained source ledger scope.");
+            return;
+        }
+
+        sourceScope.EnsureActive();
+        if (current.PendingMembershipMigration is not { } migration ||
+            current.RootIdentity != priorLedger.RootIdentity ||
+            !string.Equals(migration.PriorCompleteLedger.LedgerDigest, priorLedger.LedgerDigest, StringComparison.Ordinal))
+            throw Refused("The pending migration no longer retains the exact source ledger for its moved members.");
+
+        var moved = migration.MovedMemberIds.ToHashSet(StringComparer.Ordinal);
+        if (!moved.SetEquals(sourceLocations.Keys))
+            throw Refused("The retained migration source location map does not match the exact moved-member set.");
+        foreach (var memberId in moved)
+        {
+            var sourceMember = priorLedger.Members.SingleOrDefault(member =>
+                string.Equals(member.MemberId, memberId, StringComparison.Ordinal))
+                ?? throw Refused("A moved member is absent from the retained source ledger.");
+            if (sourceMember.Binding is not RootMemberRecord.AcknowledgedBinding acknowledged)
+                throw Refused("A moved member source is not an acknowledged Complete binding.");
+            var location = sourceLocations[memberId];
+            location.Revalidate();
+            if (location.Slot != acknowledged.StateSlot || location.ExistingFileIdentity != acknowledged.ObservedStateFileIdentity)
+                throw Refused("A moved member's original state slot changed during migration.");
+        }
     }
 
     private LockedMemberLocations.ConfiguredMemberBinding BindConfiguredStateFile(
@@ -938,7 +1015,12 @@ internal sealed partial class RootMembershipRegistry
         var protection = nextState.ProtectionRecord ?? throw Refused("An enrollment candidate must carry persisted protection.");
         var expectedRevision = member.Binding is RootMemberRecord.AcknowledgedBinding priorAcknowledgement
             ? checked(priorAcknowledgement.ProtectionRecord.Revision + 1)
-            : 1;
+            : ledger.PendingMembershipMigration is { } migration &&
+              migration.MovedMemberIds.Contains(memberId, StringComparer.Ordinal) &&
+              migration.PriorCompleteLedger.Members.SingleOrDefault(candidate =>
+                  string.Equals(candidate.MemberId, memberId, StringComparison.Ordinal))?.Binding is RootMemberRecord.AcknowledgedBinding movedSource
+                ? checked(movedSource.ProtectionRecord.Revision + 1)
+                : 1;
         if (protection.RootIdentity != expectedRoot || protection.EnrollmentEpoch != expectedEnrollmentEpoch ||
             !string.Equals(protection.MemberId, memberId, StringComparison.Ordinal) || protection.Revision != expectedRevision)
             throw Refused("An enrollment candidate must bind the exact root, epoch, member and next protection revision.");
@@ -1027,7 +1109,11 @@ internal sealed partial class RootMembershipRegistry
             throw Refused("Local recovery replay requires one exact recoverable PendingState transaction on fully bound members.");
 
         var memberIds = ledger.Members.Select(static member => member.MemberId).ToHashSet(StringComparer.Ordinal);
-        if (memberIds.Count != ledger.Members.Count || !memberIds.SetEquals(ledger.TargetMemberIds))
+        var targets = ledger.TargetMemberIds.ToHashSet(StringComparer.Ordinal);
+        if (memberIds.Count != ledger.Members.Count ||
+            (ledger.PendingMembershipMigration is null
+                ? !memberIds.SetEquals(targets)
+                : targets.Count == 0 || !targets.IsSubsetOf(memberIds)))
             throw Refused("Local pending-state recovery requires the exact member and target union.");
         var pendingMember = ledger.Members.SingleOrDefault(member =>
             string.Equals(member.MemberId, pending.MemberId, StringComparison.Ordinal));
@@ -1109,6 +1195,11 @@ internal sealed partial class RootMembershipRegistry
         private readonly Func<RootMembershipRecord, Task>? _afterOwnedPublication;
         private readonly Action? _revalidateProjectionRoot;
         private readonly Func<LockedMemberLocations, CancellationToken, Task<RootMembershipRecord>>? _completeEnrollment;
+        private readonly MemberLocatorReplayScope? _migrationSourceScope;
+        private readonly RootMembershipRecord? _migrationSourceLedger;
+        private readonly IReadOnlyDictionary<string, ResolvedMemberStateLocation> _migrationSourceLocations;
+        private readonly Func<string, CancellationToken, Task<StoreStateRecord?>>? _readMigrationSourceState;
+        private readonly Func<LockedMemberLocations, CancellationToken, Task<RootMembershipRecord>>? _completeMigration;
         private readonly SemaphoreSlim _operationGate = new(1, 1);
         private MemberLocatorReplayScope _scope;
         private IReadOnlyDictionary<string, ResolvedMemberStateLocation> _locations;
@@ -1136,7 +1227,12 @@ internal sealed partial class RootMembershipRegistry
             CatalogRuntimeOperationSession? catalogSession = null,
             Func<RootMembershipRecord, Task>? afterOwnedPublication = null,
             Action? revalidateProjectionRoot = null,
-            Func<LockedMemberLocations, CancellationToken, Task<RootMembershipRecord>>? completeEnrollment = null)
+            Func<LockedMemberLocations, CancellationToken, Task<RootMembershipRecord>>? completeEnrollment = null,
+            RootMembershipRecord? migrationSourceLedger = null,
+            MemberLocatorReplayScope? migrationSourceScope = null,
+            IReadOnlyDictionary<string, ResolvedMemberStateLocation>? migrationSourceLocations = null,
+            Func<string, CancellationToken, Task<StoreStateRecord?>>? readMigrationSourceState = null,
+            Func<LockedMemberLocations, CancellationToken, Task<RootMembershipRecord>>? completeMigration = null)
         {
             ArgumentNullException.ThrowIfNull(files);
             ArgumentNullException.ThrowIfNull(root);
@@ -1167,6 +1263,13 @@ internal sealed partial class RootMembershipRegistry
             _afterOwnedPublication = afterOwnedPublication;
             _revalidateProjectionRoot = revalidateProjectionRoot;
             _completeEnrollment = completeEnrollment;
+            _migrationSourceLedger = migrationSourceLedger;
+            _migrationSourceScope = migrationSourceScope;
+            _migrationSourceLocations = migrationSourceLocations ??
+                new ReadOnlyDictionary<string, ResolvedMemberStateLocation>(
+                    new Dictionary<string, ResolvedMemberStateLocation>(StringComparer.Ordinal));
+            _readMigrationSourceState = readMigrationSourceState;
+            _completeMigration = completeMigration;
         }
 
         internal RootMembershipRecord Ledger
@@ -1224,6 +1327,15 @@ internal sealed partial class RootMembershipRegistry
             {
                 EnsureActive();
                 return _locations;
+            }
+        }
+
+        internal IReadOnlyDictionary<string, ResolvedMemberStateLocation> MigrationSourceLocations
+        {
+            get
+            {
+                EnsureActive();
+                return _migrationSourceLocations;
             }
         }
 
@@ -1543,13 +1655,36 @@ internal sealed partial class RootMembershipRegistry
         /// <summary>Verifies all intended members and publishes Complete without releasing this root/member owner.</summary>
         internal async Task<RootMembershipRecord> CompleteEnrollmentAsync(CancellationToken cancellationToken)
         {
-            if (_policy != LocatorReplayBindingPolicy.Enrollment || _completeEnrollment is null)
+            if (_policy != LocatorReplayBindingPolicy.Enrollment ||
+                (_completeEnrollment is null && _completeMigration is null))
                 throw Refused("Enrollment completion requires the exact quiescent enrollment owner.");
             await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 EnsureValidMap();
-                return await _completeEnrollment(this, cancellationToken).ConfigureAwait(false);
+                var complete = _getLedger().PendingMembershipMigration is not null
+                    ? _completeMigration ?? throw Refused("A pending membership migration requires its migration owner.")
+                    : _completeEnrollment ?? throw Refused("Initial enrollment requires its enrollment owner.");
+                return await complete(this, cancellationToken).ConfigureAwait(false);
+            }
+            finally { _operationGate.Release(); }
+        }
+
+        /// <summary>Reads the immutable old state slot retained for a member whose configured locator moved.</summary>
+        internal async Task<StoreStateRecord?> ReadMigrationSourceStateAsync(
+            string memberId,
+            CancellationToken cancellationToken)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(memberId);
+            if (_readMigrationSourceState is null)
+                throw Refused("This enrollment owner did not retain a migration source map.");
+            await _operationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                EnsureValidMap();
+                var result = await _readMigrationSourceState(memberId, cancellationToken).ConfigureAwait(false);
+                EnsureValidMap();
+                return result;
             }
             finally { _operationGate.Release(); }
         }
@@ -1629,7 +1764,19 @@ internal sealed partial class RootMembershipRegistry
                 var locations = _locations;
                 _locations = new ReadOnlyDictionary<string, ResolvedMemberStateLocation>(
                     new Dictionary<string, ResolvedMemberStateLocation>(StringComparer.Ordinal));
-                DisposeLocations(locations.Values);
+                try
+                {
+                    DisposeLocations(locations.Values);
+                }
+                finally
+                {
+                    try
+                    {
+                        if (_migrationSourceLocations.Count != 0)
+                            DisposeLocations(_migrationSourceLocations.Values);
+                    }
+                    finally { _migrationSourceScope?.Expire(); }
+                }
             }
             finally
             {
@@ -1652,6 +1799,8 @@ internal sealed partial class RootMembershipRegistry
             var ledger = _getLedger();
             RequireLocatorPolicyLedger(ledger, _scope.RootIdentity, _scope.EnrollmentEpoch, _policy);
             RevalidateMemberLocationMap(ledger, _locations, _policy);
+            RevalidateMigrationSourceMap(ledger, _migrationSourceLedger, _migrationSourceScope,
+                _migrationSourceLocations);
         }
     }
 }

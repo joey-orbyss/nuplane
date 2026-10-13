@@ -53,6 +53,27 @@ internal static partial class ProtectionDigest
         return Digest("PackageProtection", writer => EncodeProtectionFields(writer, protection, includeStoredDigest: false));
     }
 
+    internal static string StateSlotIdentityDigest(StateSlotIdentity slot)
+    {
+        ArgumentNullException.ThrowIfNull(slot);
+        return Digest("LegacyRecoverySourceSlot", writer => writer.Field(1, EncodeStateSlot(slot)));
+    }
+
+    internal static string PhysicalFileIdentityDigest(PhysicalFileIdentity identity)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        return Digest("LegacyRecoverySourceFile", writer => writer.Field(1, EncodePhysicalFile(identity)));
+    }
+
+    internal static string ActiveGraphClosureDigest(IEnumerable<ProtectedGraphSnapshot> graphs)
+    {
+        ArgumentNullException.ThrowIfNull(graphs);
+        var copied = graphs.Select(static graph => graph?.Copy() ?? throw new ArgumentException("Graph closure cannot contain null items.", nameof(graphs)))
+            .OrderBy(static graph => GuidBytes(graph.SnapshotId), ByteArrayComparer.Instance).ToArray();
+        return Digest("LegacyRecoveryActiveGraphClosure", writer =>
+            writer.Field(1, EncodeSequence(copied, EncodeProtectedGraph)));
+    }
+
     /// <summary>Hashes the fixed v2 participant set independently of root-local epochs and revisions.</summary>
     internal static string PackageProtectionParticipantSet(Guid logicalMemberId, IEnumerable<PhysicalRootIdentity> roots)
     {
@@ -108,6 +129,30 @@ internal static partial class ProtectionDigest
         });
     }
 
+    /// <summary>Hashes an operator-confirmed migration retirement bound to its exact prior state record.</summary>
+    internal static string MemberRetirementProof(
+        PhysicalRootIdentity rootIdentity,
+        string memberId,
+        long retiringEpoch,
+        string priorLedgerDigest,
+        string priorStateBodyDigest)
+    {
+        ArgumentNullException.ThrowIfNull(rootIdentity);
+        ArgumentException.ThrowIfNullOrWhiteSpace(memberId);
+        if (retiringEpoch <= 0)
+            throw new ArgumentOutOfRangeException(nameof(retiringEpoch));
+        ValidateCanonicalDigest(priorLedgerDigest);
+        ValidateCanonicalDigest(priorStateBodyDigest);
+        return Digest("NuplaneExplicitMemberRetirement", writer =>
+        {
+            writer.Field(1, EncodePhysicalRoot(rootIdentity));
+            writer.Field(2, EncodeString(memberId));
+            writer.Field(3, EncodeInt64(retiringEpoch));
+            writer.Field(4, DecodeDigest(priorLedgerDigest));
+            writer.Field(5, DecodeDigest(priorStateBodyDigest));
+        });
+    }
+
     /// <summary>Hashes a root-membership ledger while omitting only its stored ledger digest.</summary>
     internal static string Ledger(RootMembershipRecord ledger)
     {
@@ -126,8 +171,17 @@ internal static partial class ProtectionDigest
             // under a new tag, leaving every schema-1 digest byte-for-byte unchanged.
             if (ledger.SchemaVersion >= RootMembershipRecord.BundleSchemaVersion)
                 writer.Field(9, EncodeNullableRecord(ledger.PendingGroupPublicationV2, EncodePendingGroupPublicationV2));
+            if (ledger.SchemaVersion >= RootMembershipRecord.MigrationSchemaVersion)
+                writer.Field(10, EncodeNullableRecord(ledger.PendingMembershipMigration, EncodePendingMembershipMigration));
         });
     }
+
+    private static byte[] EncodePendingMembershipMigration(PendingMembershipMigration pending)
+        => Record(writer =>
+        {
+            writer.Field(1, DecodeDigest(pending.PriorCompleteLedger.LedgerDigest));
+            writer.Field(2, EncodeSequence(pending.MovedMemberIds.OrderBy(static id => id, StringComparer.Ordinal), EncodeString));
+        });
 
     internal static string GroupPublicationIntentV2(GroupPublicationDescriptorV2 descriptor)
     {
@@ -826,7 +880,22 @@ internal static partial class ProtectionDigest
         writer.Field(10, EncodeBoolean(value.LegacyUnknownRecovery));
         if (includeStoredDigest)
             writer.Field(11, DecodeDigest(value.ProtectionDigest));
+        if (value.LegacyRecoveryRetirementEvidence is { } legacyRetirement)
+            writer.Field(12, EncodeLegacyRecoveryRetirement(legacyRetirement));
     }
+
+    private static byte[] EncodeLegacyRecoveryRetirement(LegacyRecoveryRetirementEvidence value)
+        => Record(writer =>
+        {
+            writer.Field(1, EncodeString(value.MemberId));
+            writer.Field(2, DecodeDigest(value.SourceStateSlotDigest));
+            writer.Field(3, DecodeDigest(value.SourceStateFileIdentityDigest));
+            writer.Field(4, DecodeDigest(value.SourceStateBodyDigest));
+            writer.Field(5, DecodeDigest(value.ActiveClosureDigest));
+            writer.Field(6, EncodeMap(value.RetiredLastKnownGood, EncodeString));
+            writer.Field(7, EncodeInt64(value.RetiringEpoch));
+            writer.Field(8, EncodeInt64(value.RetiringRevision));
+        });
 
     private static byte[] EncodePhysicalRoot(PhysicalRootIdentity value)
         => EncodePhysicalFile(value.HandleIdentity);

@@ -75,6 +75,12 @@ internal sealed class RootMembershipPayloadSerializer
             RootMemberRecord.AcknowledgedBinding acknowledged => new[] { acknowledged.ProtectionRecord },
             _ => Array.Empty<PackageProtectionRecord>()
         }).Concat(record.RetiredMembers.Select(static evidence => evidence.PriorBinding.ProtectionRecord))
+            .Concat(record.PendingMembershipMigration?.PriorCompleteLedger.Members.SelectMany(static member => member.Binding switch
+            {
+                RootMemberRecord.AcknowledgedBinding acknowledged => new[] { acknowledged.ProtectionRecord },
+                _ => Array.Empty<PackageProtectionRecord>()
+            }) ?? [])
+            .Concat(record.PendingMembershipMigration?.PriorCompleteLedger.RetiredMembers.Select(static evidence => evidence.PriorBinding.ProtectionRecord) ?? [])
             .Concat(record.PendingStateCommit is { } pending
                 ? new[] { pending.NextProtectionRecord }
                 : Array.Empty<PackageProtectionRecord>()));
@@ -194,6 +200,7 @@ internal sealed class RootMembershipPayloadSerializer
         public List<RetiredMemberDto?>? RetiredMembers { get; set; }
         public PendingCommitDto? PendingStateCommit { get; set; }
         public PendingGroupPublicationDto? PendingGroupPublicationV2 { get; set; }
+        public PendingMembershipMigrationDto? PendingMembershipMigration { get; set; }
         public string? LedgerDigest { get; set; }
 
         internal RootMembershipRecord ToRecord()
@@ -206,7 +213,8 @@ internal sealed class RootMembershipPayloadSerializer
             var retired = RequiredItems(RetiredMembers, nameof(RetiredMembers)).Select(static item => item.ToRecord()).ToArray();
             var root = Required(RootIdentity, nameof(RootIdentity)).ToRecord();
             var status = ReadEnum<RootMembershipStatus>(Status, nameof(Status));
-            var pending = PendingStateCommit?.ToRecord(members);
+            var migration = PendingMembershipMigration?.ToRecord();
+            var pending = PendingStateCommit?.ToRecord(members, migration);
             var groupPending = PendingGroupPublicationV2?.ToRecord();
             return new RootMembershipRecord(
                 Required(SchemaVersion, nameof(SchemaVersion)),
@@ -218,7 +226,8 @@ internal sealed class RootMembershipPayloadSerializer
                 retired,
                 pending,
                 Required(LedgerDigest, nameof(LedgerDigest)),
-                groupPending);
+                groupPending,
+                migration);
         }
 
         internal static MembershipDto FromRecord(RootMembershipRecord record)
@@ -233,7 +242,31 @@ internal sealed class RootMembershipPayloadSerializer
                 RetiredMembers = record.RetiredMembers.Select(static retired => (RetiredMemberDto?)RetiredMemberDto.FromRecord(retired)).ToList(),
                 PendingStateCommit = record.PendingStateCommit is null ? null : PendingCommitDto.FromRecord(record.PendingStateCommit),
                 PendingGroupPublicationV2 = record.PendingGroupPublicationV2 is null ? null : PendingGroupPublicationDto.FromRecord(record.PendingGroupPublicationV2),
+                PendingMembershipMigration = record.PendingMembershipMigration is null ? null : PendingMembershipMigrationDto.FromRecord(record.PendingMembershipMigration),
                 LedgerDigest = record.LedgerDigest
+            };
+    }
+
+    private sealed class PendingMembershipMigrationDto
+    {
+        public MembershipDto? PriorCompleteLedger { get; set; }
+        public List<string?>? MovedMemberIds { get; set; }
+
+        internal PendingMembershipMigration ToRecord()
+        {
+            var moved = MovedMemberIds ?? throw new JsonException("A pending migration is missing 'movedMemberIds'.");
+            if (moved.Any(static value => value is null))
+                throw new JsonException("Pending migration member identifiers cannot contain null items.");
+            return new PendingMembershipMigration(
+                Required(PriorCompleteLedger, nameof(PriorCompleteLedger)).ToRecord(),
+                moved.Select(static value => value!).ToArray());
+        }
+
+        internal static PendingMembershipMigrationDto FromRecord(PendingMembershipMigration value)
+            => new()
+            {
+                PriorCompleteLedger = MembershipDto.FromRecord(value.PriorCompleteLedger),
+                MovedMemberIds = value.MovedMemberIds.Cast<string?>().ToList()
             };
     }
 
@@ -362,7 +395,9 @@ internal sealed class RootMembershipPayloadSerializer
         public PhysicalFileDto? BackupStateFileIdentity { get; set; }
         public int? Resolution { get; set; }
 
-        internal PendingStateCommit ToRecord(IReadOnlyList<RootMemberRecord> members)
+        internal PendingStateCommit ToRecord(
+            IReadOnlyList<RootMemberRecord> members,
+            PendingMembershipMigration? pendingMembershipMigration)
         {
             var memberId = Required(MemberId, nameof(MemberId));
             var member = members.SingleOrDefault(candidate => string.Equals(candidate.MemberId, memberId, StringComparison.Ordinal))
@@ -379,7 +414,8 @@ internal sealed class RootMembershipPayloadSerializer
                 Required(NextProtectionRecord, nameof(NextProtectionRecord)),
                 StagedStateFileIdentity?.ToRecord(),
                 BackupStateFileIdentity?.ToRecord(),
-                ReadEnum<PendingStateCommitResolution>(Resolution, nameof(Resolution)));
+                ReadEnum<PendingStateCommitResolution>(Resolution, nameof(Resolution)),
+                pendingMembershipMigration);
         }
 
         internal static PendingCommitDto FromRecord(PendingStateCommit value)

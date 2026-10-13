@@ -64,7 +64,8 @@ internal sealed class PackageStoreEnrollmentOperationRequest
         IEnumerable<string> intendedMemberIds,
         IEnumerable<string> expectedCurrentMemberIds,
         IEnumerable<string>? retireMemberIds = null,
-        IEnumerable<PackageStoreMemberRecoveryEvidence>? recoveryEvidence = null)
+        IEnumerable<PackageStoreMemberRecoveryEvidence>? recoveryEvidence = null,
+        IEnumerable<string>? retireLegacyRecoveryMemberIds = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootLabel);
         ArgumentNullException.ThrowIfNull(expectedPhysicalRootIdentity);
@@ -76,10 +77,13 @@ internal sealed class PackageStoreEnrollmentOperationRequest
         var intended = intendedMemberIds.ToArray();
         var expectedCurrent = expectedCurrentMemberIds.ToArray();
         var retired = (retireMemberIds ?? []).ToArray();
+        var retiredLegacyRecovery = (retireLegacyRecoveryMemberIds ?? []).ToArray();
         if (intended.Any(string.IsNullOrWhiteSpace) || expectedCurrent.Any(string.IsNullOrWhiteSpace) || retired.Any(string.IsNullOrWhiteSpace) ||
+            retiredLegacyRecovery.Any(string.IsNullOrWhiteSpace) ||
             intended.Distinct(StringComparer.Ordinal).Count() != intended.Length ||
             expectedCurrent.Distinct(StringComparer.Ordinal).Count() != expectedCurrent.Length ||
             retired.Distinct(StringComparer.Ordinal).Count() != retired.Length ||
+            retiredLegacyRecovery.Distinct(StringComparer.Ordinal).Count() != retiredLegacyRecovery.Length ||
             intended.Intersect(retired, StringComparer.Ordinal).Any())
             throw new ArgumentException("Intended and retired member identifiers must be unique, non-empty, and disjoint.");
 
@@ -98,6 +102,7 @@ internal sealed class PackageStoreEnrollmentOperationRequest
         ExpectedCurrentMemberIds = Array.AsReadOnly(expectedCurrent);
         RetireMemberIds = Array.AsReadOnly(retired);
         RecoveryEvidence = Array.AsReadOnly(evidence);
+        RetireLegacyRecoveryMemberIds = Array.AsReadOnly(retiredLegacyRecovery);
     }
 
     internal string RootLabel { get; }
@@ -108,6 +113,7 @@ internal sealed class PackageStoreEnrollmentOperationRequest
     internal IReadOnlyList<string> ExpectedCurrentMemberIds { get; }
     internal IReadOnlyList<string> RetireMemberIds { get; }
     internal IReadOnlyList<PackageStoreMemberRecoveryEvidence> RecoveryEvidence { get; }
+    internal IReadOnlyList<string> RetireLegacyRecoveryMemberIds { get; }
 }
 
 internal enum PackageStoreEnrollmentMemberDisposition

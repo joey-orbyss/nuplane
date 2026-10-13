@@ -18,6 +18,7 @@ internal sealed class PackageProtectionRecordDto
     public PackageProtectionClosureDto? RecoverableClosure { get; set; }
     public List<RetiredGraphEvidenceDto?>? RetiredGraphs { get; set; }
     public bool? LegacyUnknownRecovery { get; set; }
+    public LegacyRecoveryRetirementEvidenceDto? LegacyRecoveryRetirementEvidence { get; set; }
 
     internal PackageProtectionRecord ToRecord()
     {
@@ -40,7 +41,8 @@ internal sealed class PackageProtectionRecordDto
             ProtectionDtoHelpers.Required(ActiveClosure, nameof(ActiveClosure)).ToClosure(),
             ProtectionDtoHelpers.Required(RecoverableClosure, nameof(RecoverableClosure)).ToClosure(),
             retired,
-            LegacyUnknownRecovery ?? throw ProtectionDtoHelpers.Missing(nameof(LegacyUnknownRecovery)));
+            LegacyUnknownRecovery ?? throw ProtectionDtoHelpers.Missing(nameof(LegacyUnknownRecovery)),
+            LegacyRecoveryRetirementEvidence?.ToEvidence());
     }
 
     internal static PackageProtectionRecordDto FromRecord(PackageProtectionRecord record)
@@ -56,9 +58,65 @@ internal sealed class PackageProtectionRecordDto
             ActiveClosure = PackageProtectionClosureDto.FromClosure(record.ActiveClosure),
             RecoverableClosure = PackageProtectionClosureDto.FromClosure(record.RecoverableClosure),
             RetiredGraphs = record.RetiredGraphs.Select(static item => (RetiredGraphEvidenceDto?)RetiredGraphEvidenceDto.FromEvidence(item)).ToList(),
-            LegacyUnknownRecovery = record.LegacyUnknownRecovery
+            LegacyUnknownRecovery = record.LegacyUnknownRecovery,
+            LegacyRecoveryRetirementEvidence = record.LegacyRecoveryRetirementEvidence is null
+                ? null
+                : LegacyRecoveryRetirementEvidenceDto.FromEvidence(record.LegacyRecoveryRetirementEvidence)
         };
 
+}
+
+internal sealed class LegacyRecoveryRetirementEvidenceDto
+{
+    public string? MemberId { get; set; }
+    public string? SourceStateSlotDigest { get; set; }
+    public string? SourceStateFileIdentityDigest { get; set; }
+    public string? SourceStateBodyDigest { get; set; }
+    public string? ActiveClosureDigest { get; set; }
+    public List<PackageVersionEntryDto?>? RetiredLastKnownGood { get; set; }
+    public long? RetiringEpoch { get; set; }
+    public long? RetiringRevision { get; set; }
+
+    internal LegacyRecoveryRetirementEvidence ToEvidence()
+    {
+        var entries = ProtectionDtoHelpers.MapRequired(RetiredLastKnownGood, nameof(RetiredLastKnownGood),
+            static item => item.ToPair());
+        return new LegacyRecoveryRetirementEvidence(
+            ProtectionDtoHelpers.Required(MemberId, nameof(MemberId)),
+            ProtectionDtoHelpers.Required(SourceStateSlotDigest, nameof(SourceStateSlotDigest)),
+            ProtectionDtoHelpers.Required(SourceStateFileIdentityDigest, nameof(SourceStateFileIdentityDigest)),
+            ProtectionDtoHelpers.Required(SourceStateBodyDigest, nameof(SourceStateBodyDigest)),
+            ProtectionDtoHelpers.Required(ActiveClosureDigest, nameof(ActiveClosureDigest)),
+            entries,
+            RetiringEpoch ?? throw ProtectionDtoHelpers.Missing(nameof(RetiringEpoch)),
+            RetiringRevision ?? throw ProtectionDtoHelpers.Missing(nameof(RetiringRevision)));
+    }
+
+    internal static LegacyRecoveryRetirementEvidenceDto FromEvidence(LegacyRecoveryRetirementEvidence value)
+        => new()
+        {
+            MemberId = value.MemberId,
+            SourceStateSlotDigest = value.SourceStateSlotDigest,
+            SourceStateFileIdentityDigest = value.SourceStateFileIdentityDigest,
+            SourceStateBodyDigest = value.SourceStateBodyDigest,
+            ActiveClosureDigest = value.ActiveClosureDigest,
+            RetiredLastKnownGood = value.RetiredLastKnownGood.OrderBy(static pair => pair.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(static pair => (PackageVersionEntryDto?)PackageVersionEntryDto.FromPair(pair)).ToList(),
+            RetiringEpoch = value.RetiringEpoch,
+            RetiringRevision = value.RetiringRevision
+        };
+}
+
+internal sealed class PackageVersionEntryDto
+{
+    public string? Id { get; set; }
+    public string? Version { get; set; }
+
+    internal KeyValuePair<string, string> ToPair()
+        => new(ProtectionDtoHelpers.Required(Id, nameof(Id)), ProtectionDtoHelpers.Required(Version, nameof(Version)));
+
+    internal static PackageVersionEntryDto FromPair(KeyValuePair<string, string> pair)
+        => new() { Id = pair.Key, Version = pair.Value };
 }
 
 internal sealed class PackageProtectionClosureDto

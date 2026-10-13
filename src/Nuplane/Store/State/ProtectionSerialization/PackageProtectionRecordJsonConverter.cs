@@ -54,6 +54,13 @@ public sealed class PackageProtectionRecordJsonConverter : JsonConverter<Package
         ValidateDigest(value.ProtectionDigest, "protectionDigest");
         foreach (var retiredGraph in value.RetiredGraphs)
             ValidateDigest(retiredGraph.ProofDigest, "retiredGraphs.proofDigest");
+        if (value.LegacyRecoveryRetirementEvidence is { } legacyRetirement)
+        {
+            ValidateDigest(legacyRetirement.SourceStateSlotDigest, "legacyRecoveryRetirementEvidence.sourceStateSlotDigest");
+            ValidateDigest(legacyRetirement.SourceStateFileIdentityDigest, "legacyRecoveryRetirementEvidence.sourceStateFileIdentityDigest");
+            ValidateDigest(legacyRetirement.SourceStateBodyDigest, "legacyRecoveryRetirementEvidence.sourceStateBodyDigest");
+            ValidateDigest(legacyRetirement.ActiveClosureDigest, "legacyRecoveryRetirementEvidence.activeClosureDigest");
+        }
         JsonSerializer.Serialize(writer, PackageProtectionRecordDto.FromRecord(value), ProtectionJsonOptions);
     }
 

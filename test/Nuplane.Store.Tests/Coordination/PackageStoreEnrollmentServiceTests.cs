@@ -11,7 +11,7 @@ using Nuplane.Tests.Shared;
 
 namespace Nuplane.Store.Tests.Coordination;
 
-public sealed class PackageStoreEnrollmentServiceTests
+public sealed partial class PackageStoreEnrollmentServiceTests
 {
     [SupportedPhysicalStoreFact]
     public async Task EnrollAsync_InitialAbsentLedgerUsesHeldRootIdentityAndPublishesCompleteEmptyState()

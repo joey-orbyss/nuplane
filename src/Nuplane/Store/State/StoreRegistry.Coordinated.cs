@@ -173,7 +173,8 @@ public sealed partial class StoreRegistry
             prior.ActiveClosure,
             prior.RecoverableClosure,
             prior.RetiredGraphs,
-            prior.LegacyUnknownRecovery);
+            prior.LegacyUnknownRecovery,
+            prior.LegacyRecoveryRetirementEvidence);
         var protection = new PackageProtectionRecord(
             candidate.SchemaVersion,
             candidate.RootIdentity,
@@ -185,7 +186,8 @@ public sealed partial class StoreRegistry
             candidate.ActiveClosure,
             candidate.RecoverableClosure,
             candidate.RetiredGraphs,
-            candidate.LegacyUnknownRecovery);
+            candidate.LegacyUnknownRecovery,
+            candidate.LegacyRecoveryRetirementEvidence);
         return state with { ProtectionRecord = protection };
     }
 

@@ -82,7 +82,8 @@ internal sealed partial class RootMembershipRegistry
             nextProtection.RecoverableClosure.Knowledge != PackageProtectionClosureKnowledge.Known)
             throw Refused("Protected publication requires known active/recoverable closures without unresolved legacy recovery.");
         var pending = new PendingStateCommit(ledger.RootIdentity, ledger.EnrollmentEpoch, ledger.Status,
-            ledger.LedgerDigest, Guid.NewGuid(), member, nextProtection);
+            ledger.LedgerDigest, Guid.NewGuid(), member, nextProtection,
+            pendingMembershipMigration: ledger.PendingMembershipMigration);
         var nextBytes = await EncodeStateAsync(nextState, cancellationToken).ConfigureAwait(false);
         var nextReopened = await DecodeStateAsync(nextBytes, cancellationToken).ConfigureAwait(false);
         RequireExactProtection(nextReopened, nextProtection);
@@ -110,7 +111,8 @@ internal sealed partial class RootMembershipRegistry
         }
 
         pending = new PendingStateCommit(ledger.RootIdentity, ledger.EnrollmentEpoch, ledger.Status,
-            ledger.LedgerDigest, pending.PublicationId, member, nextProtection, stagedIdentity, backupIdentity);
+            ledger.LedgerDigest, pending.PublicationId, member, nextProtection, stagedIdentity, backupIdentity,
+            pendingMembershipMigration: ledger.PendingMembershipMigration);
         transaction.Publish(WithPending(ledger, pending));
         checkpoint?.Invoke(RootMembershipPublicationPoint.ArtifactsBound);
         cancellationToken.ThrowIfCancellationRequested();
@@ -191,7 +193,8 @@ internal sealed partial class RootMembershipRegistry
             pending = new PendingStateCommit(pending.RootIdentity, pending.EnrollmentEpoch, pending.PriorMembershipStatus,
                 pending.PriorLedgerDigest, pending.PublicationId, member, pending.NextProtectionRecord,
                 pending.StagedStateFileIdentity, pending.BackupStateFileIdentity,
-                next ? PendingStateCommitResolution.Next : PendingStateCommitResolution.Prior);
+                next ? PendingStateCommitResolution.Next : PendingStateCommitResolution.Prior,
+                priorLedger.PendingMembershipMigration);
             // Keep prior members and Incomplete status until bound artifact cleanup is durably resolved.
             transaction.Publish(WithPending(priorLedger, pending));
         }
@@ -563,12 +566,44 @@ internal sealed partial class RootMembershipRegistry
             : existing), pending: null);
 
     internal static RootMembershipRecord Rebuild(RootMembershipRecord source, RootMembershipStatus status,
-        IEnumerable<RootMemberRecord> members, PendingStateCommit? pending)
+        IEnumerable<RootMemberRecord> members, PendingStateCommit? pending,
+        int? schemaVersion = null, bool clearMigration = false,
+        IEnumerable<string>? targetMemberIds = null,
+        IEnumerable<RootMemberRetirementEvidence>? retiredMembers = null)
     {
-        var candidate = new RootMembershipRecord(source.SchemaVersion, source.RootIdentity, source.EnrollmentEpoch,
-            status, members, source.TargetMemberIds, source.RetiredMembers, pending, PlaceholderDigest);
+        var selectedSchema = schemaVersion ?? source.SchemaVersion;
+        var migration = clearMigration ? null : source.PendingMembershipMigration;
+        var targets = targetMemberIds ?? source.TargetMemberIds;
+        var retirements = retiredMembers ?? source.RetiredMembers;
+        var candidate = new RootMembershipRecord(selectedSchema, source.RootIdentity, source.EnrollmentEpoch,
+            status, members, targets, retirements, pending, PlaceholderDigest,
+            pendingGroupPublicationV2: null, pendingMembershipMigration: migration);
         return new RootMembershipRecord(candidate.SchemaVersion, candidate.RootIdentity, candidate.EnrollmentEpoch,
-            candidate.Status, candidate.Members, candidate.TargetMemberIds, candidate.RetiredMembers, pending, ProtectionDigest.Ledger(candidate));
+            candidate.Status, candidate.Members, candidate.TargetMemberIds, candidate.RetiredMembers, pending,
+            ProtectionDigest.Ledger(candidate), pendingMembershipMigration: migration);
+    }
+
+    internal static RootMembershipRecord CreateMigrationIncomplete(
+        RootMembershipRecord priorComplete,
+        IEnumerable<RootMemberRecord> unionMembers,
+        IEnumerable<string> targetMemberIds,
+        IEnumerable<RootMemberRetirementEvidence> retiredMembers,
+        IEnumerable<string> movedMemberIds)
+    {
+        ArgumentNullException.ThrowIfNull(priorComplete);
+        if (priorComplete.Status != RootMembershipStatus.Complete || priorComplete.EnrollmentEpoch == long.MaxValue)
+            throw Refused("A roster migration requires a settled Complete ledger with an advanceable epoch.");
+        var copiedMembers = unionMembers.Select(static member => member.Copy()).ToArray();
+        var targets = targetMemberIds.ToArray();
+        var retirements = retiredMembers.Select(static evidence => evidence.Copy()).ToArray();
+        var marker = new PendingMembershipMigration(priorComplete, movedMemberIds);
+        var candidate = new RootMembershipRecord(RootMembershipRecord.MigrationSchemaVersion,
+            priorComplete.RootIdentity, checked(priorComplete.EnrollmentEpoch + 1), RootMembershipStatus.Incomplete,
+            copiedMembers, targets, retirements, pendingStateCommit: null, ledgerDigest: PlaceholderDigest,
+            pendingMembershipMigration: marker);
+        return new RootMembershipRecord(candidate.SchemaVersion, candidate.RootIdentity, candidate.EnrollmentEpoch,
+            candidate.Status, candidate.Members, candidate.TargetMemberIds, candidate.RetiredMembers, null,
+            ProtectionDigest.Ledger(candidate), pendingMembershipMigration: marker);
     }
 
     private static PackageStoreAdmissionException Refused(string message)
