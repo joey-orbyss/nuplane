@@ -197,11 +197,13 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         private readonly PackageStoreFixture _fixture = new();
         private readonly Dictionary<string, PhysicalStoreDirectoryHandle> _stateParents = new(StringComparer.Ordinal);
         private readonly PackageLoadMode _packageLoadMode;
+        private readonly long _membershipEpoch;
         private bool _disposed;
 
-        private GraphUseFixture(PackageLoadMode packageLoadMode)
+        private GraphUseFixture(PackageLoadMode packageLoadMode, long membershipEpoch)
         {
             _packageLoadMode = packageLoadMode;
+            _membershipEpoch = membershipEpoch;
             IPhysicalStoreFileSystem inner = OperatingSystem.IsWindows()
                 ? new WindowsPhysicalStoreFileSystem()
                 : new UnixPhysicalStoreFileSystem();
@@ -217,6 +219,7 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         internal ResolvedGraphFixture? IndependentGraph { get; private set; }
         internal ResolvedGraphFixture? FreshMemberAGraph { get; private set; }
         internal Dictionary<string, ResolvedGraphFixture> Graphs { get; } = new(StringComparer.Ordinal);
+        internal string CreateStateSlot(string relativePath) => _fixture.CreateStateSlot(relativePath);
 
         internal ResolvedPackage CreateAdditionalEligibleInstall(string packageId, string version)
             => CreateInstall(packageId, version, dependencyId: null, sourceName: "execution-test");
@@ -226,9 +229,10 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             bool includeIndependentGraph = false,
             bool includeFreshMemberAGraph = false,
             Action<string>? beforeSharedDependencyCompletionMarker = null,
-            bool emitNativeProbeOnRootSecondV1 = false)
+            bool emitNativeProbeOnRootSecondV1 = false,
+            long rootMembershipEpoch = RootMembershipBindingEpoch)
         {
-            var fixture = new GraphUseFixture(packageLoadMode);
+            var fixture = new GraphUseFixture(packageLoadMode, rootMembershipEpoch);
             try
             {
                 await fixture.InitializeAsync(includeIndependentGraph, includeFreshMemberAGraph,
@@ -372,12 +376,12 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 ProtectionRecord = null
             };
             var candidate = new PackageProtectionRecord(1, RootIdentity,
-                RootMembershipBindingEpoch, memberId, revision, ProtectionDigest.StateBody(state),
+                _membershipEpoch, memberId, revision, ProtectionDigest.StateBody(state),
                 new string('0', 64), closure, closure, [], false);
             return state with
             {
                 ProtectionRecord = new PackageProtectionRecord(1, RootIdentity,
-                    RootMembershipBindingEpoch, memberId, revision, candidate.StateBodyDigest,
+                    _membershipEpoch, memberId, revision, candidate.StateBodyDigest,
                     ProtectionDigest.Protection(candidate), closure, closure, [], false)
             };
         }
@@ -462,9 +466,9 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 IndependentGraph = await ResolveGraphAsync("member-a", independentRoot, UnrelatedInstall);
             }
 
-            Registry.InitializeIncomplete(Root, RootIdentity, RootMembershipBindingEpoch, declarations,
+            Registry.InitializeIncomplete(Root, RootIdentity, _membershipEpoch, declarations,
                 quiescentCutoverConfirmed: true, CancellationToken.None);
-            await Registry.BindDeclaredMembersAsync(Root, RootIdentity, RootMembershipBindingEpoch, declarations,
+            await Registry.BindDeclaredMembersAsync(Root, RootIdentity, _membershipEpoch, declarations,
                 _stateParents.ToDictionary(static pair => pair.Key, pair =>
                     (pair.Value, Path.GetFileName(paths[pair.Key])), StringComparer.Ordinal),
                 quiescentCutoverConfirmed: true, CancellationToken.None);
@@ -472,14 +476,14 @@ public sealed partial class OverlappingPackageGraphProtectionTests
             var stateA = BuildProtectedState("member-a", Graphs["member-a"], StoreStateRecord.Empty(), 1, false);
             var stateB = BuildProtectedState("member-b", Graphs["member-b"], StoreStateRecord.Empty(), 1, false);
             await Registry.WithQuiescentBoundIncompleteMemberLocationsAsync(Root, RootIdentity,
-                RootMembershipBindingEpoch, quiescentCutoverConfirmed: true,
+                _membershipEpoch, quiescentCutoverConfirmed: true,
                 async (locked, token) =>
                 {
                     foreach (var memberId in paths.Keys.OrderBy(static memberId => memberId, StringComparer.Ordinal))
                         await locked.PublishStateAsync(memberId, memberId == "member-a" ? stateA : stateB, token);
                     return true;
                 }, CancellationToken.None);
-            await Registry.CompleteEnrollmentAsync(Root, RootIdentity, RootMembershipBindingEpoch,
+            await Registry.CompleteEnrollmentAsync(Root, RootIdentity, _membershipEpoch,
                 quiescentCutoverConfirmed: true, CancellationToken.None);
         }
 

@@ -2,11 +2,15 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using Nuplane.Abstractions;
 using Nuplane.Admin;
 using Nuplane.Admin.Api;
 using Nuplane.Builder;
 using Nuplane.Feeds.Configuration;
+using Nuplane.Integration.Tests.Fixtures;
 using Nuplane.Integration.Tests.Support;
+using Nuplane.Loading;
+using Nuplane.Loading.Hosting.Builder;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.PhysicalFiles;
 using Nuplane.Store.Maintenance;
@@ -171,6 +175,111 @@ public sealed partial class OverlappingPackageGraphProtectionTests
     }
 
     [Fact]
+    public async Task PublicEnrollmentApi_RecoversMigrationAfterOwnedChildProcessDeath()
+    {
+        using var fixture = await GraphUseFixture.CreateAsync(rootMembershipEpoch: 1);
+        var firstSource = fixture.StatePaths["member-a"];
+        var secondSource = fixture.StatePaths["member-b"];
+        var firstSourceBytes = File.ReadAllBytes(firstSource);
+        var secondSourceBytes = File.ReadAllBytes(secondSource);
+        var serializer = new StoreStateSerializer();
+        AssertStateHasActiveAndRecoverableGraphs(await serializer.LoadAsync(firstSource, CancellationToken.None));
+        AssertStateHasActiveAndRecoverableGraphs(await serializer.LoadAsync(secondSource, CancellationToken.None));
+        var nativeBefore = CaptureFixtureNativeEvidence(fixture);
+        var movedFirst = fixture.CreateStateSlot("migration/moved-first.json");
+        var thirdState = fixture.CreateStateSlot("migration/third.json");
+        PackageStoreMemberDeclaration[] targetDeclarations =
+        [
+            new("default", "member-a", movedFirst),
+            new("default", "third", thirdState)
+        ];
+        var operationId = Guid.NewGuid().ToString("N");
+        var requestPath = Path.Combine(Path.GetTempPath(), $"nuplane-migration-{operationId}.json");
+        var processRequest = new MigrationProcessRequest(operationId, fixture.RootPath, 1,
+            ["member-a", "member-b"],
+            [new("member-a", movedFirst), new("third", thirdState)], ["member-b"], "third", 2);
+
+        try
+        {
+            await File.WriteAllTextAsync(requestPath,
+                JsonSerializer.Serialize(processRequest, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+            await using (var child = await PackageStoreParticipantProcess.StartMigrationAsync(
+                operationId, requestPath, CancellationToken.None))
+            {
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                using var checkpoint = await child.ReadNextResponseAsync(deadline.Token);
+                var message = checkpoint.RootElement;
+                Assert.Equal("migration-checkpoint", message.GetProperty("kind").GetString());
+                Assert.Equal(operationId, message.GetProperty("operationId").GetString());
+                Assert.Equal(child.ProcessId, message.GetProperty("processId").GetInt32());
+                Assert.Equal("third", message.GetProperty("memberId").GetString());
+                Assert.Equal("Incomplete", message.GetProperty("membershipStatus").GetString());
+                Assert.Equal(2, message.GetProperty("enrollmentEpoch").GetInt64());
+                Assert.Equal(3, message.GetProperty("schemaVersion").GetInt32());
+                Assert.Equal(1, message.GetProperty("priorCompleteEpoch").GetInt64());
+                Assert.Equal(new[] { "member-a", "member-b", "third" },
+                    message.GetProperty("memberIds").EnumerateArray().Select(static item => item.GetString()));
+                Assert.Equal(new[] { "member-a", "third" },
+                    message.GetProperty("targetMemberIds").EnumerateArray().Select(static item => item.GetString()));
+                Assert.Equal(new[] { "member-a", "member-b" },
+                    message.GetProperty("priorMemberIds").EnumerateArray().Select(static item => item.GetString()));
+                Assert.Equal(new[] { "member-a" },
+                    message.GetProperty("movedMemberIds").EnumerateArray().Select(static item => item.GetString()));
+                Assert.False(message.GetProperty("hasPendingStateCommit").GetBoolean());
+                Assert.True(File.Exists(movedFirst));
+                Assert.False(File.Exists(thirdState));
+                Assert.Equal(firstSourceBytes, File.ReadAllBytes(firstSource));
+                Assert.Equal(secondSourceBytes, File.ReadAllBytes(secondSource));
+                var partiallyPublished = await serializer.LoadAsync(movedFirst, CancellationToken.None);
+                Assert.Equal("member-a", partiallyPublished.ProtectionRecord!.MemberId);
+                Assert.Equal(2, partiallyPublished.ProtectionRecord.EnrollmentEpoch);
+                AssertStateHasActiveAndRecoverableGraphs(partiallyPublished);
+
+                var killed = await child.KillChildAsync(deadline.Token);
+                Assert.NotEqual(0, killed.ExitCode);
+                Assert.Contains(child.ProcessId.ToString(), killed.StandardOutput, StringComparison.Ordinal);
+            }
+
+            Assert.Equal(firstSourceBytes, File.ReadAllBytes(firstSource));
+            Assert.Equal(secondSourceBytes, File.ReadAllBytes(secondSource));
+            await using var provider = CreateMigrationRecoveryProvider(fixture, targetDeclarations);
+            var operations = provider.GetRequiredService<INuplanePackageStoreMaintenanceOperations>();
+            var observed = await operations.PreviewEnrollmentAsync();
+            Assert.Equal("Incomplete", observed.Membership);
+            Assert.Equal(2, observed.EnrollmentEpoch);
+            Assert.Equal(new[] { "member-a", "member-b", "third" }, observed.CurrentMemberIds);
+            Assert.Contains(observed.Diagnostics, static diagnostic => diagnostic.Contains(
+                "PendingMembershipMigrationRecoveryRequired", StringComparison.Ordinal));
+            using var app = EndpointRouteTestHarness.CreateApp(registered => registered.AddSingleton(operations),
+                endpoints => endpoints.MapNuplanePackageStoreMaintenance());
+            var request = new PackageStoreEnrollmentRequest("default", observed.RootIdentity!,
+                observed.EnrollmentEpoch!.Value, true, ["member-a", "third"], observed.CurrentMemberIds!, ["member-b"]);
+            var response = await EndpointRouteTestHarness.InvokeAsync(app,
+                "/nuplane/admin/store/enrollment/recover", "POST", JsonBody(request));
+            Assert.Equal(StatusCodes.Status200OK, response.StatusCode);
+
+            var completed = await operations.PreviewEnrollmentAsync();
+            Assert.Equal("Complete", completed.Membership);
+            Assert.Equal(2, completed.EnrollmentEpoch);
+            Assert.Equal(new[] { "member-a", "third" }, completed.CurrentMemberIds);
+            Assert.Equal(firstSourceBytes, File.ReadAllBytes(firstSource));
+            Assert.Equal(secondSourceBytes, File.ReadAllBytes(secondSource));
+            var migratedFirst = await serializer.LoadAsync(movedFirst, CancellationToken.None);
+            Assert.Equal(2, migratedFirst.ProtectionRecord!.EnrollmentEpoch);
+            AssertStateHasActiveAndRecoverableGraphs(migratedFirst);
+            var newThird = await serializer.LoadAsync(thirdState, CancellationToken.None);
+            Assert.Equal("third", newThird.ProtectionRecord!.MemberId);
+            Assert.Equal(2, newThird.ProtectionRecord.EnrollmentEpoch);
+            Assert.Equal(nativeBefore.OrderBy(static pair => pair.Key, StringComparer.Ordinal),
+                CaptureFixtureNativeEvidence(fixture).OrderBy(static pair => pair.Key, StringComparer.Ordinal));
+        }
+        finally
+        {
+            File.Delete(requestPath);
+        }
+    }
+
+    [Fact]
     public async Task PublicEnrollmentApi_RecoveryGraphTransportRoundtripsAndRejectsNestedUnknownFields()
     {
         using var fixture = await GraphUseFixture.CreateAsync();
@@ -208,6 +317,26 @@ public sealed partial class OverlappingPackageGraphProtectionTests
     private static string JsonBody(PackageStoreEnrollmentRequest request)
         => JsonSerializer.Serialize(request, new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
+    private static ServiceProvider CreateMigrationRecoveryProvider(
+        GraphUseFixture fixture, PackageStoreMemberDeclaration[] declarations)
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddNuplane(builder => builder.WithStateFile(declarations[0].StateFilePath)
+            .UseCoordinatedPackageStore(declarations, true)
+            .AutoloadPackages(loading => loading.WithDefaultLoadMode(PackageLoadMode.Collectible)));
+        services.Configure<FeedResolutionOptions>(options => options.PackageInstallRoot = fixture.RootPath);
+        services.AddNuplanePackageStoreMaintenance();
+        return services.BuildServiceProvider();
+    }
+
+    private static void AssertStateHasActiveAndRecoverableGraphs(StoreStateRecord state)
+    {
+        var verified = PersistedStoreStateGraphVerifier.Verify(state);
+        Assert.NotEmpty(verified.ActiveGraphs);
+        Assert.NotEmpty(verified.RecoverableGraphs);
+    }
+
     private static ServiceProvider CreateEnrollmentProvider(PackageStoreFixture fixture,
         PackageStoreMemberDeclaration[] declarations)
     {
@@ -239,4 +368,9 @@ public sealed partial class OverlappingPackageGraphProtectionTests
                 edge.RequestedPackageId, edge.RequestedVersionRange, edge.TargetFramework, edge.IsOptional)).ToArray(),
             graph.RecoverySelectionEvidence is { } source
                 ? new(source.RecoveryPolicyId, source.SourceRevision, source.SelectedRootNodeIds) : null);
+
+    private sealed record MigrationProcessRequest(string OperationId, string RootPath, long ExpectedEnrollmentEpoch,
+        string[] CurrentMemberIds, MigrationTargetRequest[] TargetMembers, string[] RetireMemberIds,
+        string InterruptMemberId, long InterruptEnrollmentEpoch);
+    private sealed record MigrationTargetRequest(string MemberId, string StateFilePath);
 }

@@ -45,6 +45,10 @@ internal sealed class PackageStoreParticipantProcess : IAsyncDisposable
         string operationId, string requestPath, CancellationToken cancellationToken)
         => StartOperationAsync("--membership-recover", operationId, requestPath, cancellationToken);
 
+    public static Task<PackageStoreParticipantProcess> StartMigrationAsync(
+        string operationId, string requestPath, CancellationToken cancellationToken)
+        => StartOperationAsync("--membership-migrate", operationId, requestPath, cancellationToken);
+
     public static Task<PackageStoreParticipantProcess> StartInitializationAsync(
         string operationId, string requestPath, CancellationToken cancellationToken)
         => StartOperationAsync("--membership-initialize", operationId, requestPath, cancellationToken);
@@ -187,6 +191,22 @@ internal sealed class PackageStoreParticipantProcess : IAsyncDisposable
             catch (InvalidOperationException) when (_process.HasExited)
             {
                 // The child may finish between the identity-owned check and termination.
+            }
+        }
+        return await CaptureExitAsync(cancellationToken);
+    }
+
+    public async Task<PackageStoreParticipantExit> KillChildAsync(CancellationToken cancellationToken)
+    {
+        if (!HasExited)
+        {
+            try
+            {
+                _process.Kill(entireProcessTree: false);
+            }
+            catch (InvalidOperationException) when (_process.HasExited)
+            {
+                // The owned child may exit between the identity check and termination.
             }
         }
         return await CaptureExitAsync(cancellationToken);

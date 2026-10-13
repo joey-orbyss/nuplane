@@ -1,9 +1,12 @@
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using Nuplane.Abstractions.PackageStoreProtection;
+using Nuplane.Feeds.Configuration;
 using Nuplane.Store.Coordination;
 using Nuplane.Store.Coordination.MembershipRecords;
 using Nuplane.Store.Coordination.PhysicalFiles;
 using Nuplane.Store.Coordination.ProtectionRecords;
+using Nuplane.Store.Maintenance;
 using Nuplane.Store.State;
 using Nuplane.Tests.Shared;
 
@@ -32,6 +35,12 @@ internal static partial class Program
                     : await RunRecoverAsync(request).ConfigureAwait(false);
             }
 
+            if (args.Length == 2 && args[0] == "--membership-migrate")
+            {
+                var request = await ReadMigrationRequestAsync(args[1]).ConfigureAwait(false);
+                return await RunMigrationAsync(request).ConfigureAwait(false);
+            }
+
             if (args.Length == 2 && args[0] == "--membership-initialize")
             {
                 var request = await ReadInitializationRequestAsync(args[1]).ConfigureAwait(false);
@@ -56,7 +65,7 @@ internal static partial class Program
             if (args.Length == 2 && args[0] == "--package-store-execute")
                 return await RunPackageStoreExecutionAsync(args[1]).ConfigureAwait(false);
 
-            await WriteDiagnosticAsync("Expected --gate <name>, --membership-publish <request.json>, --membership-recover <request.json>, --membership-initialize <request.json>, --membership-bind <request.json>, --graph-use-idle <request.json>, --participant-graph-use-idle <request.json>, --participant-graph-use-reordered-roster <request.json>, --participant-graph-use-unscoped-gate <request.json>, --participant-graph-use-scoped-gate <request.json>, --participant-graph-use-identity-mismatch <request.json>, or --package-store-execute <request.json>.")
+            await WriteDiagnosticAsync("Expected --gate <name>, --membership-publish <request.json>, --membership-recover <request.json>, --membership-migrate <request.json>, --membership-initialize <request.json>, --membership-bind <request.json>, --graph-use-idle <request.json>, --participant-graph-use-idle <request.json>, --participant-graph-use-reordered-roster <request.json>, --participant-graph-use-unscoped-gate <request.json>, --participant-graph-use-scoped-gate <request.json>, --participant-graph-use-identity-mismatch <request.json>, or --package-store-execute <request.json>.")
                 .ConfigureAwait(false);
             return InvalidProtocolExitCode;
         }
@@ -152,6 +161,56 @@ internal static partial class Program
                 null, null, null, exception.Reason.ToString(), exception.Message)).ConfigureAwait(false);
             return 0;
         }
+    }
+
+    private static async Task<int> RunMigrationAsync(MigrationProcessRequest request)
+    {
+        await WriteJsonLineAsync(new StartedMessage("started", request.OperationId, Environment.ProcessId)).ConfigureAwait(false);
+        var files = CreateFileSystem();
+        using var root = OwnedProcessDirectory.Open(files, request.RootPath);
+        RootMembershipRegistry? registry = null;
+        var serializer = new InterruptingMemberStateSerializer(request.InterruptMemberId,
+            request.InterruptEnrollmentEpoch, () => PauseAtMigrationCheckpoint(request,
+                registry ?? throw new InvalidOperationException("The migration registry was not initialized."), root));
+        registry = new RootMembershipRegistry(files, serializer);
+
+        var feedOptions = new FeedResolutionOptions { PackageInstallRoot = request.RootPath };
+        var rootCatalog = new TrustedPackageStoreRootCatalog(
+            new TrustedPackageStoreRootCatalogDefinition([]), Options.Create(feedOptions));
+        var rootResolver = new PackageStoreRootResolver(rootCatalog,
+            Options.Create(new PackageStoreMaintenanceOptions { RootLabel = "default" }));
+        var declarations = new TrustedPackageStoreMemberDeclarationDefinition(true,
+            request.TargetMembers.Select(member => new TrustedPackageStoreMemberDeclaration(
+                "default", member.MemberId, member.StateFilePath)));
+        var declarationCatalog = new TrustedPackageStoreMemberDeclarationCatalog(declarations);
+        var service = new PackageStoreEnrollmentService(files, registry, serializer, rootCatalog,
+            rootResolver, declarationCatalog, feedOptions);
+        var operation = new PackageStoreEnrollmentOperationRequest("default",
+            new PhysicalRootIdentity(files.InspectHandle(root).Identity), request.ExpectedEnrollmentEpoch,
+            true, request.TargetMembers.Select(static member => member.MemberId), request.CurrentMemberIds,
+            request.RetireMemberIds);
+
+        var result = await service.MigrateAsync(operation, CancellationToken.None).ConfigureAwait(false);
+        await WriteJsonLineAsync(new OperationResult("migrated", request.OperationId, Environment.ProcessId,
+            result.Status.ToString(), null, null, null, null)).ConfigureAwait(false);
+        return 0;
+    }
+
+    private static void PauseAtMigrationCheckpoint(MigrationProcessRequest request,
+        RootMembershipRegistry registry, PhysicalStoreDirectoryHandle root)
+    {
+        var ledger = registry.ReadCandidate(root);
+        var marker = ledger.PendingMembershipMigration
+            ?? throw new InvalidDataException("Migration interruption checkpoint has no durable schema-3 marker.");
+        WriteJsonLineAsync(new MigrationCheckpointMessage("migration-checkpoint", request.OperationId,
+            Environment.ProcessId, request.InterruptMemberId, ledger.Status.ToString(), ledger.EnrollmentEpoch,
+            ledger.SchemaVersion,
+            ledger.Members.Select(static member => member.MemberId).Order(StringComparer.Ordinal).ToArray(),
+            ledger.TargetMemberIds.Order(StringComparer.Ordinal).ToArray(), marker.PriorCompleteLedger.EnrollmentEpoch,
+            marker.PriorCompleteLedger.Members.Select(static member => member.MemberId).Order(StringComparer.Ordinal).ToArray(),
+            marker.MovedMemberIds.Order(StringComparer.Ordinal).ToArray(), ledger.PendingStateCommit is not null))
+            .GetAwaiter().GetResult();
+        WaitForContinueCommand(request.OperationId, "membership migration checkpoint", "parent checkpoint");
     }
 
     private static async Task<int> RunInitializeAsync(InitializationProcessRequest request)
@@ -407,6 +466,33 @@ internal static partial class Program
         return request;
     }
 
+    private static async Task<MigrationProcessRequest> ReadMigrationRequestAsync(string path)
+    {
+        var bytes = await ReadRequestBytesAsync(path).ConfigureAwait(false);
+        var request = JsonSerializer.Deserialize<MigrationProcessRequest>(bytes, JsonOptions)
+            ?? throw new InvalidDataException("The migration process request was empty.");
+        if (!Guid.TryParseExact(request.OperationId, "N", out _) ||
+            string.IsNullOrWhiteSpace(request.RootPath) || !Path.IsPathFullyQualified(request.RootPath) ||
+            request.ExpectedEnrollmentEpoch <= 0 ||
+            request.TargetMembers is null || request.TargetMembers.Length is < 1 or > 16 ||
+            request.TargetMembers.Any(static member => member is null ||
+                string.IsNullOrWhiteSpace(member.MemberId) || string.IsNullOrWhiteSpace(member.StateFilePath) ||
+                !Path.IsPathFullyQualified(member.StateFilePath)) ||
+            request.TargetMembers.Select(static member => member.MemberId).Distinct(StringComparer.Ordinal).Count() != request.TargetMembers.Length ||
+            request.CurrentMemberIds is null || request.CurrentMemberIds.Length is < 1 or > 16 ||
+            request.CurrentMemberIds.Any(string.IsNullOrWhiteSpace) ||
+            request.CurrentMemberIds.Distinct(StringComparer.Ordinal).Count() != request.CurrentMemberIds.Length ||
+            request.RetireMemberIds is null || request.RetireMemberIds.Any(string.IsNullOrWhiteSpace) ||
+            request.RetireMemberIds.Distinct(StringComparer.Ordinal).Count() != request.RetireMemberIds.Length ||
+            string.IsNullOrWhiteSpace(request.InterruptMemberId) || request.InterruptEnrollmentEpoch <= 0 ||
+            !request.TargetMembers.Any(member => string.Equals(member.MemberId, request.InterruptMemberId, StringComparison.Ordinal)))
+        {
+            throw new InvalidDataException("The migration process request fields were invalid.");
+        }
+
+        return request;
+    }
+
     private static async Task<InitializationProcessRequest> ReadInitializationRequestAsync(string path)
     {
         var bytes = await ReadRequestBytesAsync(path).ConfigureAwait(false);
@@ -492,6 +578,10 @@ internal static partial class Program
     private sealed record MembershipProcessRequest(string OperationId, string RootPath,
         string TargetMemberId, Dictionary<string, string> MemberParentPaths,
         string? Checkpoint, int NextStateDay);
+    private sealed record MigrationTargetRequest(string MemberId, string StateFilePath);
+    private sealed record MigrationProcessRequest(string OperationId, string RootPath, long ExpectedEnrollmentEpoch,
+        string[] CurrentMemberIds, MigrationTargetRequest[] TargetMembers, string[] RetireMemberIds,
+        string InterruptMemberId, long InterruptEnrollmentEpoch);
     private sealed record InitializationMemberRequest(string MemberId, string ConfiguredLocator);
     private sealed record InitializationProcessRequest(string OperationId, string RootPath, long EnrollmentEpoch,
         bool QuiescentCutoverConfirmed, InitializationMemberRequest[] DeclaredMembers, string? Checkpoint);
@@ -506,6 +596,10 @@ internal static partial class Program
         string Point, string? MembershipStatus, string? LedgerDigest, string[]? DeclaredMemberIds);
     private sealed record BindingCheckpointMessage(string Kind, string OperationId, int ProcessId,
         string Point, string MembershipStatus, string LedgerDigest, string[] MemberIds);
+    private sealed record MigrationCheckpointMessage(string Kind, string OperationId, int ProcessId,
+        string MemberId, string MembershipStatus, long EnrollmentEpoch, int SchemaVersion, string[] MemberIds,
+        string[] TargetMemberIds, long PriorCompleteEpoch, string[] PriorMemberIds,
+        string[] MovedMemberIds, bool HasPendingStateCommit);
     private sealed record OperationResult(string Kind, string OperationId, int ProcessId,
         string? MembershipStatus, string? LedgerDigest, bool? HasPending, string? RefusalReason, string? Message);
 

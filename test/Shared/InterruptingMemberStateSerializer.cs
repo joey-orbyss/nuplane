@@ -2,7 +2,10 @@ using Nuplane.Store.State;
 
 namespace Nuplane.Tests.Shared;
 
-internal sealed class InterruptingMemberStateSerializer(string memberId, long expectedEpoch)
+internal sealed class InterruptingMemberStateSerializer(
+    string memberId,
+    long expectedEpoch,
+    Action? beforeInterrupt = null)
     : IPackageProtectionStatePayloadSerializer
 {
     private readonly StoreStateSerializer _inner = new();
@@ -24,6 +27,7 @@ internal sealed class InterruptingMemberStateSerializer(string memberId, long ex
             protection.EnrollmentEpoch == expectedEpoch)
         {
             _thrown = true;
+            beforeInterrupt?.Invoke();
             throw new IOException("Simulated interruption while publishing a migration member.");
         }
         return _inner.WritePayloadAsync(payload, state, cancellationToken);

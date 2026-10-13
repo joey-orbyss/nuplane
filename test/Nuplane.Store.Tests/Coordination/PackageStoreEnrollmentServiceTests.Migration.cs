@@ -185,6 +185,62 @@ public sealed partial class PackageStoreEnrollmentServiceTests
     }
 
     [SupportedPhysicalStoreFact]
+    public async Task MigrateAsync_SecondMigrationRebasesInheritedRetirementAndPreservesPriorSources()
+    {
+        using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
+        var firstTargets = PrepareMigrationTargets(context);
+        var serializer = new StoreStateSerializer();
+        var firstMigration = await CreateMigrationService(context, serializer, firstTargets.Declarations)
+            .MigrateAsync(MigrationRequest(context, 1, ["first", "third"], ["first", "second"], ["second"]),
+                CancellationToken.None);
+        Assert.Equal(2, firstMigration.EnrollmentEpoch);
+        var afterFirst = context.Registry.ReadCandidate(context.Root);
+        var inheritedBefore = Assert.Single(afterFirst.RetiredMembers);
+        Assert.Equal("second", inheritedBefore.MemberId);
+        var originalSourceBytes = CaptureMemberBytes(context);
+        var firstMigrationSourceBytes = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+        {
+            ["first"] = File.ReadAllBytes(firstTargets.FirstPath),
+            ["third"] = File.ReadAllBytes(firstTargets.ThirdPath)
+        };
+        var secondTargets = PrepareSecondMigrationTargets(context);
+
+        var secondMigration = await CreateMigrationService(context, serializer, secondTargets.Declarations)
+            .MigrateAsync(MigrationRequest(context, 2, ["first", "fourth"], ["first", "third"], ["third"]),
+                CancellationToken.None);
+
+        Assert.Equal(RootMembershipStatus.Complete, secondMigration.Status);
+        Assert.Equal(3, secondMigration.EnrollmentEpoch);
+        var completed = context.Registry.ReadCandidate(context.Root);
+        Assert.Equal(RootMembershipStatus.Complete, completed.Status);
+        Assert.Equal(3, completed.EnrollmentEpoch);
+        Assert.Equal(new[] { "first", "fourth" }, completed.Members.Select(static member => member.MemberId)
+            .Order(StringComparer.Ordinal));
+        var inheritedAfter = Assert.Single(completed.RetiredMembers,
+            static retirement => retirement.MemberId == "second");
+        var newlyRetired = Assert.Single(completed.RetiredMembers,
+            static retirement => retirement.MemberId == "third");
+        Assert.Equal(3, inheritedAfter.RetiringEpoch);
+        Assert.Equal(3, newlyRetired.RetiringEpoch);
+        Assert.NotEqual(inheritedBefore.ProofDigest, inheritedAfter.ProofDigest);
+        Assert.Equal(inheritedBefore.PriorBinding.StateSlot, inheritedAfter.PriorBinding.StateSlot);
+        Assert.Equal(Path.GetFileName(firstTargets.ThirdPath), newlyRetired.PriorBinding.StateSlot.CanonicalBasename);
+        AssertMemberBytesEqual(originalSourceBytes, CaptureMemberBytes(context));
+        Assert.Equal(firstMigrationSourceBytes["first"], File.ReadAllBytes(firstTargets.FirstPath));
+        Assert.Equal(firstMigrationSourceBytes["third"], File.ReadAllBytes(firstTargets.ThirdPath));
+        Assert.True(File.Exists(secondTargets.FirstPath));
+        Assert.True(File.Exists(secondTargets.FourthPath));
+
+        var migratedFirst = await serializer.LoadAsync(secondTargets.FirstPath, CancellationToken.None);
+        Assert.Equal(3, migratedFirst.ProtectionRecord!.EnrollmentEpoch);
+        var verified = PersistedStoreStateGraphVerifier.Verify(migratedFirst);
+        Assert.NotEmpty(verified.ActiveGraphs);
+        Assert.NotEmpty(verified.RecoverableGraphs);
+        Assert.Equal(3, (await serializer.LoadAsync(secondTargets.FourthPath, CancellationToken.None))
+            .ProtectionRecord!.EnrollmentEpoch);
+    }
+
+    [SupportedPhysicalStoreFact]
     public async Task RecoverEnrollmentAsync_ResumesInterruptedRosterMigrationAfterPartialMemberPublication()
     {
         using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
@@ -289,6 +345,19 @@ public sealed partial class PackageStoreEnrollmentServiceTests
             new TrustedPackageStoreMemberDeclaration("default", "third", thirdPath)
         ]);
         return (declarations, firstPath, thirdPath);
+    }
+
+    private static (TrustedPackageStoreMemberDeclarationDefinition Declarations, string FirstPath, string FourthPath)
+        PrepareSecondMigrationTargets(RootMembershipProtectionVerificationTests.Context context)
+    {
+        var firstPath = context.Fixture.CreateStateSlot("relocated/second-first.json");
+        var fourthPath = context.Fixture.CreateStateSlot("new/fourth.json");
+        var declarations = new TrustedPackageStoreMemberDeclarationDefinition(true,
+        [
+            new TrustedPackageStoreMemberDeclaration("default", "first", firstPath),
+            new TrustedPackageStoreMemberDeclaration("default", "fourth", fourthPath)
+        ]);
+        return (declarations, firstPath, fourthPath);
     }
 
     private static PackageStoreEnrollmentService CreateMigrationService(
