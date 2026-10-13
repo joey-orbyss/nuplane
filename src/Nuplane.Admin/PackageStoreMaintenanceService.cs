@@ -22,7 +22,7 @@ internal sealed partial class PackageStoreMaintenanceService(
                 member.MemberId, member.BindingKind, member.Observation.ToString(), member.StateBodyDigest, Slot(member.StateSlot), member.StateFileIdentity,
                 member.ActiveVersionById, member.LastKnownGoodById,
                 Closure(member.ActiveClosure), Closure(member.RecoverableClosure), member.Migration.ToString(), member.Diagnostics))
-                .ToArray(), snapshot.Diagnostics);
+                .ToArray(), snapshot.Diagnostics, snapshot.CurrentMemberIds);
     }
 
     public Task<PackageStoreMaintenanceResult> InspectAsync(

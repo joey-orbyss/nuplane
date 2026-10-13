@@ -45,6 +45,7 @@ public sealed record PackageStoreEnrollmentMemberObservation(
 /// <param name="IsNonQuiescentObservation">True because observation does not prove that all users are stopped.</param>
 /// <param name="Members">The complete configured member observations.</param>
 /// <param name="Diagnostics">Root or declaration diagnostics.</param>
+/// <param name="CurrentMemberIds">The exact observed ledger roster, empty when unenrolled, or null when unavailable.</param>
 public sealed record PackageStoreEnrollmentPreviewResult(
     string RootLabel,
     PhysicalRootIdentity? RootIdentity,
@@ -53,4 +54,5 @@ public sealed record PackageStoreEnrollmentPreviewResult(
     string? LedgerDigest,
     bool IsNonQuiescentObservation,
     IReadOnlyList<PackageStoreEnrollmentMemberObservation> Members,
-    IReadOnlyList<string> Diagnostics);
+    IReadOnlyList<string> Diagnostics,
+    IReadOnlyList<string>? CurrentMemberIds = null);

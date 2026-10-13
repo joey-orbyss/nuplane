@@ -698,6 +698,9 @@ jobs:
               "Nuplane.Store.Tests.Coordination.PackageGraphUseLeaseLifetimeTests.FailedExplicitRelease_RetainsTheUncertainControlAndSentinel",
               "Nuplane.Store.Tests.Coordination.PackageGraphUseLeaseLifetimeTests.FailedTransferredRelease_IsRetainedDiagnosedAndNotRetried",
               "Nuplane.Store.Tests.Coordination.PackageGraphUseLeaseLifetimeTests.NativeSentinelLock_RemainsExclusiveUntilGraphReadPinsDrain",
+              "Nuplane.Store.Tests.Coordination.PackageGraphUseLeaseLifetimeTests.TransferToLifetime_RejectsCleanupThatIsItsLifetimeWithoutTransferringOwnership",
+              "Nuplane.Store.Tests.Coordination.PackageGraphUseLeaseLifetimeTests.TransferToCollectibleLifetime_DisposesNativeCleanupBeforeGraphUseSentinel",
+              "Nuplane.Store.Tests.Coordination.PackageGraphUseLeaseLifetimeTests.TransferToCollectibleLifetime_WhenNativeCleanupFails_RetainsSentinelAndDoesNotRetry",
               "Nuplane.Store.Tests.Coordination.PackageGraphUseLeaseLifetimeTests.TransferToCollectibleLifetime_ReleasesPassivelyAfterWeakDeathWithoutAnotherAdmission",
               "Nuplane.Store.Tests.Coordination.PackageGraphUseLeaseLifetimeTests.TransferToCollectibleLifetime_RetainsLeaseUntilFinalizationCompletes",
               "Nuplane.Store.Tests.Coordination.PackageGraphUseLeaseLifetimeTests.TransferToNonCollectibleLifetime_RetainsOwnerAfterCallerAndObserverDisposal",
@@ -714,6 +717,19 @@ jobs:
               raise SystemExit('graph-use-lifetime: every required scenario must pass without skips.')
           print(f'Qualified all {len(required)} graph-use-lifetime and passive-observer cases with no skips.')
           PYCODE
+
+      - name: Qualify owned native handle release after actual context death
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet test test/Nuplane.Loading.Tests/Nuplane.Loading.Tests.csproj \
+            --configuration Release --framework net10.0 \
+            --filter "FullyQualifiedName~NativeLibraryHandlePoolTests" \
+            --blame-hang-timeout 3m \
+            --logger "trx;LogFileName=native-library-handles.trx" \
+            --results-directory "$RUNNER_TEMP/native-library-handles"
+          python3 build/verify-required-trx.py "$RUNNER_TEMP/native-library-handles/native-library-handles.trx" \
+            build/test-cases/native-library-handles.json
 
       - name: Qualify completed collectible context finalization
         shell: bash

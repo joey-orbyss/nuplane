@@ -98,6 +98,7 @@ public sealed record PackageStoreRecoveryEvidence(
 /// <param name="ExpectedCurrentMemberIds">The complete current roster, empty only for first enrollment.</param>
 /// <param name="RetireMemberIds">Explicitly retired prior members; a smaller intended roster alone does not retire protection.</param>
 /// <param name="RecoveryEvidence">Optional complete, source-bound evidence for unknown legacy closures.</param>
+/// <param name="RetireLegacyRecoveryMemberIds">Explicitly retires unknown historical recovery selections for these members, with source-bound active evidence; active packages remain protected.</param>
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed record PackageStoreEnrollmentRequest(
     string RootLabel,
@@ -107,7 +108,8 @@ public sealed record PackageStoreEnrollmentRequest(
     IReadOnlyList<string> IntendedMemberIds,
     IReadOnlyList<string> ExpectedCurrentMemberIds,
     IReadOnlyList<string>? RetireMemberIds = null,
-    IReadOnlyList<PackageStoreRecoveryEvidence>? RecoveryEvidence = null);
+    IReadOnlyList<PackageStoreRecoveryEvidence>? RecoveryEvidence = null,
+    IReadOnlyList<string>? RetireLegacyRecoveryMemberIds = null);
 
 /// <summary>Describes one member's enrollment, recovery, migration or retirement.</summary>
 /// <param name="MemberId">The configured member identifier.</param>

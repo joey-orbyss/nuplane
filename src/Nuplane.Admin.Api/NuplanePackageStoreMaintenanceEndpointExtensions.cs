@@ -16,7 +16,7 @@ public static class NuplanePackageStoreMaintenanceEndpointExtensions
         Converters = { new JsonStringEnumConverter() }
     };
 
-    /// <summary>Maps explicit enrollment/recovery, enrollment preview, inspection and manual prune endpoints.</summary>
+    /// <summary>Maps explicit enrollment, migration and recovery, enrollment preview, inspection and manual prune endpoints.</summary>
     /// <remarks>Requires AddNuplanePackageStoreMaintenance. Apply the host's authorization policy to the returned group.</remarks>
     /// <param name="endpoints">The endpoint route builder.</param>
     /// <param name="prefix">The endpoint group prefix.</param>
@@ -43,6 +43,12 @@ public static class NuplanePackageStoreMaintenanceEndpointExtensions
                 RunAsync(async () => Report(await operations.RecoverEnrollmentAsync(
                     await ReadEnrollmentAsync(request, cancellationToken), cancellationToken))))
             .WithName("NuplaneRecoverPackageStoreEnrollment");
+        group.MapPost("/enrollment/migrate", (
+            [FromServices] INuplanePackageStoreMaintenanceOperations operations,
+            HttpRequest request, CancellationToken cancellationToken) =>
+                RunAsync(async () => Report(await operations.MigrateAsync(
+                    await ReadEnrollmentAsync(request, cancellationToken), cancellationToken))))
+            .WithName("NuplaneMigratePackageStoreEnrollment");
         group.MapGet("/inspection", (
             [FromServices] INuplanePackageStoreMaintenanceOperations operations,
             string? rootLabel, CancellationToken cancellationToken) =>

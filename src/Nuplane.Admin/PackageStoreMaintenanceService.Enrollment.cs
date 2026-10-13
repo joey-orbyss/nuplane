@@ -10,25 +10,35 @@ internal sealed partial class PackageStoreMaintenanceService
 {
     public Task<PackageStoreEnrollmentResult> EnrollAsync(
         PackageStoreEnrollmentRequest request, CancellationToken cancellationToken = default)
-        => RunEnrollmentAsync(request, recover: false, cancellationToken);
+        => RunEnrollmentAsync(request, EnrollmentOperation.Enroll, cancellationToken);
 
     public Task<PackageStoreEnrollmentResult> RecoverEnrollmentAsync(
         PackageStoreEnrollmentRequest request, CancellationToken cancellationToken = default)
-        => RunEnrollmentAsync(request, recover: true, cancellationToken);
+        => RunEnrollmentAsync(request, EnrollmentOperation.Recover, cancellationToken);
+
+    public Task<PackageStoreEnrollmentResult> MigrateAsync(
+        PackageStoreEnrollmentRequest request, CancellationToken cancellationToken = default)
+        => RunEnrollmentAsync(request, EnrollmentOperation.Migrate, cancellationToken);
+
+    private enum EnrollmentOperation { Enroll, Recover, Migrate }
 
     private async Task<PackageStoreEnrollmentResult> RunEnrollmentAsync(
-        PackageStoreEnrollmentRequest request, bool recover, CancellationToken cancellationToken)
+        PackageStoreEnrollmentRequest request, EnrollmentOperation operation, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         var candidate = new PackageStoreEnrollmentOperationRequest(request.RootLabel,
             request.ExpectedPhysicalRootIdentity, request.ExpectedEnrollmentEpoch, request.QuiescentCutoverConfirmed,
             request.IntendedMemberIds, request.ExpectedCurrentMemberIds, request.RetireMemberIds,
-            request.RecoveryEvidence?.Select(Evidence));
+            request.RecoveryEvidence?.Select(Evidence), request.RetireLegacyRecoveryMemberIds);
         try
         {
-            var result = recover
-                ? await enrollment.RecoverEnrollmentAsync(candidate, cancellationToken).ConfigureAwait(false)
-                : await enrollment.EnrollAsync(candidate, cancellationToken).ConfigureAwait(false);
+            var result = await (operation switch
+            {
+                EnrollmentOperation.Enroll => enrollment.EnrollAsync(candidate, cancellationToken),
+                EnrollmentOperation.Recover => enrollment.RecoverEnrollmentAsync(candidate, cancellationToken),
+                EnrollmentOperation.Migrate => enrollment.MigrateAsync(candidate, cancellationToken),
+                _ => throw new ArgumentOutOfRangeException(nameof(operation))
+            }).ConfigureAwait(false);
             return new(result.RootLabel, result.RootIdentity, result.EnrollmentEpoch, result.Status.ToString(),
                 result.Members.Select(static member => new PackageStoreEnrollmentMemberResult(
                     member.MemberId, member.Disposition.ToString(), member.Diagnostics)).ToArray(),

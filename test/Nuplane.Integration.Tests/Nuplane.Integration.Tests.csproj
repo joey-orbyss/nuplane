@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="..\Shared\OwnedProcessDirectory.cs" Link="Shared\OwnedProcessDirectory.cs" />
     <Compile Include="..\Shared\PackageStoreFixture.cs" Link="Shared\PackageStoreFixture.cs" />
+    <Compile Include="..\Shared\InterruptingMemberStateSerializer.cs" Link="Shared\InterruptingMemberStateSerializer.cs" />
     <ProjectReference Include="..\Nuplane.PackageStore.TestHost\Nuplane.PackageStore.TestHost.csproj"
                       ReferenceOutputAssembly="false" PrivateAssets="all" />
     <ProjectReference Include="..\..\src\Nuplane.Admin\Nuplane.Admin.csproj" />

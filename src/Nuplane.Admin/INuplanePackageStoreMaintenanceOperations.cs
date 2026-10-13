@@ -25,6 +25,13 @@ public interface INuplanePackageStoreMaintenanceOperations
     Task<PackageStoreEnrollmentResult> RecoverEnrollmentAsync(
         PackageStoreEnrollmentRequest request, CancellationToken cancellationToken = default);
 
+    /// <summary>Migrates the exact current roster to configured member state locations under full quiescence.</summary>
+    /// <param name="request">Exact observed root, epoch and current roster, complete intended roster and explicit retirements.</param>
+    /// <param name="cancellationToken">Cancels migration; an interrupted Incomplete ledger requires explicit recovery.</param>
+    /// <returns>Verified Complete publication at the next epoch, or a refusal requiring continued quiescence.</returns>
+    Task<PackageStoreEnrollmentResult> MigrateAsync(
+        PackageStoreEnrollmentRequest request, CancellationToken cancellationToken = default);
+
     /// <summary>Inspects membership, protection, live uses and package inventory without pruning.</summary>
     /// <param name="rootLabel">The configured root label.</param>
     /// <param name="cancellationToken">Cancels the inspection.</param>

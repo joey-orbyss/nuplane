@@ -141,6 +141,21 @@ public sealed class PackageGraphUseLeaseLifetimeTests
     }
 
     [Fact]
+    public async Task TransferToLifetime_RejectsCleanupThatIsItsLifetimeWithoutTransferringOwnership()
+    {
+        await using var observer = new PackageGraphUseLifetimeObserver();
+        var held = new TrackingOwnership();
+        var cleanup = new TrackingOwnership();
+        var (owner, _) = CreateOwner(held, observer);
+
+        Assert.Throws<ArgumentException>(() => owner.TransferToLifetime(cleanup, isCollectible: true, cleanup));
+        await owner.DisposeAsync();
+
+        Assert.Equal(1, held.DisposeCalls);
+        Assert.Equal(0, cleanup.DisposeCalls);
+    }
+
+    [Fact]
     public async Task TransferToCollectibleLifetime_DisposesNativeCleanupBeforeGraphUseSentinel()
     {
         await using var observer = new PackageGraphUseLifetimeObserver();

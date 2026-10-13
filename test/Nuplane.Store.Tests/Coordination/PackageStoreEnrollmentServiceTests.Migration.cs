@@ -189,7 +189,7 @@ public sealed partial class PackageStoreEnrollmentServiceTests
     {
         using var context = await RootMembershipProtectionVerificationTests.Context.CreateCompleteAsync();
         var targets = PrepareMigrationTargets(context);
-        var serializer = new ThrowOnceOnMemberWriteSerializer("third", expectedEpoch: 2);
+        var serializer = new InterruptingMemberStateSerializer("third", expectedEpoch: 2);
         var service = CreateMigrationService(context, serializer, targets.Declarations);
         var priorBytes = CaptureMemberBytes(context);
         var request = MigrationRequest(context, 1, ["first", "third"], ["first", "second"], ["second"]);
@@ -204,9 +204,14 @@ public sealed partial class PackageStoreEnrollmentServiceTests
         Assert.True(File.Exists(targets.FirstPath));
         Assert.False(File.Exists(targets.ThirdPath));
 
-        var recovered = await service.RecoverEnrollmentAsync(
+        await Assert.ThrowsAsync<PackageStoreAdmissionException>(() => service.RecoverEnrollmentAsync(
             MigrationRequest(context, 1, ["first", "third"], ["first", "second", "third"], ["second"]),
-            CancellationToken.None);
+            CancellationToken.None));
+        Assert.Equal(interrupted.LedgerDigest, context.Registry.ReadCandidate(context.Root).LedgerDigest);
+
+        var recovered = await service.RecoverEnrollmentAsync(
+            MigrationRequest(context, interrupted.EnrollmentEpoch, ["first", "third"],
+                interrupted.Members.Select(static member => member.MemberId), ["second"]), CancellationToken.None);
 
         Assert.Equal(RootMembershipStatus.Complete, recovered.Status);
         Assert.Equal(2, recovered.EnrollmentEpoch);
@@ -327,31 +332,4 @@ public sealed partial class PackageStoreEnrollmentServiceTests
         }
     }
 
-    private sealed class ThrowOnceOnMemberWriteSerializer(string memberId, long expectedEpoch)
-        : IPackageProtectionStatePayloadSerializer
-    {
-        private readonly StoreStateSerializer _inner = new();
-        private bool _thrown;
-
-        public Task<StoreStateRecord> LoadAsync(string stateFilePath, CancellationToken cancellationToken)
-            => _inner.LoadAsync(stateFilePath, cancellationToken);
-
-        public Task SaveAsync(string stateFilePath, StoreStateRecord state, CancellationToken cancellationToken)
-            => _inner.SaveAsync(stateFilePath, state, cancellationToken);
-
-        public Task<StoreStateRecord> ReadPayloadAsync(Stream payload, CancellationToken cancellationToken)
-            => _inner.ReadPayloadAsync(payload, cancellationToken);
-
-        public Task WritePayloadAsync(Stream payload, StoreStateRecord state, CancellationToken cancellationToken)
-        {
-            if (!_thrown && state.ProtectionRecord is { } protection &&
-                string.Equals(protection.MemberId, memberId, StringComparison.Ordinal) &&
-                protection.EnrollmentEpoch == expectedEpoch)
-            {
-                _thrown = true;
-                throw new IOException("Simulated interruption while publishing the added migration member.");
-            }
-            return _inner.WritePayloadAsync(payload, state, cancellationToken);
-        }
-    }
 }

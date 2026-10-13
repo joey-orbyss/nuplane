@@ -186,14 +186,13 @@ internal sealed class PackageStoreEnrollmentService
         {
             if (!recoverExisting)
                 throw Refused("A pending roster migration requires explicit recovery.", rootIdentity);
-            if (pendingMigration.PriorCompleteLedger.EnrollmentEpoch != request.ExpectedEnrollmentEpoch ||
-                candidate.EnrollmentEpoch != checked(request.ExpectedEnrollmentEpoch + 1) ||
+            if (candidate.EnrollmentEpoch != request.ExpectedEnrollmentEpoch ||
                 !actualMemberIds.SetEquals(request.ExpectedCurrentMemberIds))
-                throw Refused("Migration recovery must match the exact observed root, prior epoch and Incomplete old/new roster.", rootIdentity);
+                throw Refused("Migration recovery must match the exact observed root, Incomplete epoch and old/new roster.", rootIdentity);
             var migrationTargets = declarations.Select(declaration => new RootMemberRecord(declaration.MemberId,
                 declaration.StateFileLocator, new RootMemberRecord.DeclaredBinding())).ToArray();
             return await _registry.WithQuiescentMembershipMigrationLocationsAsync(root, rootIdentity,
-                request.ExpectedEnrollmentEpoch, request.ExpectedCurrentMemberIds, migrationTargets,
+                pendingMigration.PriorCompleteLedger.EnrollmentEpoch, request.ExpectedCurrentMemberIds, migrationTargets,
                 request.RetireMemberIds, authority, request.QuiescentCutoverConfirmed, recoverExisting: true,
                 (locked, token) => MigrateAndCompleteAsync(locked, request, recoveringMigration: true, cancellationToken: token),
                 cancellationToken).ConfigureAwait(false);
@@ -410,9 +409,12 @@ internal sealed class PackageStoreEnrollmentService
         var observedMigrationIds = recoveringMigration
             ? ledger.Members.Select(static member => member.MemberId).ToHashSet(StringComparer.Ordinal)
             : prior.Members.Select(static member => member.MemberId).ToHashSet(StringComparer.Ordinal);
+        var expectedEpoch = recoveringMigration
+            ? request.ExpectedEnrollmentEpoch : checked(request.ExpectedEnrollmentEpoch + 1);
+        var expectedPriorEpoch = recoveringMigration
+            ? checked(request.ExpectedEnrollmentEpoch - 1) : request.ExpectedEnrollmentEpoch;
         if (ledger.RootIdentity != request.ExpectedPhysicalRootIdentity ||
-            ledger.EnrollmentEpoch != checked(request.ExpectedEnrollmentEpoch + 1) ||
-            prior.EnrollmentEpoch != request.ExpectedEnrollmentEpoch ||
+            ledger.EnrollmentEpoch != expectedEpoch || prior.EnrollmentEpoch != expectedPriorEpoch ||
             !ledger.TargetMemberIds.ToHashSet(StringComparer.Ordinal).SetEquals(request.IntendedMemberIds) ||
             !observedMigrationIds.SetEquals(expectedCurrentIds))
             throw Refused("The locked migration marker differs from the explicit root/epoch/old-new roster request.", ledger.RootIdentity);

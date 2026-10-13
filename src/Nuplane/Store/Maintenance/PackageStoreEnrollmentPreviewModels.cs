@@ -185,7 +185,8 @@ internal sealed class PackageStoreEnrollmentPreviewSnapshot
         bool isNonQuiescentObservation,
         IEnumerable<PackageStoreEnrollmentPreviewMember> members,
         IEnumerable<string>? diagnostics = null,
-        long? enrollmentEpoch = null)
+        long? enrollmentEpoch = null,
+        IEnumerable<string>? currentMemberIds = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(rootLabel);
         ArgumentNullException.ThrowIfNull(members);
@@ -200,6 +201,9 @@ internal sealed class PackageStoreEnrollmentPreviewSnapshot
         IsNonQuiescentObservation = isNonQuiescentObservation;
         Members = Array.AsReadOnly(members.ToArray());
         Diagnostics = Array.AsReadOnly((diagnostics ?? []).ToArray());
+        CurrentMemberIds = membership == PackageStoreEnrollmentPreviewMembership.Unenrolled
+            ? Array.Empty<string>()
+            : currentMemberIds is null ? null : Array.AsReadOnly(currentMemberIds.OrderBy(static id => id, StringComparer.Ordinal).ToArray());
     }
 
     internal string RootLabel { get; }
@@ -210,6 +214,7 @@ internal sealed class PackageStoreEnrollmentPreviewSnapshot
     internal bool IsNonQuiescentObservation { get; }
     internal IReadOnlyList<PackageStoreEnrollmentPreviewMember> Members { get; }
     internal IReadOnlyList<string> Diagnostics { get; }
+    internal IReadOnlyList<string>? CurrentMemberIds { get; }
 }
 
 internal interface IPackageStoreEnrollmentPreviewService

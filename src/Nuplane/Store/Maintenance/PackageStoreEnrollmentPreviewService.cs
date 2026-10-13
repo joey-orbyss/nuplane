@@ -88,7 +88,7 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
             }
 
             if (candidate.Status == RootMembershipStatus.Complete && candidate.PendingStateCommit is null &&
-                candidate.PendingGroupPublicationV2 is null)
+                candidate.PendingGroupPublicationV2 is null && candidate.PendingMembershipMigration is null)
                 return await PreviewCompleteAsync(authority, configuredRoot, label, selectedDeclarations,
                     candidate, cancellationToken).ConfigureAwait(false);
 
@@ -171,7 +171,9 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
         var mismatch = CompareDeclarations(declarations, candidate);
         if (mismatch is not null)
             return Snapshot(label, candidate.RootIdentity, MapMembership(candidate.Status),
-                candidate.LedgerDigest, [], mismatch, candidate.EnrollmentEpoch);
+                candidate.LedgerDigest, [], candidate.PendingMembershipMigration is null ? mismatch
+                    : "PendingMembershipMigrationRecoveryRequired: " + mismatch, candidate.EnrollmentEpoch,
+                candidate.Members.Select(static member => member.MemberId));
 
         var resolved = ResolveDeclarations(authority, declarations, cancellationToken);
         Exception? operationFailure = null;
@@ -179,9 +181,11 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
         {
             if (resolved.Diagnostic is not null)
                 return Snapshot(label, candidate.RootIdentity, MapMembership(candidate.Status),
-                    candidate.LedgerDigest, [], resolved.Diagnostic, candidate.EnrollmentEpoch);
+                    candidate.LedgerDigest, [], resolved.Diagnostic, candidate.EnrollmentEpoch,
+                    candidate.Members.Select(static member => member.MemberId));
             var members = new List<PackageStoreEnrollmentPreviewMember>(declarations.Count);
-            var pending = candidate.PendingStateCommit is not null || candidate.PendingGroupPublicationV2 is not null;
+            var pending = candidate.PendingStateCommit is not null || candidate.PendingGroupPublicationV2 is not null ||
+                          candidate.PendingMembershipMigration is not null;
             for (var index = 0; index < declarations.Count; index++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -222,8 +226,8 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
             }
             return new PackageStoreEnrollmentPreviewSnapshot(label, candidate.RootIdentity,
                 MapMembership(candidate.Status), candidate.LedgerDigest, true, members,
-                pending ? ["Pending local or group publication requires recovery review; no next-slot binding was inferred."] : [],
-                candidate.EnrollmentEpoch);
+                pending ? ["Pending local, group or membership migration publication requires recovery review; no next-slot binding was inferred."] : [],
+                candidate.EnrollmentEpoch, candidate.Members.Select(static member => member.MemberId));
         }
         catch (Exception exception)
         {
@@ -253,6 +257,8 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
         var cleanupFailures = new List<Exception>();
         PhysicalRootIdentity? rootIdentity = candidate.RootIdentity;
         string? ledgerDigest = candidate.LedgerDigest;
+        var enrollmentEpoch = candidate.EnrollmentEpoch;
+        IEnumerable<string> currentMemberIds = candidate.Members.Select(static member => member.MemberId);
         try
         {
             borrow = await owner.BorrowAsync(cancellationToken).ConfigureAwait(false);
@@ -263,6 +269,8 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
             {
                 rootIdentity = selected.RootIdentity;
                 ledgerDigest = selected.Ledger.LedgerDigest;
+                enrollmentEpoch = selected.Ledger.EnrollmentEpoch;
+                currentMemberIds = selected.Ledger.Members.Select(static member => member.MemberId).ToArray();
                 failure = ValidateRetainedCatalogDeclarations(owner.SnapshotRetainedRoots());
                 if (failure is null)
                 {
@@ -365,7 +373,7 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
 
         return new PackageStoreEnrollmentPreviewSnapshot(label, rootIdentity,
             MapMembership(candidate.Status), ledgerDigest, true, members,
-            failure is null ? [] : [failure], candidate.EnrollmentEpoch);
+            failure is null ? [] : [failure], enrollmentEpoch, currentMemberIds);
     }
 
     private (ResolvedStatePayloadReferent[] Referents, string? Diagnostic) ResolveDeclarations(
@@ -622,8 +630,9 @@ internal sealed class PackageStoreEnrollmentPreviewService : IPackageStoreEnroll
         string? ledgerDigest,
         IEnumerable<PackageStoreEnrollmentPreviewMember> members,
         string diagnostic,
-        long? enrollmentEpoch = null)
-        => new(label, root, membership, ledgerDigest, true, members, [diagnostic], enrollmentEpoch);
+        long? enrollmentEpoch = null,
+        IEnumerable<string>? currentMemberIds = null)
+        => new(label, root, membership, ledgerDigest, true, members, [diagnostic], enrollmentEpoch, currentMemberIds);
 
     private static PackageStoreEnrollmentPreviewObservation Map(NativeStoreStatePayloadStatus status)
         => status switch

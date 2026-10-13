@@ -50,14 +50,18 @@ public sealed class PackageGraphUseLeaseOwner : IAsyncDisposable
     /// Transfers release authority to a weakly observed reader lifetime and disposes an additional
     /// lifetime-owned resource before releasing the package-graph use lease.
     /// </summary>
+    /// <remarks>The retained cleanup must not reference or capture the weakly observed lifetime; doing so prevents collection and retains protection indefinitely.</remarks>
     /// <param name="lifetime">The object whose actual lifetime controls release.</param>
     /// <param name="isCollectible">Whether collection after finalization may release this lease; noncollectible lifetimes remain protected until process exit.</param>
     /// <param name="cleanup">The resource to dispose after the lifetime ends and before the graph-use lease is released.</param>
+    /// <exception cref="ArgumentException">Cleanup is the lifetime itself.</exception>
     /// <exception cref="InvalidOperationException">The owner is disposed, was already transferred, or its control does not support lifetime cleanup.</exception>
     public void TransferToLifetime(object lifetime, bool isCollectible, IAsyncDisposable cleanup)
     {
         ArgumentNullException.ThrowIfNull(lifetime);
         ArgumentNullException.ThrowIfNull(cleanup);
+        if (ReferenceEquals(lifetime, cleanup))
+            throw new ArgumentException("Lifetime cleanup cannot be the weakly observed lifetime itself.", nameof(cleanup));
         lock (_sync)
         {
             if (_disposeRequested || _transferred)
