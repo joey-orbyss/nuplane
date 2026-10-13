@@ -62,6 +62,103 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         }
     }
 
+    [Fact]
+    public async Task ParticipantNativeExport_LoadedBeforeUnload_RemainsCallableAfterUnloadAndReleasesAfterDeath()
+    {
+        string? nativePath = null;
+        var fixture = await GraphUseFixture.CreateAsync(
+            beforeSharedDependencyCompletionMarker: packagePath =>
+                nativePath = NativeLibraryFixtureCompiler.CompileInto(Path.Combine(packagePath, "runtimes",
+                    RuntimeInformation.RuntimeIdentifier, "native")),
+            emitNativeProbeOnRootSecondV1: true);
+        ServiceProvider? provider = null;
+        Exception? failure = null;
+        try
+        {
+            Assert.NotNull(nativePath);
+            var nativeDigest = HashFile(nativePath!);
+            provider = fixture.CreateProvider("member-b",
+                desiredRequests: fixture.Graphs["member-b-v2"].Requests,
+                participant: true);
+
+            var proof = await LoadNativeExportBeforeAndCallAfterUnloadAsync(provider, fixture);
+            await WaitForWeakTargetDeathAsync(proof.Context);
+            await WaitForGraphUseSentinelReleaseAsync(fixture, proof.UseId, proof.SentinelIdentity);
+
+            Assert.False(IsWeakTargetAlive(proof.Context));
+            Assert.Equal(nativeDigest, HashFile(nativePath!));
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+        }
+        finally
+        {
+            await CompleteNativeLifetimeTestAsync(fixture, provider, failure);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static async Task<PreloadedNativeLifetimeProof> LoadNativeExportBeforeAndCallAfterUnloadAsync(
+        ServiceProvider provider,
+        GraphUseFixture fixture)
+    {
+        var loader = provider.GetRequiredService<PackageLoader>();
+        PackageGraphUseLeaseOwner? owner = null;
+        Exception? failure = null;
+        try
+        {
+            var graph = fixture.Graphs["member-b"];
+            owner = await AcquireGraphUseAsync(provider, graph);
+            var load = await provider.GetRequiredService<IScopedPackageLoader>().EnsureGraphLoadedAsync(
+                [graph.CreateEnvelope(owner)], [], CancellationToken.None);
+            Assert.Empty(load.FailedByPackageId);
+            load = null!;
+
+            provider.GetRequiredService<LoadingCatalogRefreshTracker>().MarkRefreshed("native-library-pre-unload-proof");
+            var marker = await FindSinglePackageMarkerTypeAsync(provider, "Root.Second");
+            Assert.Equal(NativeLibraryFixtureCompiler.ExpectedValue,
+                InvokeNativeProbe(marker));
+
+            var context = CaptureFacadeContextWeakReference(
+                provider, owner.Lease, marker, packageId: "Root.Second", version: "1.0.0");
+            var uses = await InspectGraphUseRecordsAsync(provider.GetRequiredService<IPackageStoreAdmission>(), fixture);
+            var use = Assert.Single(uses.Entries);
+            var leaseSnapshot = owner.Lease.Snapshot;
+
+            await owner.DisposeAsync();
+            owner = null;
+            loader.UnloadContextsNotActive(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+
+            ForceFullCollection();
+            Assert.True(IsWeakTargetAlive(context));
+            Assert.Equal(NativeLibraryFixtureCompiler.ExpectedValue, InvokeNativeProbe(marker));
+            Assert.True(IsWeakTargetAlive(context));
+            await AssertUseRemainsLiveAsync(provider, fixture, leaseSnapshot,
+                use.Record.UseId, use.Record.SentinelIdentity);
+
+            GC.KeepAlive(marker);
+            return new PreloadedNativeLifetimeProof(context, use.Record.UseId, use.Record.SentinelIdentity);
+        }
+        catch (Exception exception)
+        {
+            failure = exception;
+            throw;
+        }
+        finally
+        {
+            if (owner is not null)
+            {
+                try { await owner.DisposeAsync(); }
+                catch (Exception cleanupFailure) when (failure is not null)
+                {
+                    throw new AggregateException("Preloaded native-library lifetime proof and external-owner cleanup failed.",
+                        failure, cleanupFailure);
+                }
+            }
+        }
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static async Task<NativeLifetimeProof> AssertRetainedNativeExportAsync(
         GraphUseFixture fixture,
@@ -212,6 +309,11 @@ public sealed partial class OverlappingPackageGraphProtectionTests
         byte[] UseRecordBytes,
         IReadOnlyDictionary<string, byte[]> StateBytes,
         IReadOnlyDictionary<string, NativeInstallEvidence> InstallEvidence);
+
+    private sealed record PreloadedNativeLifetimeProof(
+        WeakReference Context,
+        Guid UseId,
+        PhysicalFileIdentity SentinelIdentity);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static async Task<Type> FindSinglePackageMarkerTypeAsync(IServiceProvider provider, string packageId)

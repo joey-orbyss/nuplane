@@ -141,6 +141,51 @@ public sealed class PackageGraphUseLeaseLifetimeTests
     }
 
     [Fact]
+    public async Task TransferToCollectibleLifetime_DisposesNativeCleanupBeforeGraphUseSentinel()
+    {
+        await using var observer = new PackageGraphUseLifetimeObserver();
+        var releaseOrder = new List<string>();
+        var held = new RecordingOwnership("sentinel", releaseOrder);
+        var cleanup = new RecordingOwnership("native", releaseOrder);
+        var (owner, _) = CreateOwner(held, observer);
+        var weakLifetime = TransferAndDropLifetime(owner, cleanup);
+
+        await owner.DisposeAsync();
+        await ForceCollectionAsync(weakLifetime);
+        await held.DisposeCompleted.Task.WaitAsync(WaitLimit);
+
+        Assert.False(IsLifetimeAlive(weakLifetime));
+        Assert.Equal(["native", "sentinel"], releaseOrder);
+        Assert.Equal(1, cleanup.DisposeCalls);
+        Assert.Equal(1, held.DisposeCalls);
+        await owner.DisposeAsync();
+        Assert.Equal(1, cleanup.DisposeCalls);
+        Assert.Equal(1, held.DisposeCalls);
+    }
+
+    [Fact]
+    public async Task TransferToCollectibleLifetime_WhenNativeCleanupFails_RetainsSentinelAndDoesNotRetry()
+    {
+        await using var observer = new PackageGraphUseLifetimeObserver();
+        var failure = new IOException("native handle release outcome is unknown");
+        var held = new TrackingOwnership();
+        var cleanup = new TrackingOwnership(failure);
+        var (owner, _) = CreateOwner(held, observer);
+        var weakLifetime = TransferAndDropLifetime(owner, cleanup);
+
+        await ForceCollectionAsync(weakLifetime);
+        await WaitForReleaseFailureAsync(owner, failure);
+
+        Assert.False(IsLifetimeAlive(weakLifetime));
+        Assert.Equal(1, cleanup.DisposeCalls);
+        Assert.Equal(0, held.DisposeCalls);
+        Assert.Same(failure, PackageGraphUseLifetimeRetention.GetReleaseFailure(owner));
+        await owner.DisposeAsync();
+        Assert.Equal(1, cleanup.DisposeCalls);
+        Assert.Equal(0, held.DisposeCalls);
+    }
+
+    [Fact]
     public async Task TransferToCollectibleLifetime_RetainsLeaseUntilFinalizationCompletes()
     {
         await using var observer = new PackageGraphUseLifetimeObserver();
@@ -407,6 +452,17 @@ public sealed class PackageGraphUseLeaseLifetimeTests
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference<object> TransferAndDropLifetime(
+        PackageGraphUseLeaseOwner owner,
+        IAsyncDisposable cleanup)
+    {
+        var lifetime = new object();
+        var weak = new WeakReference<object>(lifetime, trackResurrection: true);
+        owner.TransferToLifetime(lifetime, isCollectible: true, cleanup);
+        return weak;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private static (WeakReference<object> WeakLifetime, FinalizationGate Gate) TransferAndDropFinalizableLifetime(
         PackageGraphUseLeaseOwner owner)
     {
@@ -590,6 +646,22 @@ public sealed class PackageGraphUseLeaseLifetimeTests
             Interlocked.Increment(ref _disposeCalls);
             DisposeCompleted.TrySetResult(true);
             return _disposeFailure is null ? ValueTask.CompletedTask : ValueTask.FromException(_disposeFailure);
+        }
+    }
+
+    private sealed class RecordingOwnership(string label, List<string> releaseOrder) : IAsyncDisposable
+    {
+        private int _disposeCalls;
+
+        internal int DisposeCalls => Volatile.Read(ref _disposeCalls);
+        internal TaskCompletionSource<bool> DisposeCompleted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ValueTask DisposeAsync()
+        {
+            Interlocked.Increment(ref _disposeCalls);
+            releaseOrder.Add(label);
+            DisposeCompleted.TrySetResult(true);
+            return ValueTask.CompletedTask;
         }
     }
 

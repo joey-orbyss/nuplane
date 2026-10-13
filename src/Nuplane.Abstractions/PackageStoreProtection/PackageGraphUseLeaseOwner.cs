@@ -46,6 +46,33 @@ public sealed class PackageGraphUseLeaseOwner : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Transfers release authority to a weakly observed reader lifetime and disposes an additional
+    /// lifetime-owned resource before releasing the package-graph use lease.
+    /// </summary>
+    /// <param name="lifetime">The object whose actual lifetime controls release.</param>
+    /// <param name="isCollectible">Whether collection after finalization may release this lease; noncollectible lifetimes remain protected until process exit.</param>
+    /// <param name="cleanup">The resource to dispose after the lifetime ends and before the graph-use lease is released.</param>
+    /// <exception cref="InvalidOperationException">The owner is disposed, was already transferred, or its control does not support lifetime cleanup.</exception>
+    public void TransferToLifetime(object lifetime, bool isCollectible, IAsyncDisposable cleanup)
+    {
+        ArgumentNullException.ThrowIfNull(lifetime);
+        ArgumentNullException.ThrowIfNull(cleanup);
+        lock (_sync)
+        {
+            if (_disposeRequested || _transferred)
+                throw new InvalidOperationException("Lease release authority is no longer owned by this caller.");
+            if (_control is not IPackageGraphUseLeaseOwnerControlWithLifetimeCleanup cleanupControl)
+                throw new InvalidOperationException("Lease control does not support lifetime-owned cleanup.");
+
+            // Keep the actual reader weakly observed while retaining cleanup independently of the
+            // reader. The control disposes it before releasing the graph-use sentinel.
+            var weakLifetime = new WeakReference<object>(lifetime, trackResurrection: isCollectible);
+            cleanupControl.TransferToLifetime(this, weakLifetime, isCollectible, cleanup);
+            _transferred = true;
+        }
+    }
+
     /// <summary>Releases an untransferred lease after its counted reads drain.</summary>
     public ValueTask DisposeAsync()
     {

@@ -14,6 +14,7 @@ internal class PackageGraphLoadContext : AssemblyLoadContext, ISharedAssemblyPol
     private readonly IReadOnlyList<SharedAssemblyPolicyEntry> _sharedPolicy;
     private readonly SharedAssemblyPolicyMatcher _matcher;
     private readonly PackageGraphUseLease? _graphUseLease;
+    private readonly NativeLibraryHandlePool _nativeLibraryHandles = new();
 
     PackageGraphUseLease? IGraphUseLeaseBoundLoadContext.GraphUseLease => _graphUseLease;
     private static readonly Lazy<RuntimeGraph> RuntimeGraphProvider = new(LoadRuntimeGraph);
@@ -56,7 +57,10 @@ internal class PackageGraphLoadContext : AssemblyLoadContext, ISharedAssemblyPol
         _matcher = matcher ?? throw new ArgumentNullException(nameof(matcher));
         _packageInstallPaths = packageInstallPaths ?? throw new ArgumentNullException(nameof(packageInstallPaths));
         _graphUseLease = graphLeaseOwner?.Lease;
-        graphLeaseOwner?.TransferToLifetime(this, isCollectible);
+        if (graphLeaseOwner is null)
+            PackageNativeLibraryLifetimeRetention.Retain(this, _nativeLibraryHandles, isCollectible);
+        else
+            graphLeaseOwner.TransferToLifetime(this, isCollectible, _nativeLibraryHandles);
         _dependencyResolvers = mainAssemblyPaths.Select(static path => new AssemblyDependencyResolver(path)).ToArray();
         assemblyPathsByName = mainAssemblyPaths
             .SelectMany(path => Directory.EnumerateFiles(Path.GetDirectoryName(path)!, "*.dll", SearchOption.AllDirectories))
@@ -111,12 +115,12 @@ internal class PackageGraphLoadContext : AssemblyLoadContext, ISharedAssemblyPol
             var resolvedPath = resolver.ResolveUnmanagedDllToPath(unmanagedDllName);
             if (!string.IsNullOrWhiteSpace(resolvedPath))
             {
-                return LoadUnmanagedDllFromPath(resolvedPath);
+                return _nativeLibraryHandles.Load(resolvedPath);
             }
         }
 
         var nativePath = ResolveNativeLibraryPath(_packageInstallPaths, unmanagedDllName, RuntimeInformation.RuntimeIdentifier);
-        return nativePath is null ? IntPtr.Zero : LoadUnmanagedDllFromPath(nativePath);
+        return nativePath is null ? IntPtr.Zero : _nativeLibraryHandles.Load(nativePath);
     }
 
     internal static string? ResolveNativeLibraryPath(

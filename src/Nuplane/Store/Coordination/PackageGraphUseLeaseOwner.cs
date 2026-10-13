@@ -8,7 +8,9 @@ namespace Nuplane.Store.Coordination;
 /// The native root/use ownership is supplied by the validated core binding path. This type does not
 /// reopen paths or establish native identity; its exact path map is immutable for the lease lifetime.
 /// </remarks>
-internal sealed class PackageGraphUseLeaseOwnerControl : IPackageGraphUseLeaseOwnerControl
+internal sealed class PackageGraphUseLeaseOwnerControl :
+    IPackageGraphUseLeaseOwnerControl,
+    IPackageGraphUseLeaseOwnerControlWithLifetimeCleanup
 {
     private readonly object _gate = new();
     private readonly PhysicalRootIdentity _root;
@@ -19,6 +21,7 @@ internal sealed class PackageGraphUseLeaseOwnerControl : IPackageGraphUseLeaseOw
     private readonly IPhysicalStoreFileSystem? _nativeFileSystem;
     private readonly PackageGraphUseLeaseOwner _owner;
     private readonly PackageGraphUseLease _lease;
+    private IAsyncDisposable? _lifetimeCleanup;
 
     private TaskCompletionSource<bool>? _drained;
     private TaskCompletionSource<bool>? _closeCompletion;
@@ -114,6 +117,23 @@ internal sealed class PackageGraphUseLeaseOwnerControl : IPackageGraphUseLeaseOw
         PackageGraphUseLeaseOwner owner,
         WeakReference<object> lifetime,
         bool isCollectible)
+        => TransferToLifetimeCore(owner, lifetime, isCollectible, cleanup: null);
+
+    public void TransferToLifetime(
+        PackageGraphUseLeaseOwner owner,
+        WeakReference<object> lifetime,
+        bool isCollectible,
+        IAsyncDisposable cleanup)
+    {
+        ArgumentNullException.ThrowIfNull(cleanup);
+        TransferToLifetimeCore(owner, lifetime, isCollectible, cleanup);
+    }
+
+    private void TransferToLifetimeCore(
+        PackageGraphUseLeaseOwner owner,
+        WeakReference<object> lifetime,
+        bool isCollectible,
+        IAsyncDisposable? cleanup)
     {
         ArgumentNullException.ThrowIfNull(owner);
         ArgumentNullException.ThrowIfNull(lifetime);
@@ -138,6 +158,7 @@ internal sealed class PackageGraphUseLeaseOwnerControl : IPackageGraphUseLeaseOw
             if (!retained)
                 throw Refusal(PackageStoreAdmissionReason.UnsupportedParticipant, "The passive package-graph lifetime observer is not accepting collectible leases.");
 
+            _lifetimeCleanup = cleanup;
             _transferred = true;
         }
     }
@@ -198,6 +219,8 @@ internal sealed class PackageGraphUseLeaseOwnerControl : IPackageGraphUseLeaseOw
         try
         {
             await drain.ConfigureAwait(false);
+            if (_lifetimeCleanup is not null)
+                await _lifetimeCleanup.DisposeAsync().ConfigureAwait(false);
             await _heldOwnership.DisposeAsync().ConfigureAwait(false);
             lock (_gate)
                 _released = true;
