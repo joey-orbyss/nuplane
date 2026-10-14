@@ -1,6 +1,6 @@
 # Validation guide
 
-**Planning artifact:** the product suites and manual APIs below must be implemented before these scenarios can pass. No command in this guide is recorded as executed product acceptance. The existing artifact-only native probes described in [research.md](research.md) are separate design evidence.
+**Qualification guide:** the product APIs and suites below are implemented. Use [manual package-store maintenance](../../docs/package-store-maintenance.md) for configuration and public operations, and [public boundary evidence](evidence/public-maintenance.md) for the bounded results recorded so far. Final-head hosted qualification, stable package publication and downstream adoption remain required; this guide alone is not acceptance evidence. The artifact-only native probes described in [research.md](research.md) remain separate design evidence.
 
 Use unique owned temporary stores and state directories for every run. Never point the harness at an existing user/customer store. All local heavy commands use the machine's normal build-slot wrapper; do not bypass a queued slot. Build only affected projects until the final cross-cutting gate.
 
@@ -12,7 +12,7 @@ Preview enrollment, then explicitly enroll under the quiescent confirmation. Ver
 
 ## Non-destructive boundary gate first
 
-Run the focused store/runtime/loading suites after implementation:
+Run the focused store/runtime/loading suites:
 
 ```bash
 dotnet test test/Nuplane.Store.Tests/Nuplane.Store.Tests.csproj --configuration Release
@@ -36,16 +36,14 @@ Hold collectible context references after `Unload()` and prove leases remain pro
 
 Kill controlled children before/after sentinel publication, root Incomplete, each member write, pending state publication, state replacement and acknowledgement. Recover only exact old/new evidence and preserve persistent active/LKG graphs. Busy sentinel probes do not wait under root/state locks. Missing/mismatched evidence and failed stale cleanup refuse deletion. Normal File.Replace changes the current file ID while preserving the state slot; parent/name/hardlink substitutions refuse.
 
-Extend `.github/workflows/validate.yml` with the actual admission/deletion integration suites on ubuntu-latest, macos-latest and windows-latest, preserving existing state-persistence jobs. Capture exact source head, platform/filesystem identity, test counts and raw logs. A native lock probe or mocked planner is not deletion acceptance. Complete all supported platform gates before release.
+Run the implemented `.github/workflows/validate.yml` admission/deletion suites on Linux x64/arm64, macOS x64/arm64 and Windows x64, preserving existing state-persistence jobs. Capture exact source head, platform/filesystem identity, test counts and raw logs. A native lock probe or mocked planner is not deletion acceptance. Complete all supported platform gates before release.
 
 ## Final delivery evidence
 
 Independent self-review and root review accompany automated/behavioral gates; Copilot and Greptile are waived for this delivery. Record implementation and platform evidence on Nuplane #108/its PR. Then follow the parent program's ordered Nuplane release, CShells integration release and Foundation stable-pin/actual-host regression gates. Refresh live versions before selecting tags; do not overwrite existing releases. This work unit alone does not accept stable downstream delivery.
 
-For the internal locked two-state producer-to-Complete boundary and its exact limits, see [protected enrollment completion evidence](evidence/protected-enrollment-completion.md). Runtime admission, leases and destructive operations remain unaccepted.
+Earlier increment reports retain their historical acceptance limits. They do not describe the complete current implementation:
 
-For the native inventory and accepted pure retention mechanisms, see [inventory and retention evidence](evidence/inventory-and-retention.md). Inventory is qualified on all four hosted platforms; public preview/execution remains pending.
-
-For the internal fresh all-member/live-use inspection kernel and its causal protection control, see [fresh inspection evidence](evidence/fresh-inspection.md). Public operations, stale-use recovery and the actual maintenance/before-read gate remain pending.
-
-For the native same-handle control-recovery primitives and actual maintenance/retained-Loading overlap proof, see [the bounded increment evidence](evidence/native-control-recovery-and-maintenance-overlap.md). Whole driver/before-delete acceptance, stale-use recovery, public operations and physical execution remain pending.
+- [Protected enrollment completion](evidence/protected-enrollment-completion.md) and [public maintenance](evidence/public-maintenance.md) cover core completion and the later explicit public enrollment/migration/recovery boundary.
+- [Inventory and retention](evidence/inventory-and-retention.md), [fresh inspection](evidence/fresh-inspection.md), and [native control recovery and maintenance overlap](evidence/native-control-recovery-and-maintenance-overlap.md) describe the prerequisites for public physical execution.
+- The strict test manifests under `build/test-cases/` name mandatory cases for each hosted lane. Final delivery must retain raw results, source commit and actual package provenance; historical green runs do not qualify later edits.

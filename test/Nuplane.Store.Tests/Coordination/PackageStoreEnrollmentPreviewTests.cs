@@ -168,7 +168,7 @@ public sealed class PackageStoreEnrollmentPreviewTests
         Assert.Equal(PackageProtectionClosureKnowledge.Unknown, member.RecoverableClosure.Knowledge);
         Assert.Equal(stateBefore.ActiveVersionById, member.ActiveVersionById);
         Assert.Equal(stateBefore.LastKnownGoodById, member.LastKnownGoodById);
-        Assert.Contains("Pending local or group publication requires recovery review", Assert.Single(snapshot.Diagnostics));
+        Assert.Contains("Pending local, group or membership migration publication requires recovery review", Assert.Single(snapshot.Diagnostics));
         Assert.Equal(evidenceBefore, PackageStoreInspectionEvidenceCapture.Capture(context.Files,
             [context.Fixture.PackageInstallRoot], [declared.ConfiguredLocator, stagePath, backupPath]));
     }

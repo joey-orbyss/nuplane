@@ -157,7 +157,7 @@ The constitution requires prescriptive architectural requirements. Names below d
 ### Measurable Outcomes
 
 - **SC-001**: In all acceptance fixtures, default inspection and absent-retention operations remove zero packages and report every installed/protected/unknown entry accurately.
-- **SC-002**: Two independent persistent states sharing one root can reconcile, load and recover while all active/LKG and in-use graphs remain readable; a third unregistered or locally opted-out client cannot bypass enrolled-root protection.
+- **SC-002**: Two independent persistent states sharing one root can reconcile, load and recover while all active/LKG and in-use graphs remain readable; a third client configured for participation is denied managed package access when unregistered, even if its local pruning option is disabled. Ordinary uncoordinated clients remain compatible and outside this guarantee; the operator must include every store client in the quiescent enrollment cutover (FR-006).
 - **SC-003**: Explicit maintenance physically removes eligible unused installs, with zero protected-path deletions across overlap, stale-preview, dependency-sharing, alias and concurrent-operation scenarios.
 - **SC-004**: Every reported deletion matches an absent on-disk install, and every injected deletion failure/cancellation is reported accurately without erasing earlier outcomes.
 - **SC-005**: All supported crash-boundary scenarios recover either complete authority or a clear refusal, preserving active/LKG recovery. A live retired context remains readable; genuinely ended use eventually ceases to pin otherwise eligible installs.

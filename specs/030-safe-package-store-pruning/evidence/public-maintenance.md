@@ -28,12 +28,13 @@ durable marker supplies the prior Complete epoch internally.
 
 ## Qualification state
 
-The twelve public native/API cases cover preview preservation, missing-policy
+The thirteen public native/API cases cover preview preservation, missing-policy
 retention, protection added after preview, confirmation refusal, actual endpoint
 deletions, repeat execution, partial cancellation, opt-in routing, blank labels,
 arbitrary-path rejection, a real two-member initial cutover, recovery-evidence JSON
 transport, state-slot relocation/member addition/explicit retirement, and HTTP
-recovery after partial migration using preview epoch/roster values. Their names are included in the strict
+recovery after partial migration using preview epoch/roster values, including
+recovery after termination of an owned child process at a durable migration checkpoint. Their names are included in the strict
 retained-loading manifest for every supported native lane.
 
 The earlier October 12 local attempt 002 passed six cases and failed two JSON endpoint cases because

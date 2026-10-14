@@ -112,7 +112,7 @@ public sealed partial class RootMembershipNativeGroupPublicationTests
         var shared = snapshot.Members.Single(member => member.MemberId == "shared-a");
         Assert.Equal(context.NextState.ActiveVersionById, shared.ActiveVersionById);
         Assert.NotEmpty(shared.ActivationHistoryById);
-        Assert.Contains("Pending local or group publication requires recovery review", Assert.Single(snapshot.Diagnostics));
+        Assert.Contains("Pending local, group or membership migration publication requires recovery review", Assert.Single(snapshot.Diagnostics));
         var after = PackageStoreInspectionEvidenceCapture.Capture(context.Files,
             [context.RootAPath, context.RootBPath], statePaths.Append(context.StagePath).Append(context.BackupPath));
         Assert.Equal(before, after);
